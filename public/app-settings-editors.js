@@ -329,23 +329,19 @@ export function setupSettingsEditors({
   const inlineModelsInsertExample = document.getElementById("inline-models-insert-example");
   const modelsConfigDocsLink = document.getElementById("models-config-docs-link");
 
-  const MODELS_JSON_EXAMPLE = `{
-  "providers": {
-    "ollama": {
-      "baseUrl": "http://localhost:11434/v1",
-      "api": "openai-completions",
-      "apiKey": "ollama",
-      "compat": {
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
-      },
-      "models": [
-        { "id": "llama3.1:8b" },
-        { "id": "qwen2.5-coder:7b" }
-      ]
-    }
-  }
-}
+  // models.yml is YAML first (JSON is also accepted — it's a YAML subset), so
+  // the inserted example is YAML-shaped to match the file it will be saved to.
+  const MODELS_YAML_EXAMPLE = `providers:
+  ollama:
+    baseUrl: http://localhost:11434/v1
+    api: openai-completions
+    apiKey: ollama
+    compat:
+      supportsDeveloperRole: false
+      supportsReasoningEffort: false
+    models:
+      - id: llama3.1:8b
+      - id: qwen2.5-coder:7b
 `;
 
   function showInlineModelsError(message) {
@@ -363,6 +359,11 @@ export function setupSettingsEditors({
     if (inlineModelsPath) inlineModelsPath.textContent = "Loading...";
     try {
       const resp = await fetch("/api/models-config");
+      if (!resp.ok) {
+        // Surface the HTTP failure itself — parsing the error body would only
+        // produce a confusing "Unexpected token" parse error.
+        throw new Error(`Failed to load models.yml (HTTP ${resp.status})`);
+      }
       const data = await resp.json();
       if (!data.success) throw new Error(data.error || "Failed to load models.yml");
       try {
@@ -427,7 +428,7 @@ export function setupSettingsEditors({
     if (current && current !== "{}" && current !== '{\n  "providers": {}\n}') {
       if (!confirm("Replace current content with the Ollama example?")) return;
     }
-    inlineModelsTextarea.value = MODELS_JSON_EXAMPLE;
+    inlineModelsTextarea.value = MODELS_YAML_EXAMPLE;
     clearInlineModelsError();
   });
 

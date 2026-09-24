@@ -227,16 +227,25 @@ async fn pick_omp_binary_core(app: &AppHandle) -> Result<Option<String>, String>
     };
 
     let picked_path = PathBuf::from(&picked);
-    omp_manager::validate_omp_binary(&picked_path)?;
-
     let config_dir = app
         .path()
         .app_config_dir()
         .map_err(|e| format!("Failed to resolve app config dir: {}", e))?;
-    let stored = omp_manager::normalize_override_path(&picked_path);
-    omp_manager::save_override(&config_dir, &stored)?;
-    log::info!("[ompcot] omp binary override saved: {}", stored.display());
-    Ok(Some(stored.to_string_lossy().into_owned()))
+
+    // Validation spawns a child process (`<path> --version`, with its own
+    // internal timeout) and persistence does canonicalize + file IO — all
+    // blocking, so run it on the blocking pool instead of the async runtime
+    // (R5). The outward signature — Result<Option<String>, String> — is
+    // unchanged for both call sites (Tauri command + broker control arm).
+    tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+        omp_manager::validate_omp_binary(&picked_path)?;
+        let stored = omp_manager::normalize_override_path(&picked_path);
+        omp_manager::save_override(&config_dir, &stored)?;
+        log::info!("[ompcot] omp binary override saved: {}", stored.display());
+        Ok(Some(stored.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|e| format!("omp binary pick task failed: {}", e))?
 }
 
 /// A launchable external app target (editor / terminal / file manager).
@@ -491,13 +500,21 @@ fn open_workspace_window(app: &AppHandle, port: u16, broker_ws_url: &str) -> Res
     let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))
         .map_err(|e| format!("Failed to load window icon: {}", e))?;
 
-    let builder =
-        WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url.parse().unwrap()))
-            .title("Ompcot")
-            .inner_size(1300.0, 860.0)
-            .min_inner_size(800.0, 600.0)
-            .icon(icon)
-            .map_err(|e| e.to_string())?;
+    // Map the parse failure instead of panicking on the window-creation
+    // path (R6): the URL is built from a localhost port + percent-encoded
+    // broker URL and should always parse, but a malformed broker URL must
+    // degrade into a returned error (callers already log it) rather than
+    // crash the process.
+    let parsed_url = url
+        .parse()
+        .map_err(|e| format!("Invalid workspace URL {}: {}", url, e))?;
+
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(parsed_url))
+        .title("Ompcot")
+        .inner_size(1300.0, 860.0)
+        .min_inner_size(800.0, 600.0)
+        .icon(icon)
+        .map_err(|e| e.to_string())?;
 
     // macOS: extend WebView into title bar; traffic lights float on top.
     #[cfg(target_os = "macos")]

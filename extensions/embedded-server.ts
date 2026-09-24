@@ -30,7 +30,7 @@
  *   `OMCOT_OMP_VERSION` env var.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
@@ -120,10 +120,155 @@ function resolveOmpAgentRoot(): string {
 
 const OMP_AGENT_ROOT = resolveOmpAgentRoot();
 
+// ─── Network exposure (audit A5) ──────────────────────────────────────────────
+//
+// Loopback by default. Binding 0.0.0.0 (LAN-exposed) happens ONLY when the
+// user opts in:
+//   1. `LAN_BIND_HOST` env set → honored verbatim (explicit configuration)
+//   2. `OMCOT_LAN` env is "1" / "true" → bind all interfaces
+//   3. default → 127.0.0.1
+// Everything else (CORS, LAN URL/QR payloads) derives from BIND_HOST below.
+export const LOOPBACK_BIND_HOST = "127.0.0.1";
 export const LAN_BIND_HOST = "0.0.0.0";
 
+export function resolveBindHost(): string {
+  const explicit = process.env.LAN_BIND_HOST?.trim();
+  if (explicit) return explicit;
+  const lan = process.env.OMCOT_LAN?.trim().toLowerCase();
+  if (lan === "1" || lan === "true") return LAN_BIND_HOST;
+  return LOOPBACK_BIND_HOST;
+}
+
+function isLanBindEnabled(): boolean {
+  return !isLoopbackHost(BIND_HOST);
+}
+
 function isLoopbackHost(host: string): boolean {
-  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  if (host === "127.0.0.1" || host === "localhost" || host === "::1") return true;
+  // 127.0.0.0/8 — the whole IPv4 loopback block, not just .1
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+// ─── Host header parsing (audit A10) ──────────────────────────────────────────
+//
+// `host.split(":")[0]` mangles bracketed IPv6 Host headers ("[::1]:47821"
+// → "[", silently non-loopback). Parse bracket-aware instead.
+
+// Parse a Host header into { hostname, port }. Bracketed IPv6 literals
+// ("[::1]:47821" → hostname "::1") and bare IPv6 literals (no port) are
+// handled; anything unparsable yields empty strings (callers fail closed).
+export function parseHostHeader(host: string): { hostname: string; port: string } {
+  const trimmed = host.trim();
+  if (!trimmed) return { hostname: "", port: "" };
+  if (trimmed.startsWith("[")) {
+    const close = trimmed.indexOf("]");
+    if (close < 2) return { hostname: "", port: "" };
+    const rest = trimmed.slice(close + 1);
+    return { hostname: trimmed.slice(1, close), port: rest.startsWith(":") ? rest.slice(1) : "" };
+  }
+  const firstColon = trimmed.indexOf(":");
+  if (firstColon === -1) return { hostname: trimmed, port: "" };
+  // Multiple colons without brackets = bare IPv6 literal, no port suffix.
+  if (trimmed.indexOf(":", firstColon + 1) !== -1) return { hostname: trimmed, port: "" };
+  return { hostname: trimmed.slice(0, firstColon), port: trimmed.slice(firstColon + 1) };
+}
+
+export function parseHostHeaderName(host: string): string {
+  return parseHostHeader(host).hostname;
+}
+
+// ─── CORS origin trust (audit A5) ─────────────────────────────────────────────
+//
+// No wildcard `Access-Control-Allow-Origin`. The header is only emitted when
+// the request carries an Origin that is either loopback (the WebView / local
+// dev pages) or identical to the request's own Host (same-origin fetch with
+// an explicit Origin). Same-origin requests — the normal WebView case — send
+// no Origin at all and don't need CORS.
+function isTrustedCorsOrigin(originHeader: string, reqHost: string): boolean {
+  let origin: URL;
+  try {
+    origin = new URL(originHeader);
+  } catch {
+    return false;
+  }
+  if (origin.protocol !== "http:" && origin.protocol !== "https:") return false;
+  if (isLoopbackHost(origin.hostname.toLowerCase())) return true;
+  const { hostname: reqHostName, port: reqPort } = parseHostHeader(reqHost);
+  if (!reqHostName || reqHostName.toLowerCase() !== origin.hostname) return false;
+  // Host omits the port when it is the scheme default; URL parses the port
+  // away in that case too, so compare what each side carries.
+  const originPort = origin.port || (origin.protocol === "https:" ? "443" : "80");
+  return !reqPort || reqPort === originPort;
+}
+
+// ─── Request body cap (audit A6) ──────────────────────────────────────────────
+
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MiB
+
+// Read a request body with a hard size cap. Oversized payloads are answered
+// with 413 and the body is never handed to the route handler; subsequent
+// chunks are drained without accumulating so the connection stays healthy.
+function readCappedBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  onBody: (body: string) => void | Promise<void>,
+): void {
+  let body = "";
+  let received = 0;
+  let overflowed = false;
+  req.on("data", (chunk: Buffer) => {
+    if (overflowed) return; // drain mode: discard, don't accumulate
+    received += chunk.length;
+    if (received > MAX_BODY_BYTES) {
+      overflowed = true;
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "payload too large" }));
+      return;
+    }
+    body += chunk.toString();
+  });
+  req.on("end", () => {
+    if (overflowed) return;
+    try {
+      const result = onBody(body);
+      if (result && typeof (result as Promise<void>).then === "function") {
+        (result as Promise<void>).catch((err: unknown) => {
+          console.error("[embedded-server] body handler failed:", err);
+        });
+      }
+    } catch (err: unknown) {
+      console.error("[embedded-server] body handler failed:", err);
+    }
+  });
+}
+
+// Bun-adapter counterpart: read a web `Request` body with the same cap.
+// Resolves `null` when the payload exceeds MAX_BODY_BYTES (caller answers 413).
+async function readCappedBodyBun(req: Request): Promise<string | null> {
+  if (!req.body) return "";
+  const decoder = new TextDecoder();
+  let size = 0;
+  let body = "";
+  const reader = req.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      size += value.byteLength;
+      if (size > MAX_BODY_BYTES) {
+        try {
+          await reader.cancel();
+        } catch {}
+        return null;
+      }
+      body += decoder.decode(value, { stream: true });
+    }
+    body += decoder.decode();
+  } catch {
+    return null;
+  }
+  return body;
 }
 
 function findLanHosts(): string[] {
@@ -174,7 +319,7 @@ function loadSettings(): { port: number } {
 
 const SETTINGS = loadSettings();
 const PORT = SETTINGS.port;
-const BIND_HOST = LAN_BIND_HOST;
+const BIND_HOST = resolveBindHost();
 // Forwarded by Ompcot (Rust side) from `scripts/omp-version.json`. We deliberately
 // do not call `omp --version` here: this extension always runs *inside* the pi
 // binary Ompcot spawned, so the version is known.
@@ -567,6 +712,89 @@ function execFileText(command: string, args: string[], timeoutMs: number): Promi
       else resolve(typeof stdout === "string" ? stdout : String(stdout ?? ""));
     });
   });
+}
+
+// ─── External terminal launch (audit A2) ──────────────────────────────────────
+//
+// Opens a terminal window running `omp` in `dir` (user's PATH — the legacy
+// "open in external terminal" affordance). Security properties:
+//   - No shell string building anywhere: every child process is spawned with
+//     an argv array, so the caller-controlled directory path is never
+//     interpreted as shell metacharacters.
+//   - On macOS the path reaches the terminal's shell via AppleScript
+//     `on run argv` + `quoted form of` — osascript receives it as a literal
+//     argument and does the shell-quoting itself.
+//   - The result reports the real outcome; callers must not claim success
+//     when every launch attempt failed.
+type TerminalOpenResult = { ok: true } | { ok: false; error: string };
+
+const TERMINAL_LAUNCH_TIMEOUT_MS = 15000;
+
+async function openTerminalInDirectory(dir: string): Promise<TerminalOpenResult> {
+  if (process.platform === "darwin") {
+    // `do script` runs its argument as a shell command inside Terminal; the
+    // command string is composed *inside AppleScript* from the literal argv
+    // entry, so `dir` can't break out of quoting.
+    const viaTerminal = [
+      "on run argv",
+      '  tell application "Terminal"',
+      '    do script "cd " & quoted form of item 1 of argv & " && omp"',
+      "    activate",
+      "  end tell",
+      "end run",
+    ].join("\n");
+    const viaITerm2 = [
+      "on run argv",
+      '  tell application "iTerm2"',
+      '    create window with default profile command "cd " & quoted form of item 1 of argv & " && omp"',
+      "  end tell",
+      "end run",
+    ].join("\n");
+    try {
+      await execFileText("osascript", ["-e", viaTerminal, "--", dir], TERMINAL_LAUNCH_TIMEOUT_MS);
+      return { ok: true };
+    } catch (terminalErr: unknown) {
+      try {
+        await execFileText("osascript", ["-e", viaITerm2, "--", dir], TERMINAL_LAUNCH_TIMEOUT_MS);
+        return { ok: true };
+      } catch (itermErr: unknown) {
+        return {
+          ok: false,
+          error: `Failed to open a terminal (Terminal: ${errMessage(terminalErr)}; iTerm2: ${errMessage(itermErr)})`,
+        };
+      }
+    }
+  }
+
+  if (process.platform === "win32") {
+    // `cmd /k omp` in a new console window: `cwd` pins the directory without
+    // the path ever appearing on a shell command line. `detached: true` gives
+    // the child its own console; stdio ignored keeps it independent of us.
+    return await new Promise<TerminalOpenResult>((resolve) => {
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn("cmd.exe", ["/k", "omp"], {
+          cwd: dir,
+          detached: true,
+          stdio: "ignore",
+          shell: false,
+        });
+      } catch (e: unknown) {
+        resolve({ ok: false, error: errMessage(e) });
+        return;
+      }
+      child.on("error", (e: Error) => resolve({ ok: false, error: errMessage(e) }));
+      child.once("spawn", () => resolve({ ok: true }));
+      child.unref();
+    });
+  }
+
+  // No terminal-launch path for this platform — report failure honestly
+  // instead of pretending the workspace was opened.
+  return {
+    ok: false,
+    error: `Opening an external terminal is not supported on this platform (${process.platform})`,
+  };
 }
 
 function getOrCreateGlobalState(): EmbeddedServerGlobal {
@@ -1352,17 +1580,25 @@ export default function (omp: ExtensionAPI) {
           try {
             const sessionFile = ctx.sessionManager.getSessionFile();
             if (!sessionFile) throw new Error("No session file to export");
-            const { execSync } = require("node:child_process");
-            const args = command.outputPath
-              ? `"${sessionFile}" "${command.outputPath}"`
-              : `"${sessionFile}"`;
-            // process.execPath at runtime is the embedded omp binary, which
-            // supports --export when invoked as a top-level CLI.
-            const output = execSync(`"${process.execPath}" --export ${args}`, {
-              cwd: process.cwd(),
-              timeout: 30000,
-              encoding: "utf-8",
-            });
+            // Argv-array exec — no shell involved, so the request-controlled
+            // `outputPath` can never inject command syntax (audit A1).
+            // `resolveOmpCliInvocation` handles both process layouts:
+            // compiled binary (execPath IS omp) and shim installs (execPath
+            // is the runtime with the omp entry script at argv[1]).
+            const { cmd, prefix } = resolveOmpCliInvocation();
+            const outputPath =
+              typeof command.outputPath === "string" && command.outputPath
+                ? command.outputPath
+                : "";
+            const output = execFileSync(
+              cmd,
+              [...prefix, "--export", sessionFile, ...(outputPath ? [outputPath] : [])],
+              {
+                cwd: process.cwd(),
+                timeout: 30000,
+                encoding: "utf-8",
+              },
+            );
             // omp prints the output path
             const result =
               output.trim().split("\n").pop() || sessionFile.replace(".jsonl", ".html");
@@ -1424,8 +1660,8 @@ export default function (omp: ExtensionAPI) {
     // need to manually append ?mobile=1&brokerWs=... to the LAN address.
     const brokerPort = Number.parseInt(process.env.OMCOT_BROKER_PORT || "", 10);
     const host = req.headers.host || "";
-    const hostName = host.split(":")[0];
-    const isLoopback = hostName === "localhost" || hostName === "127.0.0.1" || hostName === "::1";
+    const hostName = parseHostHeaderName(host);
+    const isLoopback = isLoopbackHost(hostName);
     const rawPath = urlPath.split("?")[0];
     const hasParams = urlPath.includes("mobile=1");
     if (
@@ -1708,8 +1944,19 @@ export default function (omp: ExtensionAPI) {
   ) {
     urlPath = normalizeApiRoutePath(urlPath);
 
-    // CORS headers
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    // CORS (audit A5): never a wildcard. Mirror the Origin only when it is a
+    // loopback origin or matches this request's own Host (same-origin fetch
+    // with an explicit Origin). Same-origin WebView requests carry no Origin
+    // header at all and need no CORS.
+    const originHeader = req.headers.origin;
+    if (
+      typeof originHeader === "string" &&
+      originHeader &&
+      isTrustedCorsOrigin(originHeader, req.headers.host || "")
+    ) {
+      res.setHeader("Access-Control-Allow-Origin", originHeader);
+      res.setHeader("Vary", "Origin");
+    }
     res.setHeader("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
@@ -1728,10 +1975,13 @@ export default function (omp: ExtensionAPI) {
         status: "ok",
         mode: "embedded",
         mirrorUrl: globalState.localUrl,
+        // Audit A5: let the UI distinguish loopback vs LAN mode.
+        lanEnabled: isLanBindEnabled(),
+        bindMode: isLanBindEnabled() ? "lan" : "loopback",
+        bindHost: BIND_HOST,
       };
       const lanUrls = buildLanUrls(globalState.server?.port || PORT);
-      if (!isLoopbackHost(BIND_HOST)) {
-        healthPayload.bindHost = BIND_HOST;
+      if (isLanBindEnabled()) {
         healthPayload.lanUrl = lanUrls[0] || null;
         healthPayload.lanUrls = lanUrls;
       }
@@ -1743,14 +1993,32 @@ export default function (omp: ExtensionAPI) {
       const lanUrls = buildLanUrls(globalState.server?.port || PORT);
       const url = lanUrls[0] || "";
       if (!url) {
+        // Audit A5: in loopback mode there is no LAN URL to encode; keep the
+        // 404 contract but tell the UI why via the mode fields.
         res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "LAN URL unavailable" }));
+        res.end(
+          JSON.stringify({
+            error: "LAN URL unavailable",
+            lanEnabled: false,
+            bindMode: "loopback",
+            bindHost: BIND_HOST,
+          }),
+        );
         return;
       }
       try {
         const dataUrl = await QRCode.toDataURL(url, { width: 280, margin: 2 });
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ dataUrl, url }));
+        res.end(
+          JSON.stringify({
+            dataUrl,
+            url,
+            // Audit A5: distinguish loopback vs LAN mode for the UI.
+            lanEnabled: true,
+            bindMode: "lan",
+            bindHost: BIND_HOST,
+          }),
+        );
       } catch {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Failed to generate QR code" }));
@@ -1767,7 +2035,6 @@ export default function (omp: ExtensionAPI) {
     if (urlPath === "/api/instances") {
       res.writeHead(200, {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
       });
       res.end(JSON.stringify({ instances: getRunningInstances() }));
       return;
@@ -1841,11 +2108,7 @@ export default function (omp: ExtensionAPI) {
 
     // File browser: open file natively (or hand a URL off to the OS default browser).
     if (urlPath === "/api/open" && req.method === "POST") {
-      let body = "";
-      req.on("data", (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-      req.on("end", () => {
+      readCappedBody(req, res, (body) => {
         try {
           const { filePath: fp } = JSON.parse(body);
           if (!fp || typeof fp !== "string") {
@@ -1879,41 +2142,64 @@ export default function (omp: ExtensionAPI) {
 
     // RPC proxy — handle via WebSocket command handler
     if (urlPath === "/api/rpc" && req.method === "POST") {
-      let body = "";
-      req.on("data", (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-      req.on("end", async () => {
+      readCappedBody(req, res, async (body) => {
+        let command: RpcCommand;
         try {
-          const command = JSON.parse(body);
-          // Create a fake WebSocket-like object to capture the response
-          const responsePromise = new Promise<unknown>((resolve) => {
+          const parsed: unknown = JSON.parse(body);
+          // Audit A4: a body that is not a non-null object with a string
+          // `type` used to make handleCommand throw synchronously inside a
+          // Promise executor, so the response never settled and the request
+          // hung forever. Reject it up front instead.
+          if (
+            typeof parsed !== "object" ||
+            parsed === null ||
+            typeof (parsed as { type?: unknown }).type !== "string"
+          ) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({ error: "RPC body must be a JSON object with a string 'type'" }),
+            );
+            return;
+          }
+          command = parsed as RpcCommand;
+        } catch (e: unknown) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: errMessage(e) }));
+          return;
+        }
+        try {
+          // Create a fake WebSocket-like object to capture the response.
+          // ANY failure before the response frame is registered (sync throw
+          // or rejection inside handleCommand) rejects this promise so the
+          // HTTP request gets an error response instead of hanging (A4).
+          const response = await new Promise<unknown>((resolve, reject) => {
             const fakeWs: UnifiedWS = {
               readyState: WS_OPEN,
-              send: (data: string) => resolve(JSON.parse(data)),
+              send: (data: string) => {
+                try {
+                  resolve(JSON.parse(data));
+                } catch (e: unknown) {
+                  reject(e);
+                }
+              },
               close: () => {},
               terminate: () => {},
               ping: () => {},
             };
-            handleCommand(fakeWs, command);
+            Promise.resolve(handleCommand(fakeWs, command)).catch(reject);
           });
-          const response = await responsePromise;
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(response));
         } catch (e: unknown) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: errMessage(e) }));
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: command.id ?? null, error: errMessage(e) }));
         }
       });
       return;
     }
 
     if (urlPath === "/api/sessions/delete-batch" && req.method === "POST") {
-      let body = "";
-      req.on("data", (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-      req.on("end", async () => {
+      readCappedBody(req, res, async (body) => {
         try {
           const { filePaths } = JSON.parse(body);
           if (!Array.isArray(filePaths)) {
@@ -1925,14 +2211,41 @@ export default function (omp: ExtensionAPI) {
           let deleted = 0;
           const errors: string[] = [];
           const resolvedSessionsDir = path.resolve(SESSIONS_DIR);
+          // Audit A9: containment must hold against the *real* filesystem
+          // paths, not just lexical prefixes — a symlink inside the sessions
+          // tree pointing outside must be rejected. If the sessions dir
+          // itself can't be resolved, nothing is deletable.
+          let realSessionsDir: string | null = null;
+          try {
+            realSessionsDir = fs.realpathSync(resolvedSessionsDir);
+          } catch {}
 
           for (const fp of filePaths) {
-            // Safety: must be a string, end with .jsonl, and resolve inside SESSIONS_DIR
+            // Safety: must be a string, end with .jsonl, resolve strictly
+            // inside SESSIONS_DIR lexically, AND its realpath must stay
+            // strictly inside the realpath of SESSIONS_DIR (symlink escape
+            // rejected).
             if (
               typeof fp !== "string" ||
               !fp.endsWith(".jsonl") ||
               !path.resolve(fp).startsWith(resolvedSessionsDir + path.sep)
             ) {
+              errors.push(fp);
+              continue;
+            }
+            if (!realSessionsDir) {
+              errors.push(fp);
+              continue;
+            }
+            let realFp: string;
+            try {
+              realFp = fs.realpathSync(path.resolve(fp));
+            } catch {
+              // Missing/unresolvable target — report as error, never delete.
+              errors.push(fp);
+              continue;
+            }
+            if (!realFp.startsWith(realSessionsDir + path.sep)) {
               errors.push(fp);
               continue;
             }
@@ -1971,11 +2284,7 @@ export default function (omp: ExtensionAPI) {
 
     if (urlPath === "/api/workspace/open" && req.method === "POST") {
       console.log("[Embedded] Received workspace open request");
-      let body = "";
-      req.on("data", (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-      req.on("end", () => {
+      readCappedBody(req, res, async (body) => {
         try {
           const { path: workspacePath } = JSON.parse(body);
           if (!workspacePath || typeof workspacePath !== "string") {
@@ -1995,23 +2304,18 @@ export default function (omp: ExtensionAPI) {
           // Note: this still uses the user's PATH `omp`, not the embedded one,
           // because Ompcot's own workspace flow lives in Tauri commands;
           // this endpoint is the legacy "open in external terminal" affordance.
-          const { execSync } = require("node:child_process");
-          const escaped = resolved.replace(/'/g, "'\\''");
-          try {
-            execSync(
-              `osascript -e 'tell app "Terminal" to do script "cd '"'"'${escaped}'"'"' && pi"'`,
-            );
-          } catch {
-            try {
-              execSync(
-                `osascript -e 'tell app "iTerm2" to create window with default profile command "cd '"'"'${escaped}'"'"' && pi"'`,
-              );
-            } catch {
-              /* no terminal app available */
-            }
+          //
+          // Audit A2: the path crosses into the terminal via argument arrays
+          // only (no shell string building) — see openTerminalInDirectory.
+          // The outcome is reported truthfully; no unconditional {ok:true}.
+          const outcome = await openTerminalInDirectory(resolved);
+          if (outcome.ok) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, path: resolved }));
+          } else {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: outcome.error }));
           }
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: true, path: resolved }));
         } catch (e: unknown) {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: errMessage(e) }));
@@ -2032,11 +2336,7 @@ export default function (omp: ExtensionAPI) {
     }
 
     if (urlPath === "/api/agent-settings" && req.method === "PUT") {
-      let body = "";
-      req.on("data", (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-      req.on("end", async () => {
+      readCappedBody(req, res, async (body) => {
         let key: unknown;
         let value: unknown;
         try {
@@ -2070,11 +2370,7 @@ export default function (omp: ExtensionAPI) {
     }
 
     if (urlPath === "/api/agent-settings/reset" && req.method === "POST") {
-      let body = "";
-      req.on("data", (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-      req.on("end", async () => {
+      readCappedBody(req, res, async (body) => {
         let key: unknown;
         try {
           key = JSON.parse(body)?.key;
@@ -2124,11 +2420,7 @@ export default function (omp: ExtensionAPI) {
     }
 
     if (urlPath === "/api/agent-config" && req.method === "PUT") {
-      let body = "";
-      req.on("data", (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-      req.on("end", async () => {
+      readCappedBody(req, res, async (body) => {
         try {
           const { content } = JSON.parse(body);
           if (typeof content !== "string") {
@@ -2199,11 +2491,7 @@ export default function (omp: ExtensionAPI) {
     }
 
     if (urlPath === "/api/models-config" && req.method === "PUT") {
-      let body = "";
-      req.on("data", (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-      req.on("end", async () => {
+      readCappedBody(req, res, async (body) => {
         try {
           const { content } = JSON.parse(body);
           if (typeof content !== "string") {
@@ -2695,17 +2983,51 @@ export default function (omp: ExtensionAPI) {
   // Session file endpoint
   // ═══════════════════════════════════════
   function serveSessionFile(res: http.ServerResponse, dirName: string, file: string) {
-    const filePath = path.join(SESSIONS_DIR, dirName, file);
-
-    if (!fs.existsSync(filePath)) {
+    // Audit A3: containment. Reject any component that isn't a plain file
+    // name (no separators, no "." / ".."), verify the resolved path stays
+    // strictly beneath the sessions root, and re-verify after realpath so a
+    // symlink inside the sessions tree pointing outside is rejected too.
+    const sessionsRoot = path.resolve(SESSIONS_DIR);
+    const isSafeSegment = (s: string) =>
+      !!s && s !== "." && s !== ".." && !s.includes("/") && !s.includes("\\");
+    const notFound = () => {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Session not found" }));
+    };
+    if (!isSafeSegment(dirName) || !isSafeSegment(file)) {
+      notFound();
+      return;
+    }
+    const filePath = path.resolve(sessionsRoot, dirName, file);
+    if (filePath === sessionsRoot || !filePath.startsWith(sessionsRoot + path.sep)) {
+      notFound();
+      return;
+    }
+    let realSessionsRoot = "";
+    let realFilePath = "";
+    try {
+      realSessionsRoot = fs.realpathSync(sessionsRoot);
+      realFilePath = fs.realpathSync(filePath);
+    } catch {
+      notFound();
+      return;
+    }
+    if (
+      realFilePath === realSessionsRoot ||
+      !realFilePath.startsWith(realSessionsRoot + path.sep)
+    ) {
+      notFound();
+      return;
+    }
+
+    if (!fs.existsSync(realFilePath)) {
+      notFound();
       return;
     }
 
     // biome-ignore lint/suspicious/noExplicitAny: heterogeneous parsed JSONL entries
     const entries: any[] = [];
-    const stream = fs.createReadStream(filePath, { encoding: "utf8" });
+    const stream = fs.createReadStream(realFilePath, { encoding: "utf8" });
     let buffer = "";
 
     stream.on("data", (chunk: string) => {
@@ -3127,25 +3449,33 @@ export default function (omp: ExtensionAPI) {
     // ungraceful disconnects need a reaper). The Bun ServerWebSocket has
     // `.ping()` but not `.terminate()` — we fall back to `.close()` in the
     // wrapper exposed via UnifiedWS.
-    globalState.heartbeatTimer = setInterval(() => {
-      for (const client of globalState.clients) {
-        if (client.readyState !== WS_OPEN) {
-          globalState.clients.delete(client);
-          continue;
-        }
-        if (!client.isAlive) {
+    //
+    // Audit A7: start the reaper only once the server is actually listening
+    // (see onListening) and guard against double-start across extension
+    // reloads — a process-global interval that outlives a failed listen is a
+    // leak and reaps against a client set that can never fill.
+    function ensureHeartbeat() {
+      if (globalState.heartbeatTimer) return;
+      globalState.heartbeatTimer = setInterval(() => {
+        for (const client of globalState.clients) {
+          if (client.readyState !== WS_OPEN) {
+            globalState.clients.delete(client);
+            continue;
+          }
+          if (!client.isAlive) {
+            try {
+              client.terminate();
+            } catch {}
+            globalState.clients.delete(client);
+            continue;
+          }
+          client.isAlive = false;
           try {
-            client.terminate();
+            client.ping();
           } catch {}
-          globalState.clients.delete(client);
-          continue;
         }
-        client.isAlive = false;
-        try {
-          client.ping();
-        } catch {}
-      }
-    }, 20000);
+      }, 20000);
+    }
 
     // ─── Path A: Bun runtime ─────────────────────────────────────────────
     //
@@ -3244,9 +3574,8 @@ export default function (omp: ExtensionAPI) {
         // Auto-redirect remote browsers to the full mobile URL.
         const brokerPort = Number.parseInt(process.env.OMCOT_BROKER_PORT || "", 10);
         const host = req.headers.get("host") || url.host;
-        const hostName = host.split(":")[0];
-        const isLoopback =
-          hostName === "localhost" || hostName === "127.0.0.1" || hostName === "::1";
+        const hostName = parseHostHeaderName(host);
+        const isLoopback = isLoopbackHost(hostName);
         if (
           urlPath === "/" &&
           !isLoopback &&
@@ -3360,6 +3689,7 @@ export default function (omp: ExtensionAPI) {
     };
 
     function onListening(port: number) {
+      ensureHeartbeat(); // audit A7: only after the listen actually succeeded
       const localHost = isLoopbackHost(BIND_HOST) ? BIND_HOST : "127.0.0.1";
       globalState.localUrl = `http://${localHost}:${port}`;
       const lanUrls = buildLanUrls(port);
@@ -3401,7 +3731,19 @@ export default function (omp: ExtensionAPI) {
   // ═══════════════════════════════════════════════════════════════════════
   async function runNodeStyleHandler(req: Request): Promise<Response> {
     const url = new URL(req.url);
-    const bodyText = req.method !== "GET" && req.method !== "HEAD" ? await req.text() : "";
+    // Audit A6: same body cap as the node-side handlers. The old
+    // `await req.text()` buffered arbitrarily large payloads in full.
+    let bodyText = "";
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      const body = await readCappedBodyBun(req);
+      if (body === null) {
+        return new Response(JSON.stringify({ error: "payload too large" }), {
+          status: 413,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      bodyText = body;
+    }
 
     return await new Promise<Response>((resolve) => {
       const headers: Record<string, string> = {};

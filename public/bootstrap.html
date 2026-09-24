@@ -81,7 +81,9 @@
     const rawError = new URLSearchParams(window.location.search).get('startupError');
     if (rawError) {
       errorBox.style.display = 'block';
-      errorBox.textContent = decodeURIComponent(rawError);
+      // URLSearchParams.get() already percent-decodes; decoding again would
+      // throw on messages containing a decoded literal '%'.
+      errorBox.textContent = rawError;
     }
 
     function getInvoke() {

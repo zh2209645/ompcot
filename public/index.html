@@ -461,7 +461,8 @@
             <p class="settings-help">
               Edit <code>~/.omp/agent/models.yml</code> to add custom providers
               (Ollama, vLLM, LM Studio, OpenAI-compatible proxies, OpenRouter
-              routing overrides, etc). See the
+              routing overrides, etc). The file is YAML — JSON works too, since
+              JSON is valid YAML. See the
               <a href="#" id="models-config-docs-link">models.yml docs</a>
               for the full schema. Changes are picked up immediately — no
               restart needed.
@@ -470,7 +471,7 @@
               <span class="settings-label">Providers file</span>
               <span class="settings-static-value" id="inline-models-path"></span>
             </div>
-            <textarea class="config-editor-textarea settings-config-textarea" id="inline-models-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" placeholder='{ "providers": { ... } }'></textarea>
+            <textarea class="config-editor-textarea settings-config-textarea" id="inline-models-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" placeholder="providers:&#10;  ollama:&#10;    baseUrl: http://localhost:11434/v1&#10;    …"></textarea>
             <div class="settings-config-actions">
               <div class="config-editor-error settings-save-status hidden" id="inline-models-error"></div>
               <div class="settings-config-button-group">

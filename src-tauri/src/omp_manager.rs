@@ -168,6 +168,12 @@ pub fn load_override(config_dir: &Path) -> Option<PathBuf> {
 
 /// Persist `path` as `ompBinaryPath` in `<config_dir>/ompcot.json`, creating
 /// parent directories as needed and preserving any sibling keys.
+///
+/// Atomic write (R4): the serialized JSON is staged in a temp file in the
+/// SAME directory, flushed to disk, then renamed over the target. A crash
+/// mid-write therefore leaves either the previous complete file or the new
+/// complete file — never a truncated JSON that the parse-tolerant loader
+/// would silently reset to `{}`.
 pub fn save_override(config_dir: &Path, path: &Path) -> Result<(), String> {
     let file = config_dir.join(SETTINGS_FILE_NAME);
     let mut root: serde_json::Value = std::fs::read_to_string(&file)
@@ -186,8 +192,35 @@ pub fn save_override(config_dir: &Path, path: &Path) -> Result<(), String> {
         )
     })?;
     let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(&file, serialized)
-        .map_err(|e| format!("Failed to write {}: {}", file.display(), e))
+
+    // Stage + rename. The temp name embeds pid + nanos so concurrent saves
+    // never share a staging file.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp = config_dir.join(format!("{SETTINGS_FILE_NAME}.tmp-{unique}"));
+    {
+        let mut out = std::fs::File::create(&temp)
+            .map_err(|e| format!("Failed to create temp file {}: {}", temp.display(), e))?;
+        out.write_all(serialized.as_bytes())
+            .and_then(|_| out.sync_all())
+            .map_err(|e| format!("Failed to write temp file {}: {}", temp.display(), e))?;
+    }
+    // `std::fs::rename` replaces an existing destination on both Unix and
+    // Windows (it maps to MoveFileEx with MOVEFILE_REPLACE_EXISTING there),
+    // so no pre-delete dance is needed; because `temp` lives in the same
+    // directory the rename never crosses a filesystem boundary.
+    if let Err(e) = std::fs::rename(&temp, &file) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!(
+            "Failed to persist {} (rename from {} failed): {}",
+            file.display(),
+            temp.display(),
+            e
+        ));
+    }
+    Ok(())
 }
 
 /// Canonicalize a user-picked override path for persistence. Strips the
@@ -804,22 +837,30 @@ impl OmpManager {
         session_file: String,
         cwd: &str,
     ) -> Result<u16, String> {
-        {
-            let sp = self.session_ports.lock().unwrap();
-            if let Some(&port) = sp.get(&session_file) {
-                return Ok(port);
-            }
+        // Hold the session_ports lock across lookup + spawn + insert (R3) so
+        // two concurrent invocations for the same session file cannot both
+        // miss the lookup and each spawn a process (the loser used to be
+        // leaked until workspace close because session_ports kept only the
+        // last winner). Serialization makes the loser impossible, so no
+        // redundant child needs to be killed.
+        //
+        // Deadlock safety: nothing inside this critical section re-locks
+        // session_ports or workspace_dedicated — spawn() only touches the
+        // processes map (+ the version cache) — and the lock order
+        // session_ports → processes / workspace_dedicated is never taken in
+        // reverse elsewhere (kill_workspace_dedicated releases each lock
+        // before acquiring the next). An Err from spawn() returns through
+        // `?`, dropping the guard cleanly without poisoning.
+        let mut sp = self.session_ports.lock().unwrap();
+        if let Some(&port) = sp.get(&session_file) {
+            return Ok(port);
         }
         let port = self.next_port();
         self.spawn(cwd, port, Some(&session_file))?;
-        {
-            let mut sp = self.session_ports.lock().unwrap();
-            sp.insert(session_file, port);
-        }
-        {
-            let mut wd = self.workspace_dedicated.lock().unwrap();
-            wd.entry(workspace_port).or_default().push(port);
-        }
+        sp.insert(session_file, port);
+        drop(sp);
+        let mut wd = self.workspace_dedicated.lock().unwrap();
+        wd.entry(workspace_port).or_default().push(port);
         Ok(port)
     }
 
@@ -1048,6 +1089,32 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(config_dir.join(SETTINGS_FILE_NAME)).unwrap())
                 .unwrap();
         assert_eq!(raw.get("otherSetting"), Some(&serde_json::json!(42)));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn override_save_leaves_no_staging_files_behind() {
+        // The atomic save (R4) stages into `<config_dir>/ompcot.json.tmp-*`
+        // and renames over the target; nothing matching the staging pattern
+        // may survive a successful save (including one that overwrites an
+        // existing settings file).
+        let root = unique_temp_dir("atomic-save");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let bin = write_fake_binary(&root.join("bin"), "omp-fake");
+
+        save_override(&root, &bin).expect("first save must succeed");
+        save_override(&root, &bin).expect("overwrite save must succeed");
+        assert_eq!(load_override(&root).as_deref(), Some(bin.as_path()));
+
+        let stray: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "bin" && name != SETTINGS_FILE_NAME)
+            .collect();
+        assert!(stray.is_empty(), "stray files after save: {stray:?}");
 
         let _ = fs::remove_dir_all(root);
     }

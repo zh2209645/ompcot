@@ -2,6 +2,32 @@
  * Session Sidebar - Lists sessions grouped by project, handles switching
  */
 
+/**
+ * Read a JSON array from localStorage without letting bad input break the
+ * sidebar (and therefore the whole app). Corrupt JSON, non-array values, or
+ * storage access failures (privacy-restricted modes throw on access) all fall
+ * back to an empty list.
+ */
+export function readStoredJsonArray(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.warn(`[Sidebar] Ignoring unreadable "${key}" from localStorage:`, err);
+    return [];
+  }
+}
+
+function readStoredFlag(key, fallback) {
+  try {
+    return localStorage.getItem(key) !== "false";
+  } catch {
+    return fallback;
+  }
+}
+
 export class SessionSidebar {
   constructor(container, onSessionSelect, onNewChat, options = {}) {
     this.projectSessionInitialLimit = 5;
@@ -15,10 +41,10 @@ export class SessionSidebar {
     this.collapsedProjects = new Set();
     this.searchQuery = "";
     // TODO(rename->ompcot): localStorage keys kept as `ompcot-*` for backward compat — migration needed before changing.
-    this.favourites = JSON.parse(localStorage.getItem("ompcot-favourites") || "[]");
-    this.archived = JSON.parse(localStorage.getItem("ompcot-archived") || "[]");
-    this.archivedCollapsed = localStorage.getItem("ompcot-archived-collapsed") !== "false";
-    this.unread = new Set(JSON.parse(localStorage.getItem("ompcot-unread") || "[]"));
+    this.favourites = readStoredJsonArray("ompcot-favourites");
+    this.archived = readStoredJsonArray("ompcot-archived");
+    this.archivedCollapsed = readStoredFlag("ompcot-archived-collapsed", true);
+    this.unread = new Set(readStoredJsonArray("ompcot-unread"));
     this.streamingFiles = new Set();
     this.projectVisibleSessionCounts = new Map();
     this.contextMenu = null;

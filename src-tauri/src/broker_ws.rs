@@ -11,7 +11,31 @@ use tokio_tungstenite::tungstenite::Message;
 
 const PROTOCOL_VERSION: u8 = 1;
 
-type Tx = mpsc::UnboundedSender<String>;
+/// Capacity for the bounded per-client and per-upstream queues (R2).
+/// Generous versus any legitimate burst (chat deltas arrive at tens of
+/// frames per second) while capping memory when a consumer stalls; on
+/// overflow the message is dropped with a warning instead of blocking the
+/// runtime or growing without bound.
+const CHANNEL_CAPACITY: usize = 4096;
+
+/// Initial delay before the first reconnect attempt after an upstream
+/// failure. 750ms matches the previous fixed retry interval.
+const UPSTREAM_RECONNECT_INITIAL_DELAY_MS: u64 = 750;
+/// Ceiling for the exponential reconnect delay.
+const UPSTREAM_RECONNECT_MAX_DELAY_MS: u64 = 10_000;
+/// Hard cap on consecutive failed reconnect attempts (R1). Belt-and-braces
+/// next to `UPSTREAM_RECONNECT_GIVE_UP_AFTER`: with the doubling schedule
+/// above, the ~5-minute wall-clock deadline is normally reached first
+/// (after ~33 attempts); the attempt cap only matters if sleeps run short.
+const UPSTREAM_RECONNECT_MAX_ATTEMPTS: u32 = 60;
+/// Give up retrying a dead upstream after this much continuous failure
+/// (~5 minutes, R1). The give-up path evicts the upstream and its session
+/// routes exactly like a managed stop and notifies the UI that the
+/// instance is dead.
+const UPSTREAM_RECONNECT_GIVE_UP_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+
+type Tx = mpsc::Sender<String>;
 
 /// Emits an intermediate progress frame for an in-flight `broker_control`
 /// request (e.g. updater download chunks). The broker wires this to the
@@ -26,6 +50,43 @@ pub type ProgressSink = Arc<dyn Fn(Value) + Send + Sync>;
 pub type ControlHandler = Arc<
     dyn Fn(String, Value, ProgressSink) -> BoxFuture<'static, Result<Value, String>> + Send + Sync,
 >;
+
+/// What `run_upstream` should do after a failed reconnect attempt (R1).
+#[derive(Debug, PartialEq, Eq)]
+enum ReconnectDecision {
+    /// Wait this long, then try again.
+    Retry(std::time::Duration),
+    /// The upstream is considered permanently dead: evict it and notify.
+    GiveUp,
+}
+
+/// Pure backoff policy for upstream reconnects (R1): exponential delay
+/// starting at [`UPSTREAM_RECONNECT_INITIAL_DELAY_MS`] (750ms), doubling up
+/// to [`UPSTREAM_RECONNECT_MAX_DELAY_MS`] (10s); give up after
+/// [`UPSTREAM_RECONNECT_MAX_ATTEMPTS`] consecutive failures or
+/// [`UPSTREAM_RECONNECT_GIVE_UP_AFTER`] (~5 minutes) of continuous failure,
+/// whichever comes first.
+///
+/// `consecutive_failures` counts failures in the current streak (1 on the
+/// first failure; reset to 0 whenever a connection succeeds). `failed_for`
+/// is how long that streak has lasted so far (sleeps + connect attempts).
+fn reconnect_decision(
+    consecutive_failures: u32,
+    failed_for: std::time::Duration,
+) -> ReconnectDecision {
+    if consecutive_failures >= UPSTREAM_RECONNECT_MAX_ATTEMPTS
+        || failed_for >= UPSTREAM_RECONNECT_GIVE_UP_AFTER
+    {
+        return ReconnectDecision::GiveUp;
+    }
+    // 2^20 * 750ms is far beyond the cap; clamping the shift keeps the
+    // multiplication from overflowing for pathological counters.
+    let shift = consecutive_failures.saturating_sub(1).min(20);
+    let delay_ms = UPSTREAM_RECONNECT_INITIAL_DELAY_MS.saturating_mul(1u64 << shift);
+    ReconnectDecision::Retry(std::time::Duration::from_millis(
+        delay_ms.min(UPSTREAM_RECONNECT_MAX_DELAY_MS),
+    ))
+}
 
 #[derive(Default)]
 struct BrokerInner {
@@ -190,7 +251,7 @@ impl BrokerWs {
         };
         let client_id = self.inner.next_client_id.fetch_add(1, Ordering::Relaxed);
         let (mut writer, mut reader) = ws.split();
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) = mpsc::channel::<String>(CHANNEL_CAPACITY);
         self.inner
             .ui_clients
             .lock()
@@ -201,14 +262,22 @@ impl BrokerWs {
         // are available. Inside the desktop app a control handler is installed
         // (native:true); a bare broker without a handler can only forward chat.
         let native = self.inner.control_handler.lock().unwrap().is_some();
-        let _ = tx.send(
-            json!({
-                "type": "capabilities",
-                "protocolVersion": PROTOCOL_VERSION,
-                "native": native,
-            })
-            .to_string(),
-        );
+        if tx
+            .try_send(
+                json!({
+                    "type": "capabilities",
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "native": native,
+                })
+                .to_string(),
+            )
+            .is_err()
+        {
+            log::warn!(
+                "[broker-ws] failed to deliver capabilities handshake to client {} (gone or saturated)",
+                client_id
+            );
+        }
 
         let writer_task = tauri::async_runtime::spawn(async move {
             while let Some(message) = rx.recv().await {
@@ -271,14 +340,29 @@ impl BrokerWs {
         // a `command_undeliverable` frame (tagged with the original requestId) so
         // the UI can surface the loss instead of hanging (F3). `ensure_upstream`
         // queues into the channel even while reconnecting, so a `None` tx (or a
-        // closed channel) means the port is genuinely gone (killed/disabled).
+        // closed channel) means the port is genuinely gone (killed/disabled); a
+        // FULL channel means the upstream is alive but its (bounded) queue is
+        // saturated (R2) — dropped either way, but surfaced with distinct reasons.
+        let mut undeliverable_reason = "upstream_unavailable";
         let delivered = match upstream_tx {
-            Some(tx) => tx.send(text.to_string()).is_ok(),
+            Some(tx) => match tx.try_send(text.to_string()) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    log::warn!(
+                        "[broker-ws] upstream {} queue full (capacity {}); dropping command",
+                        port,
+                        CHANNEL_CAPACITY
+                    );
+                    undeliverable_reason = "upstream_backpressure";
+                    false
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            },
             None => false,
         };
         if !delivered {
             log::warn!("[broker-ws] upstream {} unavailable; command dropped", port);
-            self.notify_undeliverable(client_tx, &value, "upstream_unavailable");
+            self.notify_undeliverable(client_tx, &value, undeliverable_reason);
         }
     }
 
@@ -292,17 +376,24 @@ impl BrokerWs {
             .and_then(Value::as_str)
             .or_else(|| value.get("type").and_then(Value::as_str))
             .unwrap_or("");
-        let _ = client_tx.send(
-            json!({
-                "type": "command_undeliverable",
-                "protocolVersion": PROTOCOL_VERSION,
-                "requestId": request_id,
-                "command": command,
-                "reason": reason,
-                "sessionId": value.get("sessionId").cloned().unwrap_or(Value::Null),
-            })
-            .to_string(),
-        );
+        if client_tx
+            .try_send(
+                json!({
+                    "type": "command_undeliverable",
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "requestId": request_id,
+                    "command": command,
+                    "reason": reason,
+                    "sessionId": value.get("sessionId").cloned().unwrap_or(Value::Null),
+                })
+                .to_string(),
+            )
+            .is_err()
+        {
+            log::warn!(
+                "[broker-ws] failed to deliver command_undeliverable notice (client gone or saturated)"
+            );
+        }
     }
 
     fn dispatch_control(&self, value: &Value, client_tx: &Tx) {
@@ -322,15 +413,22 @@ impl BrokerWs {
         let tx = client_tx.clone();
 
         let Some(handler) = handler else {
-            let _ = tx.send(
-                json!({
-                    "type": "control_response",
-                    "requestId": request_id,
-                    "ok": false,
-                    "error": "Control commands are not available on this server",
-                })
-                .to_string(),
-            );
+            if tx
+                .try_send(
+                    json!({
+                        "type": "control_response",
+                        "requestId": request_id,
+                        "ok": false,
+                        "error": "Control commands are not available on this server",
+                    })
+                    .to_string(),
+                )
+                .is_err()
+            {
+                log::warn!(
+                    "[broker-ws] failed to deliver control_response (client gone or saturated)"
+                );
+            }
             return;
         };
 
@@ -339,14 +437,21 @@ impl BrokerWs {
         let progress_tx = tx.clone();
         let progress_request_id = request_id.clone();
         let sink: ProgressSink = Arc::new(move |data: Value| {
-            let _ = progress_tx.send(
-                json!({
-                    "type": "control_progress",
-                    "requestId": progress_request_id,
-                    "data": data,
-                })
-                .to_string(),
-            );
+            if progress_tx
+                .try_send(
+                    json!({
+                        "type": "control_progress",
+                        "requestId": progress_request_id,
+                        "data": data,
+                    })
+                    .to_string(),
+                )
+                .is_err()
+            {
+                log::warn!(
+                    "[broker-ws] failed to deliver control_progress frame (client gone or saturated)"
+                );
+            }
         });
 
         log::info!(
@@ -381,7 +486,11 @@ impl BrokerWs {
                     })
                 }
             };
-            let _ = tx.send(response.to_string());
+            if tx.try_send(response.to_string()).is_err() {
+                log::warn!(
+                    "[broker-ws] failed to deliver control_response (client gone or saturated)"
+                );
+            }
         });
     }
 
@@ -456,7 +565,7 @@ impl BrokerWs {
             if upstreams.contains_key(&port) {
                 return;
             }
-            let (tx, rx) = mpsc::unbounded_channel::<String>();
+            let (tx, rx) = mpsc::channel::<String>(CHANNEL_CAPACITY);
             upstreams.insert(port, tx);
             rx
         };
@@ -466,8 +575,13 @@ impl BrokerWs {
         });
     }
 
-    async fn run_upstream(self, port: u16, mut rx: mpsc::UnboundedReceiver<String>) {
+    async fn run_upstream(self, port: u16, mut rx: mpsc::Receiver<String>) {
         let url = format!("ws://127.0.0.1:{}/ws", port);
+        // Backoff state for the current failure streak; both reset whenever
+        // a connection succeeds, so a healthy-but-restarted upstream starts
+        // from the initial delay again (R1).
+        let mut consecutive_failures: u32 = 0;
+        let mut failing_since: Option<std::time::Instant> = None;
 
         loop {
             if self.inner.disabled_ports.lock().unwrap().contains(&port) {
@@ -477,6 +591,8 @@ impl BrokerWs {
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((ws, _)) => {
                     log::info!("[broker-ws] connected upstream port {}", port);
+                    consecutive_failures = 0;
+                    failing_since = None;
                     let (mut writer, mut reader) = ws.split();
                     let mut shutdown_check =
                         tokio::time::interval(std::time::Duration::from_millis(500));
@@ -519,8 +635,60 @@ impl BrokerWs {
                     log::warn!("[broker-ws] upstream {} connect failed: {}", port, err);
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            consecutive_failures += 1;
+            let failed_for = failing_since
+                .get_or_insert_with(std::time::Instant::now)
+                .elapsed();
+            match reconnect_decision(consecutive_failures, failed_for) {
+                ReconnectDecision::Retry(delay) => {
+                    tokio::time::sleep(delay).await;
+                }
+                ReconnectDecision::GiveUp => {
+                    log::error!(
+                        "[broker-ws] upstream {} unreachable after {} attempts over {:.0}s; giving up (instance assumed dead)",
+                        port,
+                        consecutive_failures,
+                        failed_for.as_secs_f64()
+                    );
+                    // Evict exactly like a managed stop (`unregister_port`):
+                    // disable the port, drop the upstream sender, evict its
+                    // session routes, clear active_port — then tell the UI the
+                    // instance is dead. A later register_session /
+                    // track_background_session for the same port re-enables it
+                    // (both clear disabled_ports first), so a respawned omp is
+                    // never wedged by the give-up.
+                    self.unregister_port(port);
+                    self.broadcast_upstream_dead(port, consecutive_failures);
+                    return;
+                }
+            }
         }
+    }
+
+    /// Notify UI clients that an upstream omp instance is dead and has been
+    /// evicted by the reconnect give-up path (R1). Reuses the standard
+    /// `broker_event` envelope with an `error` payload — the frontend
+    /// unwraps broker_event payloads and dispatches `type: "error"` frames
+    /// through its existing `serverError` handler, which renders the message
+    /// in the chat like any other runtime error, so the dead instance is
+    /// visible instead of silently queueing commands forever.
+    fn broadcast_upstream_dead(&self, port: u16, attempts: u32) {
+        let message = json!({
+            "type": "broker_event",
+            "protocolVersion": PROTOCOL_VERSION,
+            "workspaceId": Value::Null,
+            "sessionId": Value::Null,
+            "sourcePort": port,
+            "payload": {
+                "type": "error",
+                "message": format!(
+                    "The agent process on port {} is no longer reachable ({} reconnect attempts failed) and has been disconnected. Start a new session or reopen the workspace to continue.",
+                    port, attempts
+                ),
+            },
+        })
+        .to_string();
+        self.broadcast(&message);
     }
 
     fn wrap_upstream_message(&self, port: u16, text: &str) -> Option<String> {
@@ -556,13 +724,30 @@ impl BrokerWs {
 
     fn broadcast(&self, message: &str) {
         let mut stale = Vec::new();
-        let clients = self.inner.ui_clients.lock().unwrap();
-        for (id, tx) in clients.iter() {
-            if tx.send(message.to_string()).is_err() {
-                stale.push(*id);
+        let mut overflowed = 0usize;
+        let mut delivered = 0usize;
+        {
+            let clients = self.inner.ui_clients.lock().unwrap();
+            for (id, tx) in clients.iter() {
+                match tx.try_send(message.to_string()) {
+                    Ok(()) => delivered += 1,
+                    // Bounded queues (R2): a client that stopped draining
+                    // gets the frame dropped with a warning rather than an
+                    // unbounded backlog; a closed queue means the client is
+                    // gone and its entry can be reaped.
+                    Err(mpsc::error::TrySendError::Full(_)) => overflowed += 1,
+                    Err(mpsc::error::TrySendError::Closed(_)) => stale.push(*id),
+                }
             }
         }
-        drop(clients);
+        if overflowed > 0 {
+            log::warn!(
+                "[broker-ws] broadcast: {} of {} UI clients saturated (capacity {}); dropped message",
+                overflowed,
+                delivered + overflowed + stale.len(),
+                CHANNEL_CAPACITY
+            );
+        }
         if !stale.is_empty() {
             let mut clients = self.inner.ui_clients.lock().unwrap();
             for id in stale {
@@ -721,5 +906,101 @@ mod tests {
             })),
             Some(47824)
         );
+    }
+
+    #[test]
+    fn reconnect_backoff_doubles_from_750ms_to_10s_cap() {
+        fn delay_for(consecutive_failures: u32) -> std::time::Duration {
+            match reconnect_decision(consecutive_failures, std::time::Duration::ZERO) {
+                ReconnectDecision::Retry(delay) => delay,
+                ReconnectDecision::GiveUp => {
+                    panic!("must retry for {consecutive_failures} failures")
+                }
+            }
+        }
+
+        assert_eq!(delay_for(1), std::time::Duration::from_millis(750));
+        assert_eq!(delay_for(2), std::time::Duration::from_millis(1500));
+        assert_eq!(delay_for(3), std::time::Duration::from_millis(3000));
+        assert_eq!(delay_for(4), std::time::Duration::from_millis(6000));
+        assert_eq!(delay_for(5), std::time::Duration::from_millis(10_000));
+        assert_eq!(delay_for(6), std::time::Duration::from_millis(10_000));
+        // Shift-saturated (2^20 clamp, still under the give-up attempt cap)
+        // without overflowing.
+        assert_eq!(delay_for(30), std::time::Duration::from_millis(10_000));
+        assert_eq!(delay_for(59), std::time::Duration::from_millis(10_000));
+    }
+
+    #[test]
+    fn reconnect_gives_up_on_attempt_cap_or_wall_clock_deadline() {
+        // Attempt cap (60 consecutive failures) regardless of elapsed time.
+        assert_eq!(
+            reconnect_decision(UPSTREAM_RECONNECT_MAX_ATTEMPTS, std::time::Duration::ZERO),
+            ReconnectDecision::GiveUp
+        );
+        // Wall-clock cap: ~5 minutes of continuous failure.
+        assert_eq!(
+            reconnect_decision(1, UPSTREAM_RECONNECT_GIVE_UP_AFTER),
+            ReconnectDecision::GiveUp
+        );
+        // Within both thresholds: keep retrying.
+        assert!(matches!(
+            reconnect_decision(5, std::time::Duration::from_secs(30)),
+            ReconnectDecision::Retry(_)
+        ));
+    }
+
+    #[test]
+    fn reconnect_policy_gives_up_within_about_five_minutes() {
+        // Documented wall-clock bound of the give-up policy: simulating the
+        // sleep schedule must reach GiveUp around the 5-minute target (and
+        // can never spin forever).
+        let mut total = std::time::Duration::ZERO;
+        let mut failures = 0u32;
+        loop {
+            failures += 1;
+            match reconnect_decision(failures, total) {
+                ReconnectDecision::Retry(delay) => total += delay,
+                ReconnectDecision::GiveUp => break,
+            }
+            assert!(failures < 1_000, "policy must eventually give up");
+        }
+        assert!(total >= std::time::Duration::from_secs(4 * 60));
+        assert!(total <= std::time::Duration::from_secs(6 * 60));
+    }
+
+    #[test]
+    fn give_up_notice_reaches_ui_clients_as_broker_event_error() {
+        let broker = BrokerWs {
+            port: 49000,
+            inner: Arc::new(BrokerInner::default()),
+        };
+        let (tx, mut rx) = mpsc::channel::<String>(CHANNEL_CAPACITY);
+        broker.inner.ui_clients.lock().unwrap().insert(7, tx);
+
+        broker.broadcast_upstream_dead(47821, UPSTREAM_RECONNECT_MAX_ATTEMPTS);
+
+        let notice: Value =
+            serde_json::from_str(&rx.try_recv().expect("death notice must be queued")).unwrap();
+        assert_eq!(notice["type"], "broker_event");
+        assert_eq!(notice["sourcePort"], 47821);
+        assert_eq!(notice["payload"]["type"], "error");
+        assert!(notice["payload"]["message"]
+            .as_str()
+            .expect("message must be a string")
+            .contains("47821"));
+    }
+
+    #[test]
+    fn ensure_upstream_is_a_noop_for_disabled_ports() {
+        let broker = BrokerWs {
+            port: 49000,
+            inner: Arc::new(BrokerInner::default()),
+        };
+        // unregister_port (managed stop AND the give-up path) disables the
+        // port; ensure_upstream must not respawn an upstream for it.
+        broker.unregister_port(47821);
+        broker.ensure_upstream(47821);
+        assert!(broker.inner.upstreams.lock().unwrap().is_empty());
     }
 }

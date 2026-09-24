@@ -115,7 +115,14 @@ const onBeforeInstanceSwap = (label) => showSwapOverlay(label);
 // chat UI before /api/sessions and get_state finish populating things.
 function dismissBootSwapOverlayWhenReady() {
   if (!document.body.classList.contains("swapping-instance")) return;
+  // Safety net: if `connected` never arrives, stop hiding behind the overlay
+  // after 5s. Cleared when the fade actually runs so no stray timer outlives
+  // the connect path.
+  const fallbackTimer = setTimeout(() => {
+    if (document.body.classList.contains("swapping-instance")) hideSwapOverlay();
+  }, 5000);
   const fade = () => {
+    clearTimeout(fallbackTimer);
     requestAnimationFrame(() => {
       const overlay = document.getElementById("instance-swap-overlay");
       if (overlay) overlay.setAttribute("data-visible", "false");
@@ -135,9 +142,6 @@ function dismissBootSwapOverlayWhenReady() {
     };
     wsClient.addEventListener("connected", onConnect);
   }
-  setTimeout(() => {
-    if (document.body.classList.contains("swapping-instance")) hideSwapOverlay();
-  }, 5000);
 }
 
 // Initialize components
@@ -377,18 +381,35 @@ const fileSidebarClose = document.getElementById("file-sidebar-close");
 const fileSidebarUp = document.getElementById("file-sidebar-up");
 const fileList = document.getElementById("file-list");
 const fileSidebarPath = document.getElementById("file-sidebar-path");
+
+// Privacy-restricted browsers throw on localStorage access. Treat failures as
+// "no stored state" and make writes no-ops so the sidebar still works.
+function readStoredFileSidebarState() {
+  try {
+    return localStorage.getItem("ompcot-file-sidebar");
+  } catch {
+    return null;
+  }
+}
+
+function persistFileSidebarState(value) {
+  try {
+    localStorage.setItem("ompcot-file-sidebar", value);
+  } catch {}
+}
+
 const fileBrowser = new FileBrowser(fileList, fileSidebarPath, messageInput);
 fileSidebarToggle.addEventListener("click", () => {
   const isCollapsed = fileSidebar.classList.toggle("collapsed");
   if (!isCollapsed && !fileBrowser.currentPath) {
     fileBrowser.load(); // Load session cwd
   }
-  localStorage.setItem("ompcot-file-sidebar", isCollapsed ? "closed" : "open");
+  persistFileSidebarState(isCollapsed ? "closed" : "open");
 });
 
 fileSidebarClose.addEventListener("click", () => {
   fileSidebar.classList.add("collapsed");
-  localStorage.setItem("ompcot-file-sidebar", "closed");
+  persistFileSidebarState("closed");
 });
 
 fileSidebarUp.addEventListener("click", () => {
@@ -397,13 +418,18 @@ fileSidebarUp.addEventListener("click", () => {
 });
 
 document.getElementById("file-sidebar-finder").addEventListener("click", () => {
-  if (fileBrowser.currentPath) {
-    fetch("/api/open", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filePath: fileBrowser.currentPath }),
+  if (!fileBrowser.currentPath) return;
+  fetch("/api/open", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filePath: fileBrowser.currentPath }),
+  })
+    .then((resp) => {
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    })
+    .catch((err) => {
+      console.warn("[App] Failed to reveal path in file manager:", err);
     });
-  }
 });
 
 // ═══════════════════════════════════════
@@ -557,7 +583,7 @@ document.addEventListener("click", () => closeHeaderOpenAppMenu());
 void loadHeaderOpenApps();
 
 // Restore file sidebar state
-if (localStorage.getItem("ompcot-file-sidebar") === "open") {
+if (readStoredFileSidebarState() === "open") {
   fileSidebar.classList.remove("collapsed");
   fileBrowser.load();
 }
@@ -619,14 +645,33 @@ function showNewMessageBadge() {
 // WebSocket event handlers
 // ═══════════════════════════════════════
 
+// Deferred status-transition callbacks. Each is cleared on the opposite
+// transition so a quick reconnect / re-disconnect doesn't fire stale timers:
+// the context-window fetch belongs to a live connection, and the
+// streaming-unlock gate must not fire after a reconnect restored state.
+let connectDeferredTimer = null;
+let disconnectDeferredTimer = null;
+
 wsClient.addEventListener("connected", () => {
   updateConnectionStatus("connected");
+  if (disconnectDeferredTimer) {
+    clearTimeout(disconnectDeferredTimer);
+    disconnectDeferredTimer = null;
+  }
+  if (connectDeferredTimer) clearTimeout(connectDeferredTimer);
   // Fetch model context window size for token % display
-  setTimeout(fetchContextWindow, 1000);
+  connectDeferredTimer = setTimeout(() => {
+    connectDeferredTimer = null;
+    fetchContextWindow();
+  }, 1000);
 });
 
 wsClient.addEventListener("disconnected", () => {
   updateConnectionStatus("disconnected");
+  if (connectDeferredTimer) {
+    clearTimeout(connectDeferredTimer);
+    connectDeferredTimer = null;
+  }
   sidebar.clearStreaming();
 
   // Deferred session switch requires agent_end to complete, which won't fire
@@ -640,7 +685,9 @@ wsClient.addEventListener("disconnected", () => {
   // crashed — agent_end won't re-fire after reconnect), unlock the UI.
   // Brief intentional reconnects (Case 1 session switch) complete in < 100 ms
   // so they are unaffected by the 3-second gate.
-  setTimeout(() => {
+  if (disconnectDeferredTimer) clearTimeout(disconnectDeferredTimer);
+  disconnectDeferredTimer = setTimeout(() => {
+    disconnectDeferredTimer = null;
     if (wsClient.connectionState !== "open" && state.isStreaming) {
       state.setStreaming(false);
       showTypingIndicator(false);
@@ -1290,14 +1337,25 @@ function trackPromptDelivery(requestId, message) {
   inFlightPrompts.set(requestId, { message, timer });
 }
 
+// Delayed sidebar/instance refreshes issued after a user prompt. Tracked so a
+// session switch can cancel refreshes belonging to the session the user just
+// left — otherwise a stale 500/1500ms refresh re-renders an outdated list over
+// the fresh one loaded by the switch.
+let pendingPromptRefreshTimers = [];
+
+function cancelPendingPromptRefreshes() {
+  pendingPromptRefreshTimers.forEach(clearTimeout);
+  pendingPromptRefreshTimers = [];
+}
+
 function refreshSidebarAfterUserPrompt() {
   const refresh = () => {
     sidebar.loadSessions({ quiet: true }).catch(() => {});
     pollInstances().catch(() => {});
   };
+  cancelPendingPromptRefreshes();
   refresh();
-  setTimeout(refresh, 500);
-  setTimeout(refresh, 1500);
+  pendingPromptRefreshTimers = [setTimeout(refresh, 500), setTimeout(refresh, 1500)];
 }
 
 function sendMessage() {
@@ -1921,11 +1979,13 @@ setupSidebarSearchControl({
  * so the newly created session shows up once omp writes its first message to disk.
  */
 async function resetUiForNewSession() {
+  // Any prompt-refresh timers still pending belong to the previous session.
   pendingNewSessionPreviousFile =
     mirrorActiveSessionFile ||
     sidebar.activeSessionFile ||
     liveInstances.find((i) => i?.port === foregroundPort)?.sessionFile ||
     null;
+  cancelPendingPromptRefreshes();
   state.reset();
   messageRenderer.clear();
   toolCardRenderer.clear();
@@ -2098,6 +2158,8 @@ async function handleSessionSelectImpl(session, project) {
     projectDir: project?.dirName,
     liveInstances,
   });
+  // Pending prompt-refresh timers belong to the previously viewed session.
+  cancelPendingPromptRefreshes();
   // An explicit session selection supersedes any pending deferred switch.
   // Leaving it set would (a) suppress all live rendering for the newly
   // selected session via the `pendingSessionSwitchPath` guard in
@@ -2942,7 +3004,11 @@ async function loadOMPVersion() {
     return;
   }
   if (piVersionInflight) {
-    return;
+    // Settings was re-opened while a fetch is already running: piggyback on
+    // the shared promise instead of returning early, so this caller also
+    // resolves (and renders) once it settles rather than showing "Loading…"
+    // forever.
+    return piVersionInflight;
   }
   piVersionInflight = (async () => {
     try {
@@ -3346,6 +3412,9 @@ function createBrowseRow(pkg) {
         renderBrowsePackages();
       } catch (err) {
         renderPackageInstallFailure(status, err, installed ? "uninstall" : "install");
+      } finally {
+        // Always restore the button — a failure in the post-install
+        // re-render would otherwise leave it stuck disabled/loading.
         button.disabled = false;
         button.classList.remove("loading");
         setExtensionActionButton(button, previous);
@@ -3470,57 +3539,68 @@ function buildThemeGrid() {
   }
 }
 
+let settingsOpenInFlight = false;
 async function openSettings() {
-  settingsPanel.classList.remove("hidden");
-  messagesContainer.style.display = "none";
-  document.querySelector(".input-area").style.display = "none";
-  document.querySelector(".mode-link:first-child")?.classList.remove("active");
-  selectSettingsTab("general");
-  buildThemeGrid();
-  if (piVersionValue) {
-    piVersionValue.textContent = piVersionCache || "Loading...";
-  }
-  setTimeout(() => {
-    if (!settingsPanel.classList.contains("hidden")) {
-      loadOMPVersion();
-      void ompBinarySettings.refresh();
-    }
-  }, 300);
-  void refreshLanUrl();
-  // Fetch current state for toggles
+  // Deduplicate opens: the panel is already visible, so a rapid re-open
+  // (double click, overlay bounce) gains nothing but would stack duplicate
+  // delayed loads and state fetches. The in-flight run keeps updating the
+  // panel, so ignoring the duplicate is safe.
+  if (settingsOpenInFlight) return;
+  settingsOpenInFlight = true;
   try {
-    const resp = await fetch("/api/rpc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "get_state" }),
-    });
-    const data = await resp.json();
-    if (data.success && data.data) {
-      const s = data.data;
-      // Auto-compaction toggle
-      toggleAutoCompact.className = `settings-toggle${s.autoCompactionEnabled ? " on" : ""}`;
-      // Thinking level
-      btnThinkingLevel.textContent = formatThinkingLevelLabel(s.thinkingLevel);
-      currentThinkingLevel = s.thinkingLevel || "off";
-      updateThinkingBtn();
-      // Session name
-      inputSessionName.value = s.sessionName || "";
+    settingsPanel.classList.remove("hidden");
+    messagesContainer.style.display = "none";
+    document.querySelector(".input-area").style.display = "none";
+    document.querySelector(".mode-link:first-child")?.classList.remove("active");
+    selectSettingsTab("general");
+    buildThemeGrid();
+    if (piVersionValue) {
+      piVersionValue.textContent = piVersionCache || "Loading...";
     }
-  } catch (_e) {
-    // Silent
-  }
+    setTimeout(() => {
+      if (!settingsPanel.classList.contains("hidden")) {
+        loadOMPVersion();
+        void ompBinarySettings.refresh();
+      }
+    }, 300);
+    void refreshLanUrl();
+    // Fetch current state for toggles
+    try {
+      const resp = await fetch("/api/rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "get_state" }),
+      });
+      const data = await resp.json();
+      if (data.success && data.data) {
+        const s = data.data;
+        // Auto-compaction toggle
+        toggleAutoCompact.className = `settings-toggle${s.autoCompactionEnabled ? " on" : ""}`;
+        // Thinking level
+        btnThinkingLevel.textContent = formatThinkingLevelLabel(s.thinkingLevel);
+        currentThinkingLevel = s.thinkingLevel || "off";
+        updateThinkingBtn();
+        // Session name
+        inputSessionName.value = s.sessionName || "";
+      }
+    } catch (_e) {
+      // Silent
+    }
 
-  // Fetch auth state
-  try {
-    const authData = await rpcCommand({ type: "get_auth" });
-    if (authData?.success && authData.data?.configured) {
-      authSection.style.display = "";
-      toggleAuth.className = `settings-toggle${authData.data.enabled ? " on" : ""}`;
-    } else {
+    // Fetch auth state
+    try {
+      const authData = await rpcCommand({ type: "get_auth" });
+      if (authData?.success && authData.data?.configured) {
+        authSection.style.display = "";
+        toggleAuth.className = `settings-toggle${authData.data.enabled ? " on" : ""}`;
+      } else {
+        authSection.style.display = "none";
+      }
+    } catch {
       authSection.style.display = "none";
     }
-  } catch {
-    authSection.style.display = "none";
+  } finally {
+    settingsOpenInFlight = false;
   }
 }
 

@@ -1,16 +1,65 @@
 // @vitest-environment node
 
 import { describe, expect, it } from "vitest";
-import { buildLanAccessUrls, LAN_BIND_HOST } from "./embedded-server.ts";
+import {
+  buildLanAccessUrls,
+  LAN_BIND_HOST,
+  LOOPBACK_BIND_HOST,
+  resolveBindHost,
+} from "./embedded-server.ts";
 
 function restoreBrokerPort(value: string | undefined) {
   if (value === undefined) delete process.env.OMCOT_BROKER_PORT;
   else process.env.OMCOT_BROKER_PORT = value;
 }
 
+function withBindEnv(
+  lanBindHost: string | undefined,
+  ompcotLan: string | undefined,
+  run: () => void,
+) {
+  const previousHost = process.env.LAN_BIND_HOST;
+  const previousLan = process.env.OMCOT_LAN;
+  if (lanBindHost === undefined) delete process.env.LAN_BIND_HOST;
+  else process.env.LAN_BIND_HOST = lanBindHost;
+  if (ompcotLan === undefined) delete process.env.OMCOT_LAN;
+  else process.env.OMCOT_LAN = ompcotLan;
+  try {
+    run();
+  } finally {
+    if (previousHost === undefined) delete process.env.LAN_BIND_HOST;
+    else process.env.LAN_BIND_HOST = previousHost;
+    if (previousLan === undefined) delete process.env.OMCOT_LAN;
+    else process.env.OMCOT_LAN = previousLan;
+  }
+}
+
 describe("embedded server LAN access helpers", () => {
-  it("binds to all interfaces unconditionally", () => {
-    expect(LAN_BIND_HOST).toBe("0.0.0.0");
+  it("binds to loopback unless the user opts into LAN exposure", () => {
+    withBindEnv(undefined, undefined, () => {
+      expect(resolveBindHost()).toBe(LOOPBACK_BIND_HOST);
+    });
+    withBindEnv(undefined, "1", () => {
+      expect(resolveBindHost()).toBe(LAN_BIND_HOST);
+    });
+    withBindEnv(undefined, "true", () => {
+      expect(resolveBindHost()).toBe(LAN_BIND_HOST);
+    });
+    withBindEnv(undefined, "false", () => {
+      expect(resolveBindHost()).toBe(LOOPBACK_BIND_HOST);
+    });
+    withBindEnv(undefined, "", () => {
+      expect(resolveBindHost()).toBe(LOOPBACK_BIND_HOST);
+    });
+  });
+
+  it("honors an explicit LAN_BIND_HOST verbatim", () => {
+    withBindEnv("192.168.1.50", undefined, () => {
+      expect(resolveBindHost()).toBe("192.168.1.50");
+    });
+    withBindEnv("127.0.0.1", "1", () => {
+      expect(resolveBindHost()).toBe("127.0.0.1");
+    });
   });
 
   it("builds mobile chat urls for every LAN host", () => {
