@@ -54,20 +54,94 @@ describe("createOmpBinarySettings", () => {
   });
 
   test("refresh surfaces a transport failure without throwing", async () => {
-    const statusValueEl = document.createElement("span");
-    const transport = {
-      available: true,
-      getOmpBinaryStatus: vi.fn(() => Promise.reject(new Error("broker offline"))),
-    };
-    const settings = createOmpBinarySettings({
-      transport,
-      isNativeAvailable: () => true,
-      statusValueEl,
-      browseBtn: null,
-    });
+    vi.useFakeTimers();
+    try {
+      const statusValueEl = document.createElement("span");
+      const transport = {
+        available: true,
+        getOmpBinaryStatus: vi.fn(() => Promise.reject(new Error("broker offline"))),
+      };
+      const settings = createOmpBinarySettings({
+        transport,
+        isNativeAvailable: () => true,
+        statusValueEl,
+        browseBtn: null,
+      });
 
-    await expect(settings.refresh()).resolves.toBeUndefined();
-    expect(statusValueEl.textContent).toBe("Unavailable (broker offline)");
+      const pending = settings.refresh();
+      await vi.advanceTimersByTimeAsync(2500); // fire the delayed retry
+      await pending;
+
+      expect(statusValueEl.textContent).toBe("Unavailable (broker offline)");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("refresh retries once and recovers after a transient failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const statusValueEl = document.createElement("span");
+      let calls = 0;
+      const transport = {
+        available: true,
+        getOmpBinaryStatus: vi.fn(() => {
+          calls += 1;
+          return calls === 1
+            ? Promise.reject(new Error('Control command "get_omp_binary_status" timed out'))
+            : Promise.resolve({ path: "/x/omp", source: "override" });
+        }),
+      };
+      const settings = createOmpBinarySettings({
+        transport,
+        isNativeAvailable: () => true,
+        statusValueEl,
+        browseBtn: null,
+      });
+
+      const pending = settings.refresh();
+      await vi.advanceTimersByTimeAsync(2500); // fire the delayed retry
+      await pending;
+
+      expect(transport.getOmpBinaryStatus).toHaveBeenCalledTimes(2);
+      expect(statusValueEl.textContent).toBe("/x/omp (manually set)");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a late stale retry does not clobber the newer refresh render", async () => {
+    vi.useFakeTimers();
+    try {
+      const statusValueEl = document.createElement("span");
+      const transport = {
+        available: true,
+        getOmpBinaryStatus: vi.fn(() => {
+          const n = transport.getOmpBinaryStatus.mock.calls.length;
+          if (n === 1) return Promise.reject(new Error("stall"));
+          if (n === 2) return Promise.resolve({ path: "/new/omp", source: "path" }); // newer refresh
+          return Promise.resolve({ path: "/old/omp", source: "env" }); // stale retry
+        }),
+      };
+      const settings = createOmpBinarySettings({
+        transport,
+        isNativeAvailable: () => true,
+        statusValueEl,
+        browseBtn: null,
+      });
+
+      const first = settings.refresh(); // fails → schedules a delayed retry
+      const second = settings.refresh(); // newer, succeeds immediately
+      await second;
+      expect(statusValueEl.textContent).toBe("/new/omp (from PATH)");
+
+      await vi.advanceTimersByTimeAsync(2500); // stale retry lands with old data
+      await first;
+
+      expect(statusValueEl.textContent).toBe("/new/omp (from PATH)");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("successful pick updates the row and notifies the host", async () => {

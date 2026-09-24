@@ -354,14 +354,23 @@ impl BrokerWs {
             command,
             request_id
         );
+        let started = std::time::Instant::now();
         tauri::async_runtime::spawn(async move {
             let response = match handler(command.clone(), args, sink).await {
-                Ok(result) => json!({
-                    "type": "control_response",
-                    "requestId": request_id,
-                    "ok": true,
-                    "result": result,
-                }),
+                Ok(result) => {
+                    log::info!(
+                        "[broker-ws] control command={} ok in {}ms (request_id={})",
+                        command,
+                        started.elapsed().as_millis(),
+                        request_id
+                    );
+                    json!({
+                        "type": "control_response",
+                        "requestId": request_id,
+                        "ok": true,
+                        "result": result,
+                    })
+                }
                 Err(error) => {
                     log::warn!("[broker-ws] control command {} failed: {}", command, error);
                     json!({

@@ -25,6 +25,11 @@ export function createOmpBinarySettings({
   onBinaryChanged,
 }) {
   let picking = false;
+  // Monotonic refresh generation: a late-failing older refresh (or its
+  // delayed retry) must not clobber the render of a newer one.
+  let refreshSeq = 0;
+
+  const STATUS_RETRY_DELAY_MS = 2500;
 
   function render(text) {
     if (statusValueEl) statusValueEl.textContent = text;
@@ -34,16 +39,33 @@ export function createOmpBinarySettings({
     return typeof isNativeAvailable === "function" ? Boolean(isNativeAvailable()) : true;
   }
 
+  function fetchStatus() {
+    return transport.getOmpBinaryStatus();
+  }
+
   async function refresh() {
     // The Browse button drives an OS file dialog, which only the native host
     // provides; the status row itself stays visible everywhere.
     if (browseBtn) browseBtn.classList.toggle("hidden", !nativeAvailable());
     if (!statusValueEl || !transport?.available) return;
+    const seq = ++refreshSeq;
     try {
-      render(formatOmpBinaryStatus(await transport.getOmpBinaryStatus()));
+      render(formatOmpBinaryStatus(await fetchStatus()));
     } catch (err) {
-      console.error("[settings] failed to load omp binary status:", err);
-      render(`Unavailable (${String(err?.message || err || "unknown error")})`);
+      // Transient stalls (e.g. a busy first launch delaying the control
+      // round-trip past its timeout) self-heal with one delayed retry
+      // before the error is surfaced.
+      console.warn("[settings] omp binary status fetch failed; retrying once:", err);
+      await new Promise((resolve) => setTimeout(resolve, STATUS_RETRY_DELAY_MS));
+      try {
+        const status = await fetchStatus();
+        if (seq === refreshSeq) render(formatOmpBinaryStatus(status));
+      } catch (retryErr) {
+        console.error("[settings] failed to load omp binary status:", retryErr);
+        if (seq === refreshSeq) {
+          render(`Unavailable (${String(retryErr?.message || retryErr || "unknown error")})`);
+        }
+      }
     }
   }
 

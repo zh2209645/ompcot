@@ -1011,6 +1011,17 @@ fn main() {
                 .level_for("tungstenite", log::LevelFilter::Warn)
                 .level_for("tokio_util", log::LevelFilter::Warn)
                 .level_for("hyper", log::LevelFilter::Warn)
+                // Persist logs on disk so incidents survive Explorer-launched
+                // sessions (stdout is lost there). Rotating files live under
+                // <app log dir>/ompcot.log — the first place to look when a
+                // broker control command times out or startup misbehaves.
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: None,
+                    }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
+                ])
                 .build(),
         )
         .setup(|app| {

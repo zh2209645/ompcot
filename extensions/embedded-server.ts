@@ -755,8 +755,8 @@ export default function (omp: ExtensionAPI) {
     // Get model info
     const model = ctx.model;
     const aomp = currentOMP();
-    const thinkingLevel = api?.getThinkingLevel() ?? "off";
-    const sessionName = api?.getSessionName() ?? "";
+    const thinkingLevel = aomp?.getThinkingLevel() ?? "off";
+    const sessionName = aomp?.getSessionName() ?? "";
     const sessionFile = ctx.sessionManager.getSessionFile();
 
     // Context usage
@@ -943,10 +943,10 @@ export default function (omp: ExtensionAPI) {
           const model = ctx.model;
           const state = {
             model,
-            thinkingLevel: api?.getThinkingLevel() ?? "off",
+            thinkingLevel: aomp?.getThinkingLevel() ?? "off",
             isStreaming: !ctx.isIdle(),
             sessionFile: ctx.sessionManager.getSessionFile(),
-            sessionName: api?.getSessionName() ?? "",
+            sessionName: aomp?.getSessionName() ?? "",
             autoCompactionEnabled: true, // Extension can't easily check this
           };
           sendTo(ws, success("get_state", state));
