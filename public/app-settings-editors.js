@@ -271,13 +271,10 @@ export function setupSettingsEditors({
   inlineConfigSave?.addEventListener("click", async () => {
     if (!inlineConfigTextarea) return;
     clearSettingsSaveMessage(inlineConfigError);
+    // config.yml is YAML: no client-side JSON validation. The backend
+    // validates the file by reloading settings from disk and rejects
+    // content omp cannot parse.
     const content = inlineConfigTextarea.value;
-    try {
-      JSON.parse(content);
-    } catch (e) {
-      showSettingsSaveError(inlineConfigError, `Invalid JSON: ${e.message}`);
-      return;
-    }
     setSettingsSaveButtonSaving(inlineConfigSave, true);
     try {
       const resp = await fetch("/api/agent-config", {
@@ -301,13 +298,10 @@ export function setupSettingsEditors({
 
   configEditorSave.addEventListener("click", async () => {
     configEditorError.classList.add("hidden");
+    // config.yml is YAML: no client-side JSON validation. The backend
+    // validates the file by reloading settings from disk and rejects
+    // content omp cannot parse.
     const content = configEditorTextarea.value;
-    try {
-      JSON.parse(content);
-    } catch (e) {
-      showConfigError(`Invalid JSON: ${e.message}`);
-      return;
-    }
     configEditorSave.disabled = true;
     try {
       const resp = await fetch("/api/agent-config", {
@@ -370,7 +364,7 @@ export function setupSettingsEditors({
     try {
       const resp = await fetch("/api/models-config");
       const data = await resp.json();
-      if (!data.success) throw new Error(data.error || "Failed to load models.json");
+      if (!data.success) throw new Error(data.error || "Failed to load models.yml");
       try {
         inlineModelsTextarea.value = JSON.stringify(JSON.parse(data.content), null, 2);
       } catch {
@@ -387,23 +381,27 @@ export function setupSettingsEditors({
     if (!inlineModelsTextarea) return;
     clearInlineModelsError();
     const content = inlineModelsTextarea.value;
+    // models.yml is YAML: shape-check only when the content parses as JSON;
+    // raw YAML is passed through and validated by omp when it reloads.
+    let parsedIsJson = true;
     let parsed;
     try {
       parsed = JSON.parse(content);
-    } catch (e) {
-      showInlineModelsError(`Invalid JSON: ${e.message}`);
-      return;
+    } catch {
+      parsedIsJson = false;
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      showInlineModelsError("models.json must be a JSON object.");
-      return;
-    }
-    if (
-      "providers" in parsed &&
-      (typeof parsed.providers !== "object" || Array.isArray(parsed.providers))
-    ) {
-      showInlineModelsError("'providers' must be an object.");
-      return;
+    if (parsedIsJson) {
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        showInlineModelsError("models.yml must be a YAML/JSON object.");
+        return;
+      }
+      if (
+        "providers" in parsed &&
+        (typeof parsed.providers !== "object" || Array.isArray(parsed.providers))
+      ) {
+        showInlineModelsError("'providers' must be an object.");
+        return;
+      }
     }
     setSettingsSaveButtonSaving(inlineModelsSave, true);
     try {
@@ -413,7 +411,7 @@ export function setupSettingsEditors({
         body: JSON.stringify({ content }),
       });
       const data = await resp.json();
-      if (!data.success) throw new Error(data.error || "Failed to save models.json");
+      if (!data.success) throw new Error(data.error || "Failed to save models.yml");
       showSettingsSaveSuccess(inlineModelsError);
       await onModelConfigurationChanged?.();
     } catch (e) {

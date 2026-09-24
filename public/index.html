@@ -32,6 +32,55 @@
       }
     } catch (_e) {}
   </script>
+  <style>
+    /* Agent settings form (Configuration tab). Kept next to the markup it
+       styles; the DOM itself is built by agent-settings.js. */
+    .agent-settings .agent-settings-filter {
+      width: 100%;
+      margin-bottom: 12px;
+    }
+    .agent-settings .agent-settings-error > div:first-child {
+      color: var(--accent-danger, #ef4444);
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+    .agent-settings .agent-settings-loading {
+      font-size: 12px;
+      color: var(--text-dim);
+      padding: 8px 0;
+    }
+    .agent-settings .agent-setting-row {
+      gap: 10px;
+    }
+    .agent-settings .agent-setting-row .agent-setting-input {
+      flex-shrink: 1;
+      width: 200px;
+    }
+    .agent-settings .agent-setting-row-json {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .agent-settings .agent-setting-row-json .agent-setting-json {
+      width: 100%;
+      min-height: 110px;
+    }
+    .agent-settings .agent-setting-status {
+      flex-shrink: 0;
+      max-width: 40%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    .agent-settings .agent-setting-status[data-tone="ok"] {
+      color: var(--accent-success, #4ade80);
+    }
+    .agent-settings .agent-setting-status[data-tone="error"] {
+      color: var(--accent-danger, #ef4444);
+      white-space: normal;
+    }
+  </style>
 </head>
 <body class="">
   <div class="instance-swap-overlay" id="instance-swap-overlay" aria-hidden="true">
@@ -377,7 +426,23 @@
           </div>
 
           <div class="settings-section">
-            <div class="settings-section-title">Agent</div>
+            <div class="settings-section-title">Agent settings</div>
+            <p class="settings-help">
+              Common agent options, editable in place. Changes save
+              automatically and are picked up by the running agent. Secret
+              keys are managed under Authentication above.
+            </p>
+            <div class="agent-settings" id="agent-settings-container">
+              <div class="agent-settings-loading">Loading agent settings…</div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-section-title">Agent config (~/.omp/agent/config.yml)</div>
+            <p class="settings-help">
+              Advanced: edit <code>~/.omp/agent/config.yml</code> directly as
+              YAML/JSON. Prefer the form above for known keys.
+            </p>
             <div class="settings-config-meta">
               <span class="settings-label">Agent config file</span>
               <span class="settings-static-value" id="inline-config-path"></span>
@@ -394,10 +459,10 @@
           <div class="settings-section">
             <div class="settings-section-title">LLM providers</div>
             <p class="settings-help">
-              Edit <code>~/.omp/agent/models.json</code> to add custom providers
+              Edit <code>~/.omp/agent/models.yml</code> to add custom providers
               (Ollama, vLLM, LM Studio, OpenAI-compatible proxies, OpenRouter
               routing overrides, etc). See the
-              <a href="#" id="models-config-docs-link">models.json docs</a>
+              <a href="#" id="models-config-docs-link">models.yml docs</a>
               for the full schema. Changes are picked up immediately — no
               restart needed.
             </p>

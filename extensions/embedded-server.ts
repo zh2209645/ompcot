@@ -12,7 +12,8 @@
  *   omp extension API (sendUserMessage, abort, set_model, etc.)
  * - Expose REST endpoints the frontend queries directly:
  *   `/api/sessions`, `/api/cost-dashboard`, `/api/files`, `/api/search`,
- *   `/api/open`, `/api/agent-config`, `/api/models-config`, `/api/instances`
+ *   `/api/open`, `/api/agent-settings`, `/api/agent-config`,
+ *   `/api/models-config`, `/api/instances`
  * - Forward all omp lifecycle events to connected browsers
  * - Generate session titles from user messages
  *
@@ -34,11 +35,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-  ModelRegistry,
-} from "@oh-my-pi/omp-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@oh-my-pi/omp-coding-agent";
 import QRCode from "qrcode";
 import { type WebSocket, WebSocketServer } from "ws";
 import {
@@ -101,10 +98,13 @@ function buildHomeDirCandidates(): string[] {
 }
 
 function resolveOmpAgentRoot(): string {
-  // Prefer whichever home candidate already has .omp/agent on disk.
+  // omp 18.x uses `.omp/agent`; `.pi/agent` is the legacy layout. Per home
+  // candidate, prefer the modern directory first, then the legacy one.
   for (const home of buildHomeDirCandidates()) {
-    const candidate = path.join(home, ".pi", "agent");
-    if (fs.existsSync(candidate)) return candidate;
+    for (const dirName of [".omp", ".pi"]) {
+      const candidate = path.join(home, dirName, "agent");
+      if (fs.existsSync(candidate)) return candidate;
+    }
   }
 
   // Fallback for some Windows setups where app data is relocated.
@@ -115,7 +115,7 @@ function resolveOmpAgentRoot(): string {
   }
 
   const home = buildHomeDirCandidates()[0] || "~";
-  return path.join(home, ".pi", "agent");
+  return path.join(home, ".omp", "agent");
 }
 
 const OMP_AGENT_ROOT = resolveOmpAgentRoot();
@@ -432,6 +432,11 @@ type EmbeddedServerGlobal = {
   // launcher / sidebar warmup latency for users with many sessions.
   sessionHeaderCache: Map<string, SessionFileCacheEntry<unknown>>;
   sessionMetricsCache: Map<string, SessionFileCacheEntry<unknown>>;
+  // Idempotence flag for the process-scoped Settings.onEffectiveChange
+  // subscription (see startServer): the extension reloads on every
+  // new_session / switch_session / fork, and each reload must not add
+  // another listener to the process-wide settings singleton.
+  settingsChangeSubscribed: boolean;
 };
 
 const EMBEDDED_GLOBAL_KEY = "__ompcotEmbeddedServer__";
@@ -464,6 +469,106 @@ function errMessage(e: unknown): string {
   return String(e);
 }
 
+// ─── omp agent settings surface ──────────────────────────────────────────────
+//
+// Structural types for the omp runtime's Settings singleton and package
+// namespace. We deliberately do not value-import `@oh-my-pi/omp-coding-agent`
+// (the bundle keeps it external): the ExtensionAPI exposes the package
+// namespace as `omp.pi`, and every member below is optional so a mismatched
+// embedded omp version degrades to the CLI fallback instead of crashing the
+// extension. This is a source-level contract, not a documented API.
+
+type OmpSettingsInstanceLike = {
+  get?: (path: string) => unknown;
+  set?: (path: string, value: unknown) => unknown;
+  onEffectiveChange?: (listener: (path: string, value: unknown) => void) => () => void;
+  reloadFromDisk?: () => unknown;
+  getAgentDir?: () => string;
+  list?: () => unknown;
+  entries?: () => unknown;
+  // Documented in the SDK source: forces the debounced global-layer save to
+  // disk. Awaited after set() so a PUT response means "persisted", not
+  // "queued" (a quick process exit would otherwise drop the write).
+  flush?: () => void | Promise<void>;
+};
+
+type OmpSettingsStaticLike = {
+  instance?: OmpSettingsInstanceLike | null;
+  SETTINGS_SCHEMA?: Record<string, unknown>;
+};
+
+type OmpPackageNamespaceLike = {
+  Settings?: OmpSettingsStaticLike;
+  settings?: OmpSettingsInstanceLike;
+};
+
+type OmpSettingMeta = {
+  type: string;
+  description: string;
+  redacted: boolean;
+  hasValue: boolean;
+  value?: unknown;
+};
+
+type AgentSettingRow = {
+  key: string;
+  value: unknown;
+  type: string;
+  description: string;
+  redacted: boolean;
+};
+
+// Keys whose values must never be echoed back to a client. The CLI catalog
+// flags these via `redacted: true`; this heuristic additionally covers the
+// in-process enumeration path (and any key the catalog forgot to flag).
+function isCredentialLikeKey(key: string): boolean {
+  const k = key.toLowerCase();
+  return (
+    k === "auth.broker.token" ||
+    k.endsWith("apikey") || // *.apiKey
+    k.includes("token") || // *token*
+    k.includes("password") || // *password*
+    k.includes("secret") // *secret*
+  );
+}
+
+// CLI fallbacks shell out to the embedded omp binary itself: this extension
+// runs *inside* that process. `process.execPath` is the omp executable for
+// compiled builds, but for shim-style installs (e.g. `bun i -g` bins) it is
+// the *runtime* (bun.exe) with the omp entry script at process.argv[1] —
+// re-compose the command line so both layouts work.
+const OMP_CLI_TIMEOUT_MS = 15000;
+
+function resolveOmpCliInvocation(): { cmd: string; prefix: string[] } {
+  // Preferred: the Rust manager passes the exact omp binary it spawned via
+  // env (works for both compiled binaries and shim installs).
+  const fromEnv = process.env.OMPCOT_OMP_BIN?.trim();
+  if (fromEnv) {
+    return { cmd: fromEnv, prefix: [] };
+  }
+  const argv1 = process.argv[1];
+  if (argv1 && /\.(?:[cm]?js|[cm]?ts)$/i.test(argv1)) {
+    // Shim layout: <runtime> <omp-entry.js> ...user args
+    return { cmd: process.execPath, prefix: [argv1] };
+  }
+  // Compiled layout: process.execPath IS the omp binary.
+  return { cmd: process.execPath, prefix: [] };
+}
+
+function execOmpCli(args: string[], timeoutMs: number): Promise<string> {
+  const { cmd, prefix } = resolveOmpCliInvocation();
+  return execFileText(cmd, [...prefix, ...args], timeoutMs);
+}
+
+function execFileText(command: string, args: string[], timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: timeoutMs, encoding: "utf8" }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(typeof stdout === "string" ? stdout : String(stdout ?? ""));
+    });
+  });
+}
+
 function getOrCreateGlobalState(): EmbeddedServerGlobal {
   const g = globalThis as Record<string, unknown>;
   if (!g[EMBEDDED_GLOBAL_KEY]) {
@@ -481,6 +586,7 @@ function getOrCreateGlobalState(): EmbeddedServerGlobal {
       modelRegistry: null,
       sessionHeaderCache: new Map<string, SessionFileCacheEntry<unknown>>(),
       sessionMetricsCache: new Map<string, SessionFileCacheEntry<unknown>>(),
+      settingsChangeSubscribed: false,
     } as EmbeddedServerGlobal;
   }
   return g[EMBEDDED_GLOBAL_KEY] as EmbeddedServerGlobal;
@@ -513,7 +619,10 @@ export default function (omp: ExtensionAPI) {
   // `session_shutdown` and the new instance's `session_start`; callers
   // must treat that as "no active session".
   function currentOMP(): ExtensionAPI | null {
-    return globalState.getApi?.() ?? null;
+    // `getAomp` is the getter actually published on globalState (:2981);
+    // `getApi` is kept as a legacy fallback from the pi→omp rename (d4cb8b0),
+    // which renamed the declaration but not every reader.
+    return globalState.getAomp?.() ?? globalState.getApi?.() ?? null;
   }
 
   // ═══════════════════════════════════════
@@ -799,8 +908,11 @@ export default function (omp: ExtensionAPI) {
     // …). Returning a clean error here is cheaper than letting the call
     // throw `"This extension ctx is stale after session replacement"` and
     // having oh-my-omp re-emit it as an `extension_error` event in chat.
+    // (The pi→omp rename d4cb8b0 left the call sites as `requireApi` and the
+    // guard below referencing `api`; both were undefined and every call threw
+    // a caught ReferenceError. Restored here.)
     const requireAomp = (cmd: string): ExtensionAPI | null => {
-      if (api) return aomp;
+      if (aomp) return aomp;
       sendTo(ws, error(cmd, "No active session"));
       return null;
     };
@@ -809,7 +921,7 @@ export default function (omp: ExtensionAPI) {
       switch (command.type) {
         // ─── Prompting ───
         case "prompt": {
-          const a = requireApi("prompt");
+          const a = requireAomp("prompt");
           if (!a) break;
           if (ctx && !ctx.isIdle()) {
             const behavior = command.streamingBehavior || "steer";
@@ -869,7 +981,7 @@ export default function (omp: ExtensionAPI) {
         }
 
         case "steer": {
-          const a = requireApi("steer");
+          const a = requireAomp("steer");
           if (!a) break;
           a.sendUserMessage(command.message, { deliverAs: "steer" });
           sendTo(ws, success("steer"));
@@ -877,7 +989,7 @@ export default function (omp: ExtensionAPI) {
         }
 
         case "follow_up": {
-          const a = requireApi("follow_up");
+          const a = requireAomp("follow_up");
           if (!a) break;
           a.sendUserMessage(command.message, { deliverAs: "followUp" });
           sendTo(ws, success("follow_up"));
@@ -1087,7 +1199,7 @@ export default function (omp: ExtensionAPI) {
             sendTo(ws, error("set_model", "No context available"));
             break;
           }
-          const a = requireApi("set_model");
+          const a = requireAomp("set_model");
           if (!a) break;
           const models = await ctx.modelRegistry.getAvailable();
           const model = models.find(
@@ -1117,7 +1229,7 @@ export default function (omp: ExtensionAPI) {
             sendTo(ws, success("cycle_model", null));
             break;
           }
-          const a = requireApi("cycle_model");
+          const a = requireAomp("cycle_model");
           if (!a) break;
           const availModels = await ctx.modelRegistry.getAvailable();
           const currentModel = ctx.model;
@@ -1143,7 +1255,7 @@ export default function (omp: ExtensionAPI) {
 
         // ─── Thinking ───
         case "cycle_thinking_level": {
-          const a = requireApi("cycle_thinking_level");
+          const a = requireAomp("cycle_thinking_level");
           if (!a) break;
           const levels = ["off", "minimal", "low", "medium", "high"];
           const current = a.getThinkingLevel();
@@ -1155,7 +1267,7 @@ export default function (omp: ExtensionAPI) {
         }
 
         case "set_thinking_level": {
-          const a = requireApi("set_thinking_level");
+          const a = requireAomp("set_thinking_level");
           if (!a) break;
           a.setThinkingLevel(command.level as Parameters<typeof a.setThinkingLevel>[0]);
           sendTo(ws, success("set_thinking_level"));
@@ -1200,7 +1312,7 @@ export default function (omp: ExtensionAPI) {
             sendTo(ws, error("set_session_name", "Name cannot be empty"));
             break;
           }
-          const a = requireApi("set_session_name");
+          const a = requireAomp("set_session_name");
           if (!a) break;
           a.setSessionName(name);
           sendTo(ws, success("set_session_name"));
@@ -1364,6 +1476,229 @@ export default function (omp: ExtensionAPI) {
   }
 
   // ═══════════════════════════════════════
+  // Agent settings (omp config) — in-process + CLI surfaces
+  // ═══════════════════════════════════════
+  //
+  // The omp runtime owns a process-scoped Settings singleton (reachable via
+  // the ExtensionAPI's package namespace, `omp.pi.Settings.instance`) that
+  // reads/writes ~/.omp/agent/config.yml, persists to the global layer
+  // debounced + lock-safe, and applies changes in-process immediately. All
+  // access below is optional-chained and try/catch'd so a mismatched
+  // embedded omp version degrades to the CLI fallback (`omp config …` via
+  // process.execPath, which IS the embedded omp binary here).
+
+  // Resolve the package namespace off the freshest ExtensionAPI. Prefer the
+  // process-global re-published reference (survives new_session /
+  // switch_session / fork reloads); the captured `omp` is the fallback for
+  // the pre-first-start window. Settings is process-scoped (like
+  // modelRegistry), so fallback staleness is harmless for our use.
+  function currentPi(): OmpPackageNamespaceLike | null {
+    const api: unknown = globalState.getAomp?.() ?? omp;
+    const pi = (api as { pi?: OmpPackageNamespaceLike } | null | undefined)?.pi;
+    return pi ?? null;
+  }
+
+  function getSettingsInstance(): OmpSettingsInstanceLike | null {
+    const pi = currentPi();
+    const fromClass = pi?.Settings?.instance;
+    if (fromClass && typeof fromClass === "object") return fromClass;
+    const standalone = pi?.settings;
+    if (standalone && typeof standalone === "object") return standalone;
+    return null;
+  }
+
+  // Enumerate setting keys + metadata in-process. We try, in order:
+  //   1. instance.list() / instance.entries() — full rows (key/value/type/
+  //      description/redacted) when the runtime exposes them,
+  //   2. the exported Settings.SETTINGS_SCHEMA key map.
+  // Values are NOT trusted from enumeration — the caller refreshes them via
+  // instance.get() so the WebView always sees effective in-process values.
+  function collectInProcessSettingMetas(
+    instance: OmpSettingsInstanceLike,
+  ): Map<string, OmpSettingMeta> {
+    const metas = new Map<string, OmpSettingMeta>();
+
+    const upsert = (
+      key: unknown,
+      meta: { value?: unknown; type?: unknown; description?: unknown; redacted?: unknown },
+    ) => {
+      if (typeof key !== "string" || !key.trim()) return;
+      const prev = metas.get(key);
+      const type =
+        typeof meta.type === "string" && meta.type ? meta.type : (prev?.type ?? "string");
+      const description =
+        typeof meta.description === "string" && meta.description
+          ? meta.description
+          : (prev?.description ?? "");
+      const redacted = meta.redacted === true || (prev?.redacted ?? false);
+      const hasValue = prev?.hasValue || meta.value !== undefined;
+      const value = prev?.hasValue ? prev.value : meta.value;
+      metas.set(key, { type, description, redacted, hasValue, value });
+    };
+
+    for (const method of ["list", "entries"] as const) {
+      const fn = instance[method];
+      if (typeof fn !== "function") continue;
+      try {
+        const out = fn.call(instance) as unknown;
+        if (Array.isArray(out)) {
+          for (const item of out) {
+            if (typeof item === "string") upsert(item, {});
+            else if (item && typeof item === "object") {
+              upsert((item as { key?: unknown }).key, item as Record<string, unknown>);
+            }
+          }
+        } else if (out && typeof out === "object") {
+          for (const [key, meta] of Object.entries(out)) {
+            if (meta && typeof meta === "object") upsert(key, meta as Record<string, unknown>);
+            else upsert(key, { value: meta });
+          }
+        }
+      } catch {}
+    }
+
+    const schema = currentPi()?.Settings?.SETTINGS_SCHEMA;
+    if (schema && typeof schema === "object") {
+      for (const [key, def] of Object.entries(schema)) {
+        if (def && typeof def === "object") upsert(key, def as Record<string, unknown>);
+        else upsert(key, {});
+      }
+    }
+
+    return metas;
+  }
+
+  function buildInProcessSettingRows(
+    instance: OmpSettingsInstanceLike,
+    metas: Map<string, OmpSettingMeta>,
+  ): AgentSettingRow[] {
+    const rows: AgentSettingRow[] = [];
+    for (const [key, meta] of metas) {
+      const redacted = meta.redacted || isCredentialLikeKey(key);
+      let value: unknown = meta.hasValue ? meta.value : null;
+      if (!redacted && typeof instance.get === "function") {
+        try {
+          const live = instance.get(key);
+          if (live !== undefined) value = live;
+        } catch {}
+      }
+      rows.push({
+        key,
+        value: redacted ? null : (value ?? null),
+        type: meta.type,
+        description: meta.description,
+        redacted,
+      });
+    }
+    return rows.sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  // CLI fallback catalog: `omp config list --json` prints
+  // { "<dotted.key>": { value?, type, description, redacted? }, ... }.
+  async function collectCliSettingRows(): Promise<AgentSettingRow[] | null> {
+    let stdout: string;
+    try {
+      stdout = await execOmpCli(["config", "list", "--json"], OMP_CLI_TIMEOUT_MS);
+    } catch (e) {
+      const { cmd, prefix } = resolveOmpCliInvocation();
+      console.error(
+        `[Embedded] agent-settings CLI fallback spawn failed (${cmd} ${prefix.join(" ")}):`,
+        errMessage(e),
+      );
+      return null;
+    }
+    let catalog: unknown;
+    try {
+      catalog = JSON.parse(stdout);
+    } catch (e) {
+      console.error(
+        "[Embedded] agent-settings CLI fallback produced non-JSON output:",
+        errMessage(e),
+      );
+      return null;
+    }
+    if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) return null;
+    const rows: AgentSettingRow[] = [];
+    for (const [key, metaRaw] of Object.entries(catalog)) {
+      const meta = (metaRaw && typeof metaRaw === "object" ? metaRaw : {}) as Record<
+        string,
+        unknown
+      >;
+      const redacted = meta.redacted === true || isCredentialLikeKey(key);
+      rows.push({
+        key,
+        value: redacted ? null : (meta.value ?? null),
+        type: typeof meta.type === "string" && meta.type ? meta.type : "string",
+        description: typeof meta.description === "string" ? meta.description : "",
+        redacted,
+      });
+    }
+    return rows.sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  async function serveAgentSettingsCatalog(res: http.ServerResponse) {
+    try {
+      const instance = getSettingsInstance();
+      let rows: AgentSettingRow[] | null = null;
+      let source: "inprocess" | "cli" = "cli";
+      if (instance) {
+        const metas = collectInProcessSettingMetas(instance);
+        if (metas.size > 0) {
+          rows = buildInProcessSettingRows(instance, metas);
+          source = "inprocess";
+        } else {
+          console.error(
+            "[Embedded] agent-settings: in-process Settings instance reachable but no enumeration surface (list/entries/SETTINGS_SCHEMA) matched",
+          );
+        }
+      } else {
+        console.error(
+          "[Embedded] agent-settings: in-process Settings surface unreachable (omp.pi missing)",
+        );
+      }
+      if (!rows) {
+        rows = await collectCliSettingRows();
+      }
+      if (!rows) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error:
+              "Unable to enumerate agent settings (in-process Settings surface and `omp config list --json` both unavailable)",
+          }),
+        );
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ agentRoot: OMP_AGENT_ROOT, source, settings: rows }));
+    } catch (e: unknown) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: errMessage(e) }));
+    }
+  }
+
+  // Set one setting. In-process set() persists to the global layer and is
+  // effective immediately; on absence/throw we fall back to the CLI.
+  async function applyAgentSetting(key: string, value: unknown): Promise<void> {
+    const instance = getSettingsInstance();
+    if (instance && typeof instance.set === "function") {
+      try {
+        instance.set(key, value);
+        // set() persists on a debounce; flush before responding so the write
+        // survives an immediately-following process exit.
+        if (typeof instance.flush === "function") {
+          await instance.flush();
+        }
+        return;
+      } catch {
+        // Fall through to the CLI below — a set() throw usually means the
+        // in-process surface rejected the value (unknown key, bad type).
+      }
+    }
+    await execOmpCli(["config", "set", key, String(value)], OMP_CLI_TIMEOUT_MS);
+  }
+
+  // ═══════════════════════════════════════
   // API routes (sessions list, etc.)
   // ═══════════════════════════════════════
   async function handleApiRoute(
@@ -1375,7 +1710,7 @@ export default function (omp: ExtensionAPI) {
 
     // CORS headers
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
     if (req.method === "OPTIONS") {
@@ -1685,11 +2020,100 @@ export default function (omp: ExtensionAPI) {
       return;
     }
 
-    // Agent config read/write
+    // Agent settings catalog (omp config): schema + effective values for
+    // the Settings → Agent panel. Enumerated in-process off the omp
+    // runtime's Settings singleton when possible (source: "inprocess"),
+    // falling back to `omp config list --json` (source: "cli"). Redacted /
+    // credential-like keys always come back with value: null — the catalog
+    // is for schema/UI, never for secret retrieval.
+    if (urlPath === "/api/agent-settings" && req.method === "GET") {
+      await serveAgentSettingsCatalog(res);
+      return;
+    }
+
+    if (urlPath === "/api/agent-settings" && req.method === "PUT") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      req.on("end", async () => {
+        let key: unknown;
+        let value: unknown;
+        try {
+          const parsed = JSON.parse(body);
+          key = parsed?.key;
+          value = parsed?.value ?? null;
+        } catch (e: unknown) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: errMessage(e) }));
+          return;
+        }
+        if (typeof key !== "string" || !/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/.test(key)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: 'key must be a non-empty dotted path (e.g. "theme", "auth.broker.token")',
+            }),
+          );
+          return;
+        }
+        try {
+          await applyAgentSetting(key, value);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, key, value }));
+        } catch (e: unknown) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: errMessage(e) }));
+        }
+      });
+      return;
+    }
+
+    if (urlPath === "/api/agent-settings/reset" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      req.on("end", async () => {
+        let key: unknown;
+        try {
+          key = JSON.parse(body)?.key;
+        } catch (e: unknown) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: errMessage(e) }));
+          return;
+        }
+        if (typeof key !== "string" || !key.trim()) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "key is required" }));
+          return;
+        }
+        try {
+          // No in-process equivalent is documented for reset — always CLI.
+          await execOmpCli(["config", "reset", key], OMP_CLI_TIMEOUT_MS);
+          const settings = getSettingsInstance();
+          try {
+            await settings?.reloadFromDisk?.();
+          } catch {}
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, key }));
+        } catch (e: unknown) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: errMessage(e) }));
+        }
+      });
+      return;
+    }
+
+    // Agent config read/write — <agentRoot>/config.yml, the omp global
+    // settings layer (YAML, persisted debounced + lock-safe by the omp
+    // runtime itself).
     if (urlPath === "/api/agent-config" && req.method === "GET") {
       try {
-        const configPath = path.join(OMP_AGENT_ROOT, "settings.json");
-        const content = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "{}";
+        const configPath = path.join(OMP_AGENT_ROOT, "config.yml");
+        // Empty string is a valid (null) YAML document — safer default than
+        // guessing at skeleton keys the runtime doesn't expect.
+        const content = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true, content, path: configPath }));
       } catch (e: unknown) {
@@ -1704,7 +2128,7 @@ export default function (omp: ExtensionAPI) {
       req.on("data", (chunk: Buffer) => {
         body += chunk.toString();
       });
-      req.on("end", () => {
+      req.on("end", async () => {
         try {
           const { content } = JSON.parse(body);
           if (typeof content !== "string") {
@@ -1712,13 +2136,33 @@ export default function (omp: ExtensionAPI) {
             res.end(JSON.stringify({ success: false, error: "content must be a string" }));
             return;
           }
-          // Validate JSON before saving
-          JSON.parse(content);
-          const configPath = path.join(OMP_AGENT_ROOT, "settings.json");
+          const configPath = path.join(OMP_AGENT_ROOT, "config.yml");
           fs.mkdirSync(path.dirname(configPath), { recursive: true });
           fs.writeFileSync(configPath, content, "utf8");
+          // Validate via omp's own YAML loader: reloading the in-process
+          // Settings from disk throws on invalid YAML, which we surface as
+          // a 400 so the user can fix the editor content. When the
+          // in-process surface isn't reachable, accept the write as-is —
+          // omp tolerates (and re-reports) a broken file at next start.
+          let validated = false;
+          try {
+            const settings = getSettingsInstance();
+            if (settings && typeof settings.reloadFromDisk === "function") {
+              await settings.reloadFromDisk();
+              validated = true;
+            }
+          } catch (e: unknown) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                success: false,
+                error: `Invalid config.yml (saved, but omp could not parse it): ${errMessage(e)}`,
+              }),
+            );
+            return;
+          }
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ success: true }));
+          res.end(JSON.stringify({ success: true, validated }));
         } catch (e: unknown) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: false, error: errMessage(e) }));
@@ -1727,9 +2171,9 @@ export default function (omp: ExtensionAPI) {
       return;
     }
 
-    // LLM providers / models.json read/write
+    // LLM providers / models.yml read/write
     //
-    // Exposes ~/.omp/agent/models.json — the file omp uses to declare custom
+    // Exposes <agentRoot>/models.yml — the file omp uses to declare custom
     // providers and models (Ollama, vLLM, LM Studio, OpenAI-compat proxies,
     // OpenRouter routing overrides, etc). See docs/models.md in the embedded
     // omp runtime for the schema. The frontend Settings → Configuration →
@@ -1738,13 +2182,13 @@ export default function (omp: ExtensionAPI) {
     //
     // After a successful save we call modelRegistry.refresh() so the new
     // providers/models show up in the model picker immediately — matching the
-    // omp behaviour where /model rereads models.json on each invocation.
+    // omp behaviour where /model rereads models.yml on each invocation.
     if (urlPath === "/api/models-config" && req.method === "GET") {
       try {
-        const configPath = path.join(OMP_AGENT_ROOT, "models.json");
+        const configPath = path.join(OMP_AGENT_ROOT, "models.yml");
         const content = fs.existsSync(configPath)
           ? fs.readFileSync(configPath, "utf8")
-          : '{\n  "providers": {}\n}\n';
+          : "providers: {}\n";
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true, content, path: configPath }));
       } catch (e: unknown) {
@@ -1767,26 +2211,11 @@ export default function (omp: ExtensionAPI) {
             res.end(JSON.stringify({ success: false, error: "content must be a string" }));
             return;
           }
-          // Validate as JSON before saving.
-          const parsed = JSON.parse(content);
-          // Light schema sanity check — omp itself does the real validation
-          // on reload, but reject the obviously wrong shape early so users
-          // get a clear error instead of a silently broken models.json.
-          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            if (
-              "providers" in parsed &&
-              (typeof parsed.providers !== "object" || Array.isArray(parsed.providers))
-            ) {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ success: false, error: "'providers' must be an object" }));
-              return;
-            }
-          } else {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ success: false, error: "models.json must be a JSON object" }));
-            return;
-          }
-          const configPath = path.join(OMP_AGENT_ROOT, "models.json");
+          // models.yml is YAML and we don't parse YAML here (no new deps),
+          // so content validation is left to the omp runtime on reload.
+          // omp itself does the real validation and reports parse errors at
+          // startup / on next model-list refresh.
+          const configPath = path.join(OMP_AGENT_ROOT, "models.yml");
           fs.mkdirSync(path.dirname(configPath), { recursive: true });
           fs.writeFileSync(configPath, content, "utf8");
           // Reload omp's in-memory model registry so the picker sees the new
@@ -2597,6 +3026,31 @@ export default function (omp: ExtensionAPI) {
     globalState.buildStateSnapshot = buildStateSnapshot;
     globalState.getLatestCtx = () => latestCtx;
     globalState.getAomp = () => omp;
+
+    // Subscribe ONCE per process to omp's effective-settings change feed so
+    // connected WebViews live-update when a setting changes — whether the
+    // change came from Ompcot, another omp process, or this one. Best-effort:
+    // when the in-process surface isn't reachable we clear the flag so a
+    // later extension reload (after new_session / switch_session / fork) can
+    // retry. Credential-like values are masked before broadcast.
+    if (!globalState.settingsChangeSubscribed) {
+      globalState.settingsChangeSubscribed = true;
+      try {
+        const instance = getSettingsInstance();
+        const unsubscribe = instance?.onEffectiveChange?.((path: string, value: unknown) => {
+          broadcast({
+            type: "settings_changed",
+            path,
+            value: isCredentialLikeKey(path) ? null : value,
+          });
+        });
+        if (typeof unsubscribe !== "function") {
+          globalState.settingsChangeSubscribed = false;
+        }
+      } catch {
+        globalState.settingsChangeSubscribed = false;
+      }
+    }
 
     // Re-register the instance entry with the *current* session file so
     // `/api/instances` reports the right session.

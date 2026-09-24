@@ -718,6 +718,11 @@ impl OmpManager {
             .env("OMCOT_STATIC_DIR", &static_dir)
             .env("OMCOT_PORT", port.to_string())
             .env("OMCOT_OMP_VERSION", run_omp_version(&pi_bin))
+            // Tell the embedded extension which omp binary to shell out to for
+            // CLI fallbacks (`omp config …`). Inside a shim-style install
+            // process.execPath is the bun runtime, NOT omp, so the extension
+            // cannot derive this reliably on its own.
+            .env("OMPCOT_OMP_BIN", &pi_bin_str)
             .stdin(Stdio::piped())
             // Drop stdout: omp emits RPC frames on it that we don't consume here, and
             // letting it fill an unread pipe would eventually block the child.

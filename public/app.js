@@ -2,6 +2,7 @@
  * Main App - Ties everything together
  */
 
+import { createAgentSettings } from "./agent-settings.js";
 import { setupContextViz } from "./app-context-viz.js";
 import { setupSettingsEditors } from "./app-settings-editors.js";
 import { setupSettingsToggles } from "./app-settings-toggles.js";
@@ -2919,6 +2920,7 @@ function selectSettingsTab(tabKey = "general") {
   });
   if (targetTabKey === "configuration") {
     loadApiKeysPanel();
+    agentSettings.load();
     loadInlineConfigEditor();
     loadInlineModelsEditor();
   }
@@ -3572,6 +3574,25 @@ setupSettingsToggles({
   showSettingsSaveError,
   showSettingsSaveSuccess,
 }));
+
+// Settings → Configuration → Agent settings form (see agent-settings.js).
+const agentSettings = createAgentSettings({
+  fetchJson: async (url, options = {}) => {
+    const resp = await fetch(url, {
+      method: options.method || "GET",
+      headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+    if (!resp.ok) throw new Error((await resp.text()) || `HTTP ${resp.status}`);
+    return resp.json();
+  },
+  wsSubscribe: (cb) => {
+    const handler = (event) => cb(event.detail);
+    wsClient.addEventListener("settingsChanged", handler);
+    return () => wsClient.removeEventListener("settingsChanged", handler);
+  },
+});
+agentSettings.attach(document.getElementById("agent-settings-container"));
 
 // Restore saved theme
 const savedTheme = getCurrentTheme();

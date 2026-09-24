@@ -407,6 +407,12 @@ export class WebSocketClient extends EventTarget {
       case "session_switch":
         this.dispatchEvent(new CustomEvent("sessionSwitch"));
         break;
+      case "settings_changed":
+        // Live agent-settings update pushed by the embedded server (or a
+        // broker_event unwrapping to one). Lets the settings form sync idle
+        // fields without a refetch.
+        this.dispatchEvent(new CustomEvent("settingsChanged", { detail: message }));
+        break;
       case "mirror_sync":
         // Do NOT call setRoutingContext here. The broker broadcasts every
         // upstream's `mirror_sync` to all UI clients, so a snapshot emitted by
