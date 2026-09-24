@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Ompcot",
   "identifier": "works.zephyrq.ompcot",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "build": {
     "frontendDist": "../public",
     "beforeDevCommand": "bun run build:extensions",
