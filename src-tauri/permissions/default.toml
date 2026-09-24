@@ -3,10 +3,16 @@ identifier = "allow-cmd-retry-startup"
 description = "Allow retrying startup after a failed embedded omp launch (used by the bootstrap error window)"
 commands.allow = ["cmd_retry_startup"]
 
+[[permission]]
+identifier = "allow-cmd-pick-omp-binary"
+description = "Allow picking, validating and persisting a custom omp binary path via the native file dialog (used by the bootstrap error window)"
+commands.allow = ["cmd_pick_omp_binary"]
+
 # Permission set that bundles all custom command permissions.
 # Referenced from capabilities/default.json as "pi-desktop:default".
 [default]
 description = "Default permissions bundle for OMP Desktop custom commands"
 permissions = [
   "allow-cmd-retry-startup",
+  "allow-cmd-pick-omp-binary",
 ]

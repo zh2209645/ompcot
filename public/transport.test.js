@@ -59,6 +59,17 @@ describe("WsTransport", () => {
     );
   });
 
+  test("omp binary ops map to their control commands", async () => {
+    const ws = fakeWsClient();
+    const transport = createTransport({ wsClient: ws, env: {} });
+
+    await transport.getOmpBinaryStatus();
+    await transport.pickOmpBinary();
+
+    expect(ws.sendControl).toHaveBeenCalledWith("get_omp_binary_status", {}, {});
+    expect(ws.sendControl).toHaveBeenCalledWith("pick_omp_binary", {}, { timeoutMs: 0 });
+  });
+
   test("capabilities reflect the underlying ws client", () => {
     const transport = new WsTransport(fakeWsClient({ native: false }), {});
     expect(transport.capabilities.native).toBe(false);

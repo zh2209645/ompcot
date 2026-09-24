@@ -29,6 +29,8 @@
 // across the navigation boundary via sessionStorage; the new page boots
 // straight into it (see index.html bootstrap script).
 
+import { appendOmpBinaryHint } from "./omp-binary-errors.js";
+
 // Append the broker WS URL to a navigation target so the freshly-loaded
 // page (on a *different* origin/port) can reach the shared broker. Without
 // this the new page can't recover the broker URL: it isn't in the URL, and
@@ -107,7 +109,7 @@ async function attachToWorkspace({
       });
     } catch (e) {
       dismissOverlay();
-      if (renderError) renderError(`Failed to attach to workspace: ${e}`);
+      if (renderError) renderError(appendOmpBinaryHint(`Failed to attach to workspace: ${e}`));
       return null;
     }
   }
@@ -255,7 +257,7 @@ async function spawnFreshSession({
     return true;
   } catch (e) {
     dismissOverlay();
-    renderError(`${errorLabel}: ${e}`);
+    renderError(appendOmpBinaryHint(`${errorLabel}: ${e}`));
     return false;
   }
 }

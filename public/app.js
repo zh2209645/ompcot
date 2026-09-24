@@ -13,6 +13,7 @@ import { anchorHistoryToBottom } from "./history-scroll-anchor.js";
 import { setupMessagesInsets } from "./layout-insets.js";
 import { MessageRenderer } from "./message-renderer.js";
 import { resolveNewSessionLiveFile } from "./new-session-refresh.js";
+import { createOmpBinarySettings } from "./omp-binary-settings.js";
 import { getOnboardingState } from "./onboarding-state.js";
 import { renderPackageInstallFailure } from "./package-install-status.js";
 import { findPortForSession, getWorkspacePathForPort } from "./session-routing.js";
@@ -3420,6 +3421,21 @@ const updater = createAppUpdater({
 });
 void updater.initUpdaterUI();
 
+// Settings → General → Runtime: resolved omp binary path + manual override.
+// After a successful pick the backend resolver immediately prefers the saved
+// path, so we just clear the cached version and re-fetch it.
+const ompBinarySettings = createOmpBinarySettings({
+  transport,
+  isNativeAvailable: nativeAvailable,
+  statusValueEl: document.getElementById("setting-omp-binary-value"),
+  browseBtn: document.getElementById("btn-browse-omp-binary"),
+  onBinaryChanged: async () => {
+    if (piVersionInflight) await piVersionInflight.catch(() => {});
+    piVersionCache = null;
+    loadOMPVersion();
+  },
+});
+
 // Native capabilities arrive asynchronously over the broker WS (the handshake
 // frame lands right after connect). Re-evaluate native-gated UI once it's known
 // so buttons that were hidden on first paint appear when attached to the host.
@@ -3427,6 +3443,7 @@ wsClient.addEventListener("capabilities", () => {
   refreshHeaderOpenAppButton();
   void loadHeaderOpenApps();
   void updater.initUpdaterUI();
+  void ompBinarySettings.refresh();
 });
 
 function buildThemeGrid() {
@@ -3462,7 +3479,10 @@ async function openSettings() {
     piVersionValue.textContent = piVersionCache || "Loading...";
   }
   setTimeout(() => {
-    if (!settingsPanel.classList.contains("hidden")) loadOMPVersion();
+    if (!settingsPanel.classList.contains("hidden")) {
+      loadOMPVersion();
+      void ompBinarySettings.refresh();
+    }
   }, 300);
   void refreshLanUrl();
   // Fetch current state for toggles

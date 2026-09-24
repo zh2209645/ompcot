@@ -22,6 +22,10 @@ pub struct OmpManager {
     /// Maps workspace_port -> [dedicated session ports] for cleanup on window close.
     workspace_dedicated: Arc<Mutex<HashMap<u16, Vec<u16>>>>,
     static_dir: PathBuf,
+    /// Tauri app-config dir holding `ompcot.json` (user's omp binary
+    /// override). Injected at construction — see `main.rs` setup — instead of
+    /// a global static, so the persistence helpers stay pure/testable.
+    config_dir: PathBuf,
 }
 
 struct EmbeddedExtensionResolution {
@@ -31,36 +35,235 @@ struct EmbeddedExtensionResolution {
     source: &'static str,
 }
 
-/// Resolve the system omp version by running `omp --version`.
-/// Result is cached lazily on first call.
-pub fn locked_omp_version() -> &'static str {
-    static CACHED: OnceLock<String> = OnceLock::new();
-    CACHED.get_or_init(|| {
-        let bin_name = if cfg!(target_os = "windows") {
-            "omp.exe"
-        } else {
-            "omp"
-        };
-        let bin = std::env::var("OMP_BIN")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| which::which(bin_name).ok());
-        match bin {
-            Some(bin) => {
-                match Command::new(&bin).arg("--version").output() {
-                    Ok(output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        stdout.trim().to_string()
-                    }
-                    Err(e) => {
-                        log::warn!("[ompcot] failed to run omp --version: {}", e);
-                        "unknown".to_string()
-                    }
-                }
-            }
-            None => "unknown (omp not found on PATH)".to_string(),
+// ─── omp binary resolution + user override persistence ─────────────────────
+//
+// The omp binary is located through one shared chain (see `resolve_omp_binary`):
+// `OMP_BIN` env var → user-saved override from `<app config dir>/ompcot.json`
+// → PATH lookup. The persistence helpers are pure (they take an explicit base
+// dir) so unit tests need neither a Tauri app nor process-global state;
+// `OmpManager` receives the real Tauri app-config dir at construction time
+// (see `OmpManager::new`), which we preferred over a global OnceLock for the
+// config base so the helpers stay trivially testable.
+
+/// File name for Ompcot host settings inside the Tauri app-config dir.
+const SETTINGS_FILE_NAME: &str = "ompcot.json";
+/// JSON key holding the user-specified omp binary path override.
+const SETTINGS_KEY_OMP_BINARY: &str = "ompBinaryPath";
+
+/// Source of a resolved omp binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OmpBinarySource {
+    /// `OMP_BIN` env var (escape hatch for testing a different binary).
+    Env,
+    /// `ompBinaryPath` saved in `<app config dir>/ompcot.json`.
+    Override,
+    /// `omp` / `omp.exe` found on PATH.
+    Path,
+}
+
+impl OmpBinarySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OmpBinarySource::Env => "env",
+            OmpBinarySource::Override => "override",
+            OmpBinarySource::Path => "path",
         }
-    })
+    }
+}
+
+/// A resolved omp binary path plus the chain step that produced it.
+#[derive(Debug, Clone)]
+pub struct OmpBinaryResolution {
+    pub path: PathBuf,
+    pub source: OmpBinarySource,
+}
+
+/// Serializable snapshot of the current omp binary resolution for the UI
+/// (broker control command `get_omp_binary_status`).
+#[derive(Debug, serde::Serialize)]
+pub struct OmpBinaryStatus {
+    /// Absolute path of the binary in effect, or `null` when none resolved.
+    pub path: Option<String>,
+    /// One of "env", "override", "path", "none".
+    pub source: String,
+}
+
+/// Not-found error. The frontend matches on the `Could not find omp binary`
+/// prefix — keep it stable; only the tail text may evolve.
+fn omp_not_found_error() -> String {
+    "Could not find omp binary on PATH or via saved setting. Set it via the \
+     startup window (Specify omp binary path) or Settings, or set OMP_BIN."
+        .to_string()
+}
+
+/// Resolve the omp binary using the shared chain:
+///
+/// 1. `OMP_BIN` env var, when it names an existing file.
+/// 2. Persisted `ompBinaryPath` override, when it names an existing file.
+/// 3. `omp` / `omp.exe` on PATH (`which`).
+///
+/// Pure with respect to process-global state: both override inputs are passed
+/// explicitly so unit tests never need to mutate env vars.
+pub fn resolve_omp_binary(
+    env_value: Option<&str>,
+    override_path: Option<&Path>,
+) -> Result<OmpBinaryResolution, String> {
+    // 1. Explicit env override (rare; useful when smoke-testing a hand-built omp).
+    if let Some(explicit) = env_value.map(str::trim).filter(|s| !s.is_empty()) {
+        let candidate = PathBuf::from(explicit);
+        if candidate.is_file() {
+            return Ok(OmpBinaryResolution {
+                path: candidate,
+                source: OmpBinarySource::Env,
+            });
+        }
+    }
+
+    // 2. User-saved override (startup-window / Settings picker). A stale
+    //    entry (binary deleted after saving) falls through to the PATH
+    //    lookup instead of failing startup.
+    if let Some(saved) = override_path {
+        if saved.is_file() {
+            return Ok(OmpBinaryResolution {
+                path: saved.to_path_buf(),
+                source: OmpBinarySource::Override,
+            });
+        }
+    }
+
+    // 3. System omp on PATH — the common case. `brew upgrade omp` updates this.
+    let bin_name = if cfg!(target_os = "windows") {
+        "omp.exe"
+    } else {
+        "omp"
+    };
+    if let Ok(path) = which::which(bin_name) {
+        log::info!("[ompcot] using system omp: {}", path.display());
+        return Ok(OmpBinaryResolution {
+            path,
+            source: OmpBinarySource::Path,
+        });
+    }
+
+    Err(omp_not_found_error())
+}
+
+/// Read the persisted omp binary override from `<config_dir>/ompcot.json`.
+///
+/// Returns `None` when the file is missing/unparseable or the key is
+/// absent/null/empty. Whether the target binary still exists is *not*
+/// checked here — the shared resolver does, so a stale override degrades to
+/// the PATH lookup instead of an error.
+pub fn load_override(config_dir: &Path) -> Option<PathBuf> {
+    let contents = std::fs::read_to_string(config_dir.join(SETTINGS_FILE_NAME)).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    let path = value.get(SETTINGS_KEY_OMP_BINARY)?.as_str()?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+/// Persist `path` as `ompBinaryPath` in `<config_dir>/ompcot.json`, creating
+/// parent directories as needed and preserving any sibling keys.
+pub fn save_override(config_dir: &Path, path: &Path) -> Result<(), String> {
+    let file = config_dir.join(SETTINGS_FILE_NAME);
+    let mut root: serde_json::Value = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    root[SETTINGS_KEY_OMP_BINARY] = serde_json::Value::String(path.to_string_lossy().into_owned());
+    std::fs::create_dir_all(config_dir).map_err(|e| {
+        format!(
+            "Failed to create config dir {}: {}",
+            config_dir.display(),
+            e
+        )
+    })?;
+    let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&file, serialized)
+        .map_err(|e| format!("Failed to write {}: {}", file.display(), e))
+}
+
+/// Canonicalize a user-picked override path for persistence. Strips the
+/// Windows `\\?\` verbatim prefix because the omp runtime misbehaves when
+/// launched from extended-length paths (see `strip_verbatim_prefix`).
+pub fn normalize_override_path(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    PathBuf::from(strip_verbatim_prefix(&canonical.to_string_lossy()))
+}
+
+/// Validate a user-picked omp binary: it must be an existing file and
+/// `<path> --version` must run successfully (exit 0).
+pub fn validate_omp_binary(path: &Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Err(format!(
+            "Not a valid omp binary ({}): not an existing file",
+            path.display()
+        ));
+    }
+    let mut command = Command::new(path);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_child_process_for_windows(&mut command);
+    match command.output() {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let reason = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                format!("`--version` exited with status {}", output.status)
+            };
+            Err(format!(
+                "Not a valid omp binary ({}): {}",
+                path.display(),
+                reason
+            ))
+        }
+        Err(e) => Err(format!(
+            "Not a valid omp binary ({}): failed to execute `--version` ({})",
+            path.display(),
+            e
+        )),
+    }
+}
+
+/// Run `omp --version` and cache the output per binary path. Caching per path
+/// (not a single global slot) means picking a new override automatically
+/// invalidates the stale version string.
+fn run_omp_version(bin: &Path) -> String {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache.lock().unwrap().get(bin) {
+        return cached.clone();
+    }
+    let mut command = Command::new(bin);
+    command.arg("--version");
+    configure_child_process_for_windows(&mut command);
+    let version = match command.output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        Err(e) => {
+            log::warn!("[ompcot] failed to run omp --version: {}", e);
+            "unknown".to_string()
+        }
+    };
+    cache
+        .lock()
+        .unwrap()
+        .insert(bin.to_path_buf(), version.clone());
+    version
 }
 
 #[cfg(target_os = "windows")]
@@ -312,49 +515,46 @@ fn mirror_is_up_to_date(src: &Path, dest: &Path) -> bool {
 }
 
 impl OmpManager {
-    pub fn new(static_dir: PathBuf) -> Self {
+    pub fn new(static_dir: PathBuf, config_dir: PathBuf) -> Self {
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             session_ports: Arc::new(Mutex::new(HashMap::new())),
             workspace_dedicated: Arc::new(Mutex::new(HashMap::new())),
             static_dir,
+            config_dir,
         }
     }
 
-    /// Locate the omp binary.
-    ///
-    /// Lookup order:
-    /// 1. `OMP_BIN` env var (escape hatch for testing a different binary).
-    /// 2. `omp` on PATH — the user's system-installed omp (Homebrew, etc.).
-    ///    This means `brew upgrade omp` automatically picks up the latest.
-    ///
-    /// Returns `Err` if no binary is found at all.
-    fn resolve_omp(&self) -> Result<PathBuf, String> {
-        let bin_name = if cfg!(target_os = "windows") {
-            "omp.exe"
-        } else {
-            "omp"
-        };
+    /// Locate the omp binary via the shared chain (see [`resolve_omp_binary`]):
+    /// `OMP_BIN` env → saved `ompcot.json` override → PATH lookup.
+    fn resolve_omp(&self) -> Result<OmpBinaryResolution, String> {
+        let env_value = std::env::var("OMP_BIN").ok();
+        let saved_override = load_override(&self.config_dir);
+        resolve_omp_binary(env_value.as_deref(), saved_override.as_deref())
+    }
 
-        // 1. Explicit override (rare; useful when smoke-testing a hand-built omp).
-        if let Ok(explicit) = std::env::var("OMP_BIN") {
-            let candidate = PathBuf::from(explicit.trim());
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
+    /// omp version string (`omp --version`) for the binary the manager would
+    /// currently spawn. Uses the same resolution chain as `spawn`.
+    pub fn omp_version(&self) -> String {
+        match self.resolve_omp() {
+            Ok(resolution) => run_omp_version(&resolution.path),
+            Err(_) => "unknown (omp not found on PATH)".to_string(),
         }
+    }
 
-        // 2. System omp on PATH — the common case. `brew upgrade omp` updates this.
-        if let Ok(path) = which::which(bin_name) {
-            log::info!("[ompcot] using system omp: {}", path.display());
-            return Ok(path);
+    /// Snapshot of the current omp binary resolution for the UI
+    /// (`get_omp_binary_status` broker control command).
+    pub fn omp_binary_status(&self) -> OmpBinaryStatus {
+        match self.resolve_omp() {
+            Ok(resolution) => OmpBinaryStatus {
+                path: Some(resolution.path.to_string_lossy().into_owned()),
+                source: resolution.source.as_str().to_string(),
+            },
+            Err(_) => OmpBinaryStatus {
+                path: None,
+                source: "none".to_string(),
+            },
         }
-
-        Err(format!(
-            "Could not find omp binary on PATH.\n\n\
-             Install omp via:\n  brew install omp\n\n\
-             Or set OMP_BIN to the path of your omp binary."
-        ))
     }
     /// Locate the embedded-server extension shipped with this build.
     ///
@@ -442,7 +642,13 @@ impl OmpManager {
     }
 
     pub fn spawn(&self, cwd: &str, port: u16, session_path: Option<&str>) -> Result<(), String> {
-        let pi_bin = self.resolve_omp()?;
+        let omp_bin = self.resolve_omp()?;
+        log::info!(
+            "[ompcot] omp binary resolved: source={} path={}",
+            omp_bin.source.as_str(),
+            omp_bin.path.display()
+        );
+        let pi_bin = omp_bin.path;
         // Tauri resolves resource paths as `\\?\`-prefixed extended-length
         // paths. Bun (the embedded omp runtime) segfaults on Windows arm64 when
         // launched from such a path, so normalize the binary path and every
@@ -511,7 +717,7 @@ impl OmpManager {
             .env("PATH", augmented_path)
             .env("OMCOT_STATIC_DIR", &static_dir)
             .env("OMCOT_PORT", port.to_string())
-            .env("OMCOT_OMP_VERSION", locked_omp_version())
+            .env("OMCOT_OMP_VERSION", run_omp_version(&pi_bin))
             .stdin(Stdio::piped())
             // Drop stdout: omp emits RPC frames on it that we don't consume here, and
             // letting it fill an unread pipe would eventually block the child.
@@ -638,10 +844,10 @@ impl OmpManager {
         port
     }
 
-    /// Run `pi <args...>` with the embedded binary and return stdout.
+    /// Run `pi <args...>` with the resolved omp binary and return stdout.
     /// Used by Settings UI package management operations (install/remove/list).
     pub fn run_pi_command(&self, args: &[String]) -> Result<String, String> {
-        let pi_bin = self.resolve_omp()?;
+        let pi_bin = self.resolve_omp()?.path;
         let pi_bin_str = strip_verbatim_prefix(&pi_bin.to_string_lossy());
         let augmented_path = build_augmented_path();
         log_child_path_diagnostics("run_pi_command", &augmented_path);
@@ -760,11 +966,33 @@ pub async fn wait_for_endpoint(port: u16, path: &str, timeout_secs: u64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Unique temp dir under the system temp dir, mirroring the helper in
+    /// main.rs tests. Callers clean up with `fs::remove_dir_all`.
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("ompcot-omp-override-{label}-{suffix}"))
+    }
+
+    fn write_fake_binary(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"#!/bin/sh\nexit 0\n").expect("write fake binary");
+        path
+    }
 
     #[test]
     fn augmented_path_includes_omp_extension_npm_bin() {
-        let home = std::env::var("HOME").expect("HOME must be set for this test");
+        // Mirror build_augmented_path's own home lookup: HOME with a
+        // USERPROFILE fallback so the test also works on Windows.
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .expect("HOME or USERPROFILE must be set for this test");
         let expected = Path::new(&home)
             .join(".omp")
             .join("agent")
@@ -789,5 +1017,119 @@ mod tests {
         let port = listener.local_addr().expect("listener addr").port();
 
         assert!(is_port_in_use(port));
+    }
+
+    #[test]
+    fn override_save_load_roundtrip() {
+        let root = unique_temp_dir("roundtrip");
+        fs::create_dir_all(&root).unwrap();
+        let bin = write_fake_binary(&root, "omp-fake");
+
+        // 1. Saving into a not-yet-existing nested dir creates parents + file.
+        let config_dir = root.join("nested").join("config");
+        save_override(&config_dir, &bin).expect("save_override must succeed");
+        assert!(config_dir.join(SETTINGS_FILE_NAME).is_file());
+        assert_eq!(load_override(&config_dir).as_deref(), Some(bin.as_path()));
+
+        // 2. Re-saving over an existing file with sibling keys preserves them.
+        fs::write(
+            config_dir.join(SETTINGS_FILE_NAME),
+            r#"{"otherSetting": 42}"#,
+        )
+        .unwrap();
+        save_override(&config_dir, &bin).unwrap();
+        assert_eq!(load_override(&config_dir).as_deref(), Some(bin.as_path()));
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(config_dir.join(SETTINGS_FILE_NAME)).unwrap())
+                .unwrap();
+        assert_eq!(raw.get("otherSetting"), Some(&serde_json::json!(42)));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn env_beats_saved_override() {
+        let root = unique_temp_dir("env-beats-override");
+        fs::create_dir_all(&root).unwrap();
+        let env_bin = write_fake_binary(&root, "env-omp");
+        let saved_bin = write_fake_binary(&root, "saved-omp");
+        save_override(&root, &saved_bin).unwrap();
+
+        let env_value = env_bin.to_string_lossy().into_owned();
+        let resolution =
+            resolve_omp_binary(Some(env_value.as_str()), load_override(&root).as_deref())
+                .expect("env candidate must resolve");
+
+        assert_eq!(resolution.path, env_bin);
+        assert_eq!(resolution.source, OmpBinarySource::Env);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn override_beats_path_lookup() {
+        let root = unique_temp_dir("override-beats-path");
+        fs::create_dir_all(&root).unwrap();
+        let saved_bin = write_fake_binary(&root, "saved-omp");
+
+        // Deterministic: the override is checked before the PATH lookup, so
+        // this never reaches `which` regardless of the host environment.
+        let resolution =
+            resolve_omp_binary(None, Some(&saved_bin)).expect("saved override must resolve");
+
+        assert_eq!(resolution.path, saved_bin);
+        assert_eq!(resolution.source, OmpBinarySource::Override);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_or_absent_override_falls_through() {
+        let root = unique_temp_dir("missing-override");
+        fs::create_dir_all(&root).unwrap();
+
+        // No ompcot.json at all.
+        assert_eq!(load_override(&root), None);
+        // Key absent.
+        fs::write(root.join(SETTINGS_FILE_NAME), r#"{"other": 1}"#).unwrap();
+        assert_eq!(load_override(&root), None);
+        // Key explicitly null.
+        fs::write(root.join(SETTINGS_FILE_NAME), r#"{"ompBinaryPath": null}"#).unwrap();
+        assert_eq!(load_override(&root), None);
+        // Unparseable file.
+        fs::write(root.join(SETTINGS_FILE_NAME), "not json").unwrap();
+        assert_eq!(load_override(&root), None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn not_found_error_keeps_stable_prefix() {
+        assert!(omp_not_found_error().starts_with("Could not find omp binary"));
+    }
+
+    #[test]
+    fn invalid_pick_fails_version_check() {
+        let root = unique_temp_dir("invalid-pick");
+        fs::create_dir_all(&root).unwrap();
+
+        // A plain text file is not executable, so `--version` cannot succeed.
+        let text_file = root.join("not-an-executable.txt");
+        fs::write(&text_file, "definitely not a binary").unwrap();
+        let err = validate_omp_binary(&text_file).expect_err("text file must be rejected");
+        assert!(
+            err.starts_with(&format!("Not a valid omp binary ({})", text_file.display())),
+            "unexpected error: {err}"
+        );
+
+        // Nonexistent paths are rejected before any process is spawned.
+        let missing_err = validate_omp_binary(&root.join("does-not-exist"))
+            .expect_err("missing file must be rejected");
+        assert!(
+            missing_err.starts_with("Not a valid omp binary"),
+            "unexpected error: {missing_err}"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

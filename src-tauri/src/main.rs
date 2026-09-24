@@ -4,9 +4,7 @@ mod broker_ws;
 mod omp_manager;
 
 use broker_ws::BrokerWs;
-use omp_manager::{
-    locked_omp_version, wait_for_endpoint, wait_for_health as wait_for_omp_health, OmpManager,
-};
+use omp_manager::{wait_for_endpoint, wait_for_health as wait_for_omp_health, OmpManager};
 use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -14,7 +12,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::image::Image;
-use tauri::{AppHandle, Manager, State, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+// Only referenced inside `#[cfg(target_os = "macos")]` builder blocks; keep
+// the import gated so non-macOS builds don't warn (clippy -D warnings).
+#[cfg(target_os = "macos")]
+use tauri::TitleBarStyle;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_dialog::MessageDialogKind;
 
@@ -193,6 +195,50 @@ async fn pick_folder_core(app: &AppHandle) -> Option<String> {
     rx.await.ok().flatten()
 }
 
+/// Native single-FILE picker for the omp binary override.
+///
+/// Returns:
+/// - `Ok(None)` when the user cancels the dialog (no validation, nothing
+///   persisted).
+/// - `Ok(Some(path))` after validating the pick (`<path> --version` exits 0)
+///   and persisting it to `<app config dir>/ompcot.json`. The returned path
+///   is absolute, with the Windows `\\?\` verbatim prefix stripped.
+/// - `Err` when the picked file fails validation or persistence.
+async fn pick_omp_binary_core(app: &AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let dialog = app.dialog().file();
+    // Windows binaries end in .exe; on macOS/Linux omp is an extensionless
+    // executable, so no filter is applied there.
+    let dialog = if cfg!(target_os = "windows") {
+        dialog.add_filter("omp binary", &["exe"])
+    } else {
+        dialog
+    };
+    dialog.pick_file(move |path| {
+        let result = path.map(|p| match p {
+            tauri_plugin_fs::FilePath::Path(pb) => pb.to_string_lossy().into_owned(),
+            tauri_plugin_fs::FilePath::Url(url) => url.to_string(),
+        });
+        let _ = tx.send(result);
+    });
+    let Some(picked) = rx.await.ok().flatten() else {
+        // User cancelled the dialog — not an error, nothing persisted.
+        return Ok(None);
+    };
+
+    let picked_path = PathBuf::from(&picked);
+    omp_manager::validate_omp_binary(&picked_path)?;
+
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Failed to resolve app config dir: {}", e))?;
+    let stored = omp_manager::normalize_override_path(&picked_path);
+    omp_manager::save_override(&config_dir, &stored)?;
+    log::info!("[ompcot] omp binary override saved: {}", stored.display());
+    Ok(Some(stored.to_string_lossy().into_owned()))
+}
+
 /// A launchable external app target (editor / terminal / file manager).
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -248,7 +294,12 @@ fn list_installed_apps_core() -> Vec<AppTarget> {
     let candidates: [(&str, &str, &[&str], &str); 6] = [
         ("vscode", "VS Code", &["Visual Studio Code", "Code"], "code"),
         ("cursor", "Cursor", &["Cursor"], "cursor"),
-        ("webstorm", "WebStorm", &["WebStorm", "WebStorm EAP"], "webstorm"),
+        (
+            "webstorm",
+            "WebStorm",
+            &["WebStorm", "WebStorm EAP"],
+            "webstorm",
+        ),
         ("zed", "Zed", &["Zed"], "zed"),
         ("terminal", "Terminal", &["Terminal", "iTerm", "Warp"], ""),
         ("ghostty", "Ghostty", &["Ghostty"], ""),
@@ -681,6 +732,14 @@ async fn cmd_retry_startup(
     Ok(initial_port)
 }
 
+/// Pick, validate, and persist a custom omp binary path (bootstrap error
+/// window / Settings "Specify omp binary path"). Returns the persisted
+/// absolute path, or `None` (JS null) when the user cancelled the dialog.
+#[tauri::command]
+async fn cmd_pick_omp_binary(app: AppHandle) -> Result<Option<String>, String> {
+    pick_omp_binary_core(&app).await
+}
+
 // ─── Auto-updater cores ─────────────────────────────────────────────────────
 
 /// Check GitHub for a newer release. Returns update metadata as JSON, or
@@ -849,13 +908,30 @@ fn install_control_handler(broker: &Arc<BrokerWs>, manager: Arc<OmpManager>, app
                         .await?;
                         Ok(Value::from(port))
                     }
-                    "get_omp_version" => Ok(Value::from(locked_omp_version())),
+                    "get_omp_version" => Ok(Value::from(manager.omp_version())),
                     "get_app_version" => Ok(Value::from(env!("CARGO_PKG_VERSION"))),
                     "is_dev" => Ok(Value::from(cfg!(debug_assertions))),
                     "pick_folder" => Ok(match pick_folder_core(&app).await {
                         Some(path) => Value::from(path),
                         None => Value::Null,
                     }),
+                    "pick_omp_binary" => {
+                        // Same core as the bootstrap-window IPC command:
+                        // native file picker → validate `--version` → persist
+                        // to <app config dir>/ompcot.json. Null = cancelled.
+                        let picked = pick_omp_binary_core(&app).await?;
+                        Ok(match picked {
+                            Some(path) => Value::from(path),
+                            None => Value::Null,
+                        })
+                    }
+                    "get_omp_binary_status" => {
+                        // {"path": "<abs path>" | null, "source": "env"|"override"|"path"|"none"}
+                        Ok(
+                            serde_json::to_value(manager.omp_binary_status())
+                                .unwrap_or(Value::Null),
+                        )
+                    }
                     "list_installed_apps" => {
                         Ok(serde_json::to_value(list_installed_apps_core()).unwrap_or(Value::Null))
                     }
@@ -939,7 +1015,19 @@ fn main() {
         )
         .setup(|app| {
             let static_dir = find_static_dir(app);
-            let manager = Arc::new(OmpManager::new(static_dir));
+            // App-config dir injected into OmpManager at construction (chosen
+            // over a global OnceLock for the config base so the persistence
+            // helpers in omp_manager stay pure and unit-testable without a
+            // Tauri app). Holds ompcot.json with the user's omp binary
+            // override.
+            let config_dir = app.path().app_config_dir().unwrap_or_else(|e| {
+                log::warn!(
+                    "[ompcot] failed to resolve app config dir ({}); falling back to dirs::config_dir()/ompcot",
+                    e
+                );
+                dirs::config_dir().unwrap_or_default().join("ompcot")
+            });
+            let manager = Arc::new(OmpManager::new(static_dir, config_dir));
             let broker = Arc::new(BrokerWs::start().expect("failed to start broker websocket"));
             std::env::set_var("OMCOT_BROKER_PORT", broker.port().to_string());
             install_control_handler(&broker, manager.clone(), app.handle().clone());
@@ -1059,10 +1147,15 @@ fn main() {
             }
         })
         // The main UI talks to the host exclusively over the broker WebSocket
-        // (`broker_control`); the only remaining Tauri IPC command is
-        // `cmd_retry_startup`, used by the native bootstrap error window
-        // (bootstrap.html) which is not part of the decoupled web UI.
-        .invoke_handler(tauri::generate_handler![cmd_retry_startup])
+        // (`broker_control`); the only remaining Tauri IPC commands are used
+        // by the native bootstrap error window (bootstrap.html), which is not
+        // part of the decoupled web UI: `cmd_retry_startup` and
+        // `cmd_pick_omp_binary` (native omp-binary picker for the "Specify
+        // omp binary path" action).
+        .invoke_handler(tauri::generate_handler![
+            cmd_retry_startup,
+            cmd_pick_omp_binary
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle: &tauri::AppHandle, event| {

@@ -69,11 +69,13 @@
     <div id="startup-error" class="error"></div>
     <div class="actions">
       <button id="retry-btn" type="button">Retry startup</button>
+      <button id="pick-binary-btn" type="button">Specify omp binary path…</button>
     </div>
     <div id="hint" class="hint"></div>
   </main>
   <script>
     const retryBtn = document.getElementById('retry-btn');
+    const pickBinaryBtn = document.getElementById('pick-binary-btn');
     const hint = document.getElementById('hint');
     const errorBox = document.getElementById('startup-error');
     const rawError = new URLSearchParams(window.location.search).get('startupError');
@@ -82,13 +84,20 @@
       errorBox.textContent = decodeURIComponent(rawError);
     }
 
-    retryBtn.addEventListener('click', async () => {
+    function getInvoke() {
       const invoke = window.__TAURI__?.core?.invoke;
       if (typeof invoke !== 'function') {
         hint.textContent = 'Tauri runtime is unavailable in this window.';
-        return;
+        return null;
       }
+      return invoke;
+    }
+
+    async function retryStartup() {
+      const invoke = getInvoke();
+      if (!invoke) return;
       retryBtn.disabled = true;
+      pickBinaryBtn.disabled = true;
       hint.textContent = 'Starting Pi runtime...';
       try {
         const port = await invoke('cmd_retry_startup');
@@ -96,6 +105,32 @@
       } catch (error) {
         hint.textContent = String(error?.message || error || 'Startup failed');
         retryBtn.disabled = false;
+        pickBinaryBtn.disabled = false;
+      }
+    }
+
+    retryBtn.addEventListener('click', () => { void retryStartup(); });
+
+    // Manual override for when no omp binary can be found: let the user pick
+    // one. The backend validates + persists the choice, so an immediate retry
+    // launches with the new path.
+    pickBinaryBtn.addEventListener('click', async () => {
+      const invoke = getInvoke();
+      if (!invoke) return;
+      pickBinaryBtn.disabled = true;
+      try {
+        const picked = await invoke('cmd_pick_omp_binary');
+        if (picked) {
+          hint.textContent = `Using omp binary: ${picked}`;
+          await retryStartup();
+        }
+        // picked == null → user cancelled the dialog; do nothing.
+      } catch (error) {
+        // The picked file was rejected (not a valid omp binary) — say why.
+        errorBox.style.display = 'block';
+        errorBox.textContent = String(error?.message || error || 'Invalid omp binary');
+      } finally {
+        pickBinaryBtn.disabled = false;
       }
     });
   </script>

@@ -97,6 +97,10 @@ export class WsTransport {
     return this._control("get_omp_version", {});
   }
 
+  getOmpBinaryStatus() {
+    return this._control("get_omp_binary_status", {});
+  }
+
   getAppVersion() {
     return this._control("get_app_version", {});
   }
@@ -121,6 +125,11 @@ export class WsTransport {
 
   pickFolder() {
     return this._control("pick_folder", {}, { timeoutMs: NO_TIMEOUT });
+  }
+
+  // OS file dialog + backend validation waits for the user: no timeout.
+  pickOmpBinary() {
+    return this._control("pick_omp_binary", {}, { timeoutMs: NO_TIMEOUT });
   }
 
   listInstalledApps() {
