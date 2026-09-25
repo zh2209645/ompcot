@@ -9,6 +9,7 @@ import { setupSettingsEditors } from "./app-settings-editors.js";
 import { setupSettingsToggles } from "./app-settings-toggles.js";
 import { createAppUpdater } from "./app-updater.js";
 import { setupVoiceInput } from "./app-voice-input.js";
+import { createComposerCommands, isSlashCommand, resolveDelivery } from "./composer-commands.js";
 import { DialogHandler } from "./dialogs.js";
 import { FileBrowser } from "./file-browser.js";
 import { anchorHistoryToBottom } from "./history-scroll-anchor.js";
@@ -26,6 +27,7 @@ import { resolveNewSessionLiveFile } from "./new-session-refresh.js";
 import { createOmpBinarySettings } from "./omp-binary-settings.js";
 import { getOnboardingState } from "./onboarding-state.js";
 import { renderPackageInstallFailure } from "./package-install-status.js";
+import { renderTranscriptFromEntries, resyncTranscript } from "./session-resync.js";
 import { findPortForSession, getWorkspacePathForPort } from "./session-routing.js";
 import { SessionSidebar } from "./session-sidebar.js";
 import { createConfigSubnav } from "./settings-config-subnav.js";
@@ -38,6 +40,7 @@ import {
 import { setupSidebarSearchControl } from "./sidebar-search-control.js";
 import { StateManager } from "./state.js";
 import { applyTheme, getCurrentTheme, themes } from "./themes.js";
+import { setupThinkingLevelMenu } from "./thinking-level-menu.js";
 import { ToolCardRenderer } from "./tool-card.js";
 import { initTransport } from "./transport.js";
 import { resolveWebSocketUrl, WebSocketClient } from "./websocket-client.js";
@@ -721,6 +724,9 @@ wsClient.addEventListener("rpcEvent", (e) => {
 });
 
 wsClient.addEventListener("serverError", (e) => {
+  // A slash command steered into a running turn is bounced by the server —
+  // recover it into the queue instead of surfacing an error.
+  if (composerCommands.consumeStreamRejection(e.detail?.message)) return;
   messageRenderer.renderError(e.detail.message);
 });
 
@@ -1194,11 +1200,53 @@ messageInput.addEventListener("keydown", (e) => {
   const isImeComposing = e.isComposing || e.keyCode === 229;
   if (isImeComposing) return;
 
+  // Slash popup consumes navigation keys first (arrows cycle, Tab/Enter
+  // complete, Esc closes; exact-match Enter submits through the normal path).
+  if (composerCommands.handleKeydown(e)) return;
+
+  // Ctrl/Cmd+Enter while streaming — steer now regardless of the delivery
+  // toggle, giving keyboard-only access to the Steer affordance.
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey && state.isStreaming) {
+    const message = messageInput.value.trim();
+    if (message && !isSlashCommand(message)) {
+      e.preventDefault();
+      messageInput.value = "";
+      messageInput.style.height = "auto";
+      composerCommands.sendSteerNow(message);
+      composerCommands.refresh();
+    }
+    return;
+  }
+
   // Enter sends, Shift+Enter inserts newline
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
   }
+});
+
+// ═══════════════════════════════════════
+// Slash commands + delivery mode (queue vs steer)
+// ═══════════════════════════════════════
+
+// Owns the slash autocomplete popup and the Queue / Steer-now toggle. Queue
+// rendering itself stays here — the module calls back into these helpers.
+const composerCommands = createComposerCommands({
+  input: messageInput,
+  wsClient,
+  isStreaming: () => state.isStreaming,
+  onSubmit: () => sendMessage(),
+  queueSlash: (message) => {
+    messageQueue.push({ type: "prompt", message, kind: "slash" });
+    lastSentMessage = message;
+    renderQueuedMessages();
+  },
+  showSteerQueued: (message) => {
+    messageQueue.push({ type: "prompt", message, kind: "steer" });
+    lastSentMessage = message;
+    renderQueuedMessages();
+  },
+  toggleEl: document.getElementById("delivery-toggle"),
 });
 
 // Auto-resize textarea
@@ -1381,6 +1429,7 @@ function sendMessage() {
 
   messageInput.value = "";
   messageInput.style.height = "auto";
+  composerCommands.refresh();
 
   const cmd = {
     type: "prompt",
@@ -1400,11 +1449,26 @@ function sendMessage() {
     renderImagePreviews();
   }
 
-  if (state.isStreaming) {
+  // Delivery decision while the agent is streaming: slash commands ALWAYS
+  // queue (the server rejects steered slash commands — see
+  // consumeStreamRejection for the recovery path), plain messages follow the
+  // Queue / Steer-now toggle.
+  const delivery = resolveDelivery({
+    message,
+    isStreaming: state.isStreaming,
+    deliveryMode: composerCommands.getDeliveryMode(),
+  });
+
+  if (delivery === "queue") {
     // Queue it — show as bubble above input
-    messageQueue.push(cmd);
+    messageQueue.push({ ...cmd, kind: isSlashCommand(message) ? "slash" : "queue" });
     lastSentMessage = message;
     renderQueuedMessages();
+    return;
+  }
+
+  if (delivery === "steer") {
+    composerCommands.sendSteerNow(message);
     return;
   }
 
@@ -1416,6 +1480,9 @@ function sendMessage() {
 
 const queuedMessagesEl = document.getElementById("queued-messages");
 
+// Fast-forward glyph for the per-item "steer now" action.
+const STEER_ICON_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>`;
+
 function renderQueuedMessages() {
   queuedMessagesEl.innerHTML = "";
   if (messageQueue.length === 0) {
@@ -1424,13 +1491,28 @@ function renderQueuedMessages() {
   }
   queuedMessagesEl.classList.remove("hidden");
   messageQueue.forEach((cmd, i) => {
+    const kind = cmd.kind || "queue";
+    // Label per kind: plain → Queued, slash → idle hint (they can only be
+    // delivered when the agent idles), steer → already on its way.
+    const label =
+      kind === "slash" ? t("slash.queuedHint") : kind === "steer" ? t("slash.steerNow") : "Queued";
     const el = document.createElement("div");
-    el.className = "queued-msg";
+    el.className = `queued-msg queued-msg-${kind}`;
     el.innerHTML = `
-      <span class="queued-msg-label">Queued</span>
+      <span class="queued-msg-label">${label}</span>
       <span class="queued-msg-text">${escapeHtml(cmd.message)}</span>
-      <button class="queued-msg-cancel" title="Cancel">×</button>
+      ${kind === "queue" ? `<button type="button" class="queued-msg-steer" title="${t("slash.steerNow")}" aria-label="${t("slash.steerNow")}">${STEER_ICON_SVG}</button>` : ""}
+      <button type="button" class="queued-msg-cancel" title="${t("common.cancel")}" aria-label="${t("common.cancel")}">×</button>
     `;
+    // Bump a queued item ahead of the running turn immediately.
+    const steerBtn = el.querySelector(".queued-msg-steer");
+    if (steerBtn) {
+      steerBtn.addEventListener("click", () => {
+        const [pending] = messageQueue.splice(i, 1);
+        renderQueuedMessages();
+        composerCommands.sendSteerNow(pending.message);
+      });
+    }
     el.querySelector(".queued-msg-cancel").addEventListener("click", () => {
       messageQueue.splice(i, 1);
       renderQueuedMessages();
@@ -1448,9 +1530,11 @@ function escapeHtml(text) {
 function flushQueue() {
   if (messageQueue.length > 0 && !state.isStreaming) {
     const cmd = messageQueue.shift();
+    // `kind` is UI-only routing metadata — strip it from the wire payload.
+    const { kind: _kind, ...payload } = cmd;
     messageRenderer.renderUserMessage({ content: cmd.message, images: cmd.images });
     renderQueuedMessages();
-    trackPromptDelivery(wsClient.send(cmd), cmd.message);
+    trackPromptDelivery(wsClient.send(payload), cmd.message);
     refreshSidebarAfterUserPrompt();
   }
 }
@@ -1468,6 +1552,40 @@ const commandPalette = document.getElementById("command-palette");
 const commandPaletteOverlay = document.getElementById("command-palette-overlay");
 const commandList = document.getElementById("command-list");
 
+// Refresh glyph — same shape as the sidebar refresh button (index.html).
+const resyncIconSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>`;
+
+// Transcript re-sync: pull the raw entries from the running agent
+// (get_messages) and re-render #messages from them. Empty or failed syncs
+// keep the current transcript; only the status line changes.
+async function resyncTranscriptFromAgent() {
+  await resyncTranscript({
+    wsClient,
+    renderEntries: (entries) => {
+      messageRenderer.clear();
+      toolCardRenderer.clear();
+      renderSessionHistory(entries, { searchQuery: sidebar.searchQuery });
+    },
+    onStatus: (kind) => {
+      if (kind === "start") {
+        statusText.textContent = t("status.resyncing");
+        return;
+      }
+      if (kind === "done") {
+        statusText.textContent = t("status.resynced");
+        setTimeout(() => {
+          statusText.textContent = t("status.connected");
+        }, 2000);
+        return;
+      }
+      statusText.textContent = t("status.resyncFailed");
+      setTimeout(() => {
+        statusText.textContent = t("status.connected");
+      }, 3000);
+    },
+  });
+}
+
 // Labels are translated at render time (see openCommandPalette) so an
 // interface-language switch updates an open palette too.
 const commands = [
@@ -1476,6 +1594,12 @@ const commands = [
     labelKey: "palette.compact",
     descKey: "palette.compactDesc",
     action: () => rpcCommand({ type: "compact" }, t("status.compacting")),
+  },
+  {
+    icon: resyncIconSvg,
+    labelKey: "palette.resync",
+    descKey: "palette.resyncDesc",
+    action: () => resyncTranscriptFromAgent(),
   },
   {
     icon: "📋",
@@ -1605,10 +1729,10 @@ function formatCompactThinkingLevelLabel(level) {
 }
 function updateThinkingBtn() {
   thinkingBtn.textContent = formatCompactThinkingLevelLabel(currentThinkingLevel);
-  thinkingBtn.title = t("composer.thinkingTitle");
+  thinkingBtn.title = t("composer.thinkingTitleMenu");
   thinkingBtn.setAttribute(
     "aria-label",
-    t("composer.thinkingAriaDynamic", { level: currentThinkingLevel }),
+    t("composer.thinkingAriaDynamicMenu", { level: currentThinkingLevel }),
   );
   thinkingBtn.classList.toggle("off", currentThinkingLevel === "off");
 }
@@ -1824,13 +1948,20 @@ document.addEventListener("click", (e) => {
   }
 });
 
-// Thinking level button — cycles through levels
-thinkingBtn.addEventListener("click", async () => {
-  const data = await rpcCommand({ type: "cycle_thinking_level" }, t("status.cyclingThinking"));
-  if (data?.success && data.data?.level) {
-    currentThinkingLevel = data.data.level;
+// Thinking level button — opens the effort picker menu (any level in one
+// click). The Settings-tab cycle button keeps its click-to-cycle behavior
+// (app-settings-toggles.js). The server's set_thinking_level reply carries
+// no data, so the chip updates optimistically and then refreshes through the
+// existing get_state path (fetchModelInfo).
+setupThinkingLevelMenu({
+  button: thinkingBtn,
+  getCurrentLevel: () => currentThinkingLevel,
+  onSelect: (level) => {
+    wsClient.send({ type: "set_thinking_level", level });
+    currentThinkingLevel = level;
     updateThinkingBtn();
-  }
+    fetchModelInfo();
+  },
 });
 
 // ═══════════════════════════════════════
@@ -2608,113 +2739,32 @@ function updateMirrorInputState() {
 
 function renderSessionHistory(entries, { searchQuery = "" } = {}) {
   console.log(`[History] Rendering ${entries.length} entries`);
-  let userCount = 0,
-    assistantCount = 0,
-    toolCardCount = 0,
-    toolResultCount = 0;
-
-  for (const entry of entries) {
-    if (entry.type !== "message") continue;
-
-    const msg = entry.message;
-    if (!msg) continue;
-
-    if (msg.role === "user") {
-      const content =
-        typeof msg.content === "string"
-          ? msg.content
-          : (msg.content || [])
-              .filter((b) => b.type === "text")
-              .map((b) => b.text)
-              .join("\n");
-      // Extract images from content blocks
-      const images = Array.isArray(msg.content)
-        ? msg.content
-            .filter((b) => b.type === "image")
-            .map((b) => ({
-              data: b.source?.data || b.data || "",
-              mimeType: b.source?.media_type || b.media_type || "image/png",
-            }))
-        : [];
-      if (content || images.length > 0) {
-        userCount++;
-        messageRenderer.renderUserMessage(
-          { content: content || "", images: images.length > 0 ? images : undefined },
-          true,
-        );
+  // Entry→renderer mapping lives in session-resync.js so the palette
+  // "Resync transcript" action re-renders exactly like history loads.
+  const counts = renderTranscriptFromEntries(entries, {
+    messageRenderer,
+    toolCardRenderer,
+    searchQuery,
+    onAssistantUsage: (usage) => {
+      // Track cost and tokens from history
+      if (usage?.cost?.total) {
+        sessionTotalCost += usage.cost.total;
       }
-    } else if (msg.role === "assistant") {
-      const textBlocks = (msg.content || []).filter((b) => b.type === "text");
-      const thinkingBlocks = (msg.content || []).filter((b) => b.type === "thinking");
-      const toolCalls = (msg.content || []).filter((b) => b.type === "toolCall");
-
-      // Build content blocks for rendering
-      const contentBlocks = [];
-      for (const block of msg.content || []) {
-        if (block.type === "text" || block.type === "thinking") {
-          contentBlocks.push(block);
-        }
+      if (usage?.input) {
+        lastInputTokens = usage.input + (usage.cacheRead || 0);
+        lastUsage = usage;
       }
-
-      const text = textBlocks.map((b) => b.text).join("\n");
-
-      if (text || thinkingBlocks.length > 0) {
-        assistantCount++;
-        messageRenderer.renderAssistantMessage(
-          {
-            content: contentBlocks.length > 0 ? contentBlocks : text,
-            usage: msg.usage,
-          },
-          false,
-          true,
-        );
-
-        // Track cost and tokens from history
-        if (msg.usage?.cost?.total) {
-          sessionTotalCost += msg.usage.cost.total;
-        }
-        if (msg.usage?.input) {
-          lastInputTokens = msg.usage.input + (msg.usage.cacheRead || 0);
-          lastUsage = msg.usage;
-        }
-      }
-
-      // Show tool calls as compact history cards
-      for (const tc of toolCalls) {
-        toolCardCount++;
-        const card = toolCardRenderer.createHistoryCard({
-          toolCallId: tc.id,
-          toolName: tc.name,
-          args: tc.arguments || {},
-        });
-        console.log(
-          `[History] Tool card created: ${tc.name}`,
-          card?.offsetHeight,
-          card?.innerHTML?.substring(0, 100),
-        );
-      }
-    } else if (msg.role === "toolResult") {
-      toolResultCount++;
-      toolCardRenderer.addHistoryResult(
-        msg.toolCallId,
-        { content: msg.content || [] },
-        msg.isError,
-      );
-    }
-  }
+    },
+  });
 
   console.log(
-    `[History] Done: ${userCount} users, ${assistantCount} assistants, ${toolCardCount} tools, ${toolResultCount} results`,
+    `[History] Done: ${counts.user} users, ${counts.assistant} assistants, ${counts.toolCards} tools, ${counts.toolResults} results`,
   );
   console.log(`[History] DOM tool-card count:`, document.querySelectorAll(".tool-card").length);
   console.log(
     `[History] DOM thinking-block count:`,
     document.querySelectorAll(".thinking-block").length,
   );
-
-  if (searchQuery) {
-    messageRenderer.highlightSearchQuery(searchQuery);
-  }
 
   updateCostDisplay();
   updateTokenUsage();
@@ -2957,6 +3007,9 @@ function updateUI() {
     sendBtn.classList.remove("hidden");
     flushQueue();
   }
+
+  // Show/hide the Queue / Steer-now delivery toggle with the streaming state.
+  composerCommands.refresh();
 
   // Viewing a history session while original is still streaming —
   // block input until agent_end triggers the deferred switch_session.
@@ -3770,6 +3823,8 @@ onLanguageChanged(() => {
     updateConnectionStatus(lastConnectionStatus);
   }
   updateTokenUsage();
+  // Queued-strip labels (Queued / idle hint / Steer now) are JS-built.
+  renderQueuedMessages();
   const modelSearch = modelDropdownMenu.querySelector(".model-dropdown-search");
   if (modelSearch) modelSearch.placeholder = t("model.search");
   if (!commandPalette.classList.contains("hidden")) openCommandPalette();

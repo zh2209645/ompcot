@@ -17,10 +17,10 @@ This document records which omp capabilities the GUI does **not** expose today, 
 
 | # | Missing feature | Server-side evidence | GUI today |
 |---|---|---|---|
-| A1 | **Thinking-level direct setter** (pick off/minimal/low/medium/high from a menu) | `set_thinking_level` RPC implemented (`embedded-server.ts:1497-1503`) | Only cycles levels (`cycle_thinking_level`) |
-| A2 | **Steer / follow-up delivery controls** for queued messages while the agent is running | `steer`, `follow_up` RPC implemented (`embedded-server.ts:1211-1225`) | Queued messages exist but are always delivered as plain follow-ups; no explicit steer mode |
-| A3 | **Per-setting reset to default** | `POST /api/agent-settings/reset` implemented (`embedded-server.ts:2372-2400`), no caller | Users must manually restore values via PUT |
-| A4 | **RPC-based full message read** (e.g. for re-syncing a transcript) | `get_messages` RPC implemented (`embedded-server.ts:1296-1304`), no caller | History loaded via session-file HTTP endpoints only |
+| A1 ✅ | **Thinking-level direct setter** (pick off/minimal/low/medium/high from a menu) — *implemented 2026-09-25* | `set_thinking_level` RPC implemented (`embedded-server.ts:1497-1503`) | Composer button now opens a picker menu (`thinking-level-menu.js`); Settings-tab cycle kept |
+| A2 ✅ | **Steer / follow-up delivery controls** — *implemented 2026-09-25* | `steer`, `follow_up` RPC (`embedded-server.ts:1211-1225`) | Queue/Steer-now segmented toggle while streaming + per-item steer button (`composer-commands.js`) |
+| A3 ✅ | **Per-setting reset to default** — *implemented 2026-09-25* | `POST /api/agent-settings/reset` (`embedded-server.ts:2372-2400`) | Per-row ↺ reset button with status + catalog reload (`agent-settings.js`) |
+| A4 ✅ | **RPC-based full message read** — *implemented 2026-09-25* | `get_messages` RPC (`embedded-server.ts:1296-1304`) | "Resync transcript" palette command sharing the session-history render mapping (`session-resync.js`) |
 
 ## B. Major gaps — need embedded-server extension + UI
 
@@ -32,7 +32,7 @@ Ordered by user value.
 | B2 | **MCP server management** — list/add/remove servers, connection status, OAuth, startup/readiness controls | `/mcp` with autocomplete (18.2.1); live MCP management in `/extensions` (18.0.4); `MCP_STARTUP_TIMEOUT_MS` / `OMP_MCP_REQUIRE_READY` (18.3.0) | Only raw `mcp.*` catalog settings keys; no management UI or dedicated endpoint |
 | B3 | **OAuth login** for providers | Terminal OAuth via `omp login`, account/org details, model-discovery refresh (18.3.0); MCP OAuth for Google issuers (18.2.9) | API-key CRUD only; embedded server explicitly excludes OAuth (`embedded-server.ts:1323-1336`) |
 | B4 | **Interactive permission/approval prompts** — approve/deny tool calls with argument diffing | Approval policies + hook approval-aware rewriting (18.2.3); masked-secret prompts rejected by RPC (18.2.1) | No approval UI; no approve/deny RPC in embedded server |
-| B5 | **Slash-command coverage** — `/review /goal /handoff /move /wt /git /annotate /shake /pin /copy /usage …` | Rich TUI command set across 18.x | Command palette has 5 entries (compact / export HTML / stats / expand / collapse tools); most omp workflows unreachable from GUI |
+| B5 ✅ | **Slash-command coverage** — *implemented 2026-09-25*: composer `/` autocomplete over a new `list_commands` RPC (extension/prompt/skill sources), executed via idle prompts; slash messages auto-queue while streaming | Rich TUI command set across 18.x | Command palette retains its 5 GUI actions; omp workflows now reachable via composer slash input |
 | B6 | **Account usage views** — quotas, limits, resets, policies | `/usage`, Claude saved resets + blocked-limit recovery (18.2.9), account policies & `daybreak` badge (18.3.0) | Cost dashboard covers local session cost only; no account/quota perspective |
 | B7 | **Session fork/branch** | Fork/branch supported by omp (server reloads on fork — `embedded-server.ts:461,553,1011`) | No fork command exposed; GUI multi-session = new process, not branch-from-state |
 | B8 | **Memory management UI** — browse memories, queue, sync | Sharpshooter backend + `/memory queue` `/memory sync` (18.0.10); Hindsight auto-recall (18.2.9); advisor memory context (18.1.2) | Only `memory.*` settings keys (now on the Memory settings page); no browse/sync UI |

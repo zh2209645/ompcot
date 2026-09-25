@@ -88,6 +88,16 @@ function putCalls(fetchJson) {
   return fetchJson.mock.calls.filter(([, options]) => options?.method === "PUT");
 }
 
+function resetButtonOf(container, key) {
+  return rowOf(container, key)?.querySelector(".agent-setting-reset");
+}
+
+function getCalls(fetchJson) {
+  return fetchJson.mock.calls.filter(
+    ([url, options]) => url === "/api/agent-settings" && !options?.method,
+  );
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -331,6 +341,89 @@ describe("createAgentSettings saving", () => {
     resolveFirst({ ok: true, key: "model.name", value: "opus" });
     await vi.advanceTimersByTimeAsync(0);
     expect(statusOf(container, "model.name").textContent).toBe("Saved");
+  });
+});
+
+describe("createAgentSettings reset to default", () => {
+  test("POSTs the key to /api/agent-settings/reset, shows ok status and reloads the catalog", async () => {
+    const before = makeCatalog();
+    const after = makeCatalog();
+    after.settings = before.settings.map((entry) =>
+      entry.key === "model.temperature" ? { ...entry, value: 0.5 } : entry,
+    );
+    let servedGets = 0;
+    const fetchJson = vi.fn(async (_url, options = {}) => {
+      if (options.method === "PUT") {
+        return { ok: true, key: options.body?.key, value: options.body?.value };
+      }
+      if (options.method === "POST") {
+        expect(_url).toBe("/api/agent-settings/reset");
+        return { ok: true, key: options.body?.key };
+      }
+      servedGets += 1;
+      return servedGets === 1 ? before : after;
+    });
+    const { settings, container, fetchJson: fn } = setup({ fetchJson });
+    await settings.load();
+    expect(controlOf(container, "model.temperature").value).toBe("0.7");
+
+    const resetBtn = resetButtonOf(container, "model.temperature");
+    expect(resetBtn.title).toBe("Reset to default");
+    resetBtn.click();
+    await vi.waitFor(() => {
+      expect(controlOf(container, "model.temperature").value).toBe("0.5");
+    });
+
+    const postCalls = fn.mock.calls.filter(([, options]) => options?.method === "POST");
+    expect(postCalls).toHaveLength(1);
+    expect(postCalls[0][0]).toBe("/api/agent-settings/reset");
+    expect(postCalls[0][1]).toEqual({ method: "POST", body: { key: "model.temperature" } });
+
+    const status = statusOf(container, "model.temperature");
+    expect(status.dataset.tone).toBe("ok");
+    expect(status.textContent).toBe("Saved");
+
+    // Catalog reload: the initial load plus one refresh after the reset.
+    expect(getCalls(fn)).toHaveLength(2);
+  });
+
+  test("shows an error status and skips the reload when the reset fails", async () => {
+    const fetchJson = vi.fn(async (_url, options = {}) => {
+      if (options.method === "POST") throw new Error("permission denied");
+      return makeCatalog();
+    });
+    const { settings, container } = setup({ fetchJson });
+    await settings.load();
+
+    resetButtonOf(container, "model.name").click();
+    await vi.waitFor(() => {
+      expect(statusOf(container, "model.name").dataset.tone).toBe("error");
+    });
+    expect(statusOf(container, "model.name").textContent).toContain("permission denied");
+    // No catalog reload after a failed reset — value stays as-is.
+    expect(getCalls(fetchJson)).toHaveLength(1);
+    expect(controlOf(container, "model.name").value).toBe("sonnet");
+  });
+
+  test("cancels a pending debounced edit so the reset is not overwritten", async () => {
+    vi.useFakeTimers();
+    const fetchJson = vi.fn(async (_url, options = {}) => {
+      if (options.method === "PUT") return { ok: true };
+      if (options.method === "POST") return { ok: true, key: options.body?.key };
+      return makeCatalog();
+    });
+    const { settings, container, fetchJson: fn } = setup({ fetchJson });
+    await settings.load();
+
+    const input = controlOf(container, "model.name");
+    input.value = "opus";
+    input.dispatchEvent(new Event("input", { bubbles: true })); // debounce pending
+    resetButtonOf(container, "model.name").click();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(putCalls(fn)).toHaveLength(0); // the debounced PUT never fires
+    const postCalls = fn.mock.calls.filter(([, options]) => options?.method === "POST");
+    expect(postCalls).toHaveLength(1);
   });
 });
 

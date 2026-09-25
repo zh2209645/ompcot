@@ -245,10 +245,17 @@
                   </button>
                   <div class="model-dropdown-menu hidden" id="model-dropdown-menu"></div>
                 </div>
-                <button type="button" class="thinking-tag off" id="thinking-btn" title="Thinking effort controls reasoning depth. Click to cycle." aria-label="Thinking effort: off. Click to cycle reasoning depth." data-i18n="composer.thinkOff" data-i18n-title="composer.thinkingTitle" data-i18n-aria-label="composer.thinkingAria" tabindex="-1">Think off</button>
+                <div class="thinking-dropdown" id="thinking-dropdown">
+                  <button type="button" class="thinking-tag off" id="thinking-btn" title="Thinking effort controls reasoning depth. Click to cycle." aria-label="Thinking effort: off. Click to cycle reasoning depth." aria-haspopup="menu" data-i18n="composer.thinkOff" data-i18n-title="composer.thinkingTitleMenu" data-i18n-aria-label="composer.thinkingAriaMenu" tabindex="-1">Think off</button>
+                  <div class="thinking-level-menu hidden" id="thinking-level-menu" role="menu"></div>
+                </div>
                 <button type="button" class="input-mic-btn" id="mic-btn" title="Voice input" data-i18n-title="composer.voiceInput" tabindex="-1">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
                 </button>
+                <div class="delivery-toggle hidden" id="delivery-toggle" role="radiogroup">
+                  <button type="button" class="delivery-option" data-mode="queue" role="radio" aria-checked="true" tabindex="-1" data-i18n="slash.queue">Queue</button>
+                  <button type="button" class="delivery-option" data-mode="steer" role="radio" aria-checked="false" tabindex="-1" data-i18n="slash.steerNow">Steer now</button>
+                </div>
                 <button type="submit" id="send-btn" title="Send message" data-i18n-title="composer.send" tabindex="-1">
                   <span class="send-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></span>
                 </button>

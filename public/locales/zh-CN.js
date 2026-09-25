@@ -94,6 +94,23 @@ export const zhCN = {
   "composer.thinkingAria": "思考力度：关闭。点击切换推理深度。",
   "composer.thinkingAriaDynamic": "思考力度：{level}。点击切换推理深度。",
 
+  // ── 思考力度菜单 (A1) + 单项恢复默认 (A3) + 会话记录重同步 (A4) ──
+  "composer.thinkLevelMenuTitle": "选择思考力度",
+  "composer.thinkLevelNameOff": "关闭",
+  "composer.thinkLevelNameMinimal": "最小",
+  "composer.thinkLevelNameLow": "低",
+  "composer.thinkLevelNameMedium": "中",
+  "composer.thinkLevelNameHigh": "高",
+  "composer.thinkingTitleMenu": "思考力度控制推理深度。点击选择。",
+  "composer.thinkingAriaMenu": "思考力度。点击选择推理深度。",
+  "composer.thinkingAriaDynamicMenu": "思考力度：{level}。点击选择推理深度。",
+  "settings.resetToDefault": "恢复默认",
+  "palette.resync": "重新同步会话记录",
+  "palette.resyncDesc": "从运行中的会话重新加载并渲染会话记录",
+  "status.resyncing": "正在重新同步会话记录...",
+  "status.resynced": "已重新同步",
+  "status.resyncFailed": "重新同步失败",
+
   // ── model dropdown ──
   "model.switch": "切换模型",
   "model.defaultLabel": "模型",
@@ -194,6 +211,14 @@ export const zhCN = {
   "palette.expandAllDesc": "展开所有工具卡片",
   "palette.collapseAll": "折叠全部工具",
   "palette.collapseAllDesc": "折叠所有工具卡片",
+
+  // ── composer slash commands + delivery mode ──
+  "slash.commands": "命令",
+  "slash.queue": "排队等候",
+  "slash.steerNow": "立即插话",
+  "slash.deliveryLabel": "发送方式",
+  "slash.toggleTitle": "智能体忙碌时选择消息的发送方式。Ctrl+Enter 始终立即插话。",
+  "slash.queuedHint": "命令将在智能体空闲时执行",
 
   // ── modals ──
   "dialog.agentConfig": "智能体配置",

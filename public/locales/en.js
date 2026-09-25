@@ -99,6 +99,23 @@ export const en = {
   "composer.thinkingAria": "Thinking effort: off. Click to cycle reasoning depth.",
   "composer.thinkingAriaDynamic": "Thinking effort: {level}. Click to cycle reasoning depth.",
 
+  // ── thinking-effort menu (A1) + per-setting reset (A3) + transcript resync (A4) ──
+  "composer.thinkLevelMenuTitle": "Choose thinking effort",
+  "composer.thinkLevelNameOff": "Off",
+  "composer.thinkLevelNameMinimal": "Minimal",
+  "composer.thinkLevelNameLow": "Low",
+  "composer.thinkLevelNameMedium": "Medium",
+  "composer.thinkLevelNameHigh": "High",
+  "composer.thinkingTitleMenu": "Thinking effort controls reasoning depth. Click to choose.",
+  "composer.thinkingAriaMenu": "Thinking effort. Click to choose reasoning depth.",
+  "composer.thinkingAriaDynamicMenu": "Thinking effort: {level}. Click to choose reasoning depth.",
+  "settings.resetToDefault": "Reset to default",
+  "palette.resync": "Resync transcript",
+  "palette.resyncDesc": "Reload and re-render the transcript from the running session",
+  "status.resyncing": "Resynchronizing transcript...",
+  "status.resynced": "Resynchronized",
+  "status.resyncFailed": "Resync failed",
+
   // ── model dropdown ──
   "model.switch": "Switch model",
   "model.defaultLabel": "model",
@@ -200,6 +217,14 @@ export const en = {
   "palette.expandAllDesc": "Expand all tool cards",
   "palette.collapseAll": "Collapse All Tools",
   "palette.collapseAllDesc": "Collapse all tool cards",
+
+  // ── composer slash commands + delivery mode ──
+  "slash.commands": "Commands",
+  "slash.queue": "Queue",
+  "slash.steerNow": "Steer now",
+  "slash.deliveryLabel": "Delivery",
+  "slash.toggleTitle": "How to deliver while the agent is busy. Ctrl+Enter always steers.",
+  "slash.queuedHint": "Command will run when the agent is idle",
 
   // ── modals ──
   "dialog.agentConfig": "Agent Configuration",

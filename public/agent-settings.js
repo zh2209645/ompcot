@@ -16,6 +16,7 @@
 // set after each load (or null when the load fails, meaning "unknown").
 // Without `getPageId` the module renders exactly as before: one flat list.
 
+import { onLanguageChanged, t } from "./i18n.js";
 import {
   clearSettingsSaveMessage,
   showSettingsSaveError,
@@ -65,10 +66,18 @@ export function createAgentSettings({
   // key -> { entry, control, statusEl, timer, saving, savedValue }
   const fields = new Map();
   let unsubscribeWs = null;
+  let unsubscribeLang = null;
 
   if (typeof wsSubscribe === "function") {
     unsubscribeWs = wsSubscribe(onSettingsChanged);
   }
+  // Row reset-button tooltips are set at build time; keep them in sync with
+  // interface-language switches while the panel is open.
+  unsubscribeLang = onLanguageChanged(() => {
+    for (const field of fields.values()) {
+      if (field.resetBtn) field.resetBtn.title = t("settings.resetToDefault");
+    }
+  });
 
   function attach(containerEl) {
     container = containerEl;
@@ -234,13 +243,31 @@ export function createAgentSettings({
     }
 
     const control = buildControl(entry);
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.className = "agent-setting-reset";
+    resetBtn.textContent = "↺";
+    resetBtn.title = t("settings.resetToDefault");
+    resetBtn.setAttribute("aria-label", t("settings.resetToDefault"));
     const statusEl = document.createElement("span");
     statusEl.className = "settings-save-status agent-setting-status hidden";
 
-    row.append(label, control, statusEl);
-    const field = { entry, control, statusEl, timer: null, saving: false, savedValue: entry.value };
+    row.append(label, control, resetBtn, statusEl);
+    const field = {
+      entry,
+      control,
+      statusEl,
+      timer: null,
+      saving: false,
+      savedValue: entry.value,
+      resetBtn,
+      resetting: false,
+    };
     fields.set(entry.key, field);
     wireControl(field);
+    resetBtn.addEventListener("click", () => {
+      void resetField(field);
+    });
     return row;
   }
 
@@ -363,6 +390,43 @@ export function createAgentSettings({
     }
   }
 
+  // Reset one setting to its default via POST /api/agent-settings/reset,
+  // then reload the catalog so the restored value shows in the control.
+  // Mirrors saveField's per-row status handling (tone "ok" / "error").
+  async function resetField(field) {
+    if (field.resetting) return;
+    // Cancel any pending debounced edit so it cannot overwrite the reset.
+    if (field.timer) {
+      clearTimeout(field.timer);
+      field.timer = null;
+    }
+    field.resetting = true;
+    clearSettingsSaveMessage(field.statusEl);
+    field.statusEl.textContent = "Resetting...";
+    field.statusEl.classList.remove("hidden");
+    try {
+      const res = await fetchJson("/api/agent-settings/reset", {
+        method: "POST",
+        body: { key: field.entry.key },
+      });
+      if (!res || res.ok === false) {
+        throw new Error(res?.error || "Failed to reset setting");
+      }
+      // Reload first: renderCatalog() replaces every row, so the ok status
+      // must be shown on the freshly rendered row for this key.
+      await load();
+      const fresh = fields.get(field.entry.key);
+      showSettingsSaveSuccess(fresh?.statusEl || field.statusEl);
+    } catch (err) {
+      showSettingsSaveError(
+        field.statusEl,
+        String(err?.message || err || "Failed to reset setting"),
+      );
+    } finally {
+      field.resetting = false;
+    }
+  }
+
   function setControlValue(field, value) {
     const type = field.entry.type || "string";
     if (type === "boolean") {
@@ -424,6 +488,10 @@ export function createAgentSettings({
     if (unsubscribeWs) {
       unsubscribeWs();
       unsubscribeWs = null;
+    }
+    if (unsubscribeLang) {
+      unsubscribeLang();
+      unsubscribeLang = null;
     }
     if (container) container.replaceChildren();
     container = null;

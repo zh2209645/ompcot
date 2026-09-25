@@ -1593,6 +1593,73 @@ body {
   border-color: var(--border-hover);
 }
 
+/* Thinking-effort picker menu — anchored like the model dropdown */
+.thinking-dropdown {
+  position: relative;
+}
+
+.thinking-level-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 172px;
+  background: var(--bg-solid);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-md);
+  padding: 4px;
+  box-shadow: var(--shadow-lg);
+  z-index: 1001;
+  animation: dropdownIn 0.15s var(--ease);
+}
+
+.thinking-level-menu.hidden {
+  display: none;
+}
+
+.thinking-level-menu-title {
+  padding: 6px 10px 4px;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.thinking-level-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background var(--duration) var(--ease);
+}
+
+.thinking-level-item:hover,
+.thinking-level-item:focus-visible {
+  background: var(--bg-glass-hover);
+  outline: none;
+}
+
+.thinking-level-item.active {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+
+.thinking-level-check {
+  visibility: hidden;
+}
+
+.thinking-level-item.active .thinking-level-check {
+  visibility: visible;
+}
+
 /* Status */
 .status {
   display: flex;
@@ -2497,6 +2564,31 @@ body {
   border-color: var(--border-hover);
 }
 
+/* Per-setting reset (↺) — sits after the value control in agent-setting rows */
+.agent-setting-reset {
+  flex-shrink: 0;
+  margin-left: 8px;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+
+.agent-setting-reset:hover {
+  background: var(--bg-glass-hover);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
 .settings-static-value {
   max-width: 56%;
   overflow: hidden;
@@ -3104,6 +3196,43 @@ body {
 
 .queued-msg-cancel:hover {
   color: var(--error, #f87171);
+}
+
+/* Slash-queued rows carry the idle-execution hint; steered rows are already
+   on their way — tint them with the accent. */
+.queued-msg-slash .queued-msg-label {
+  text-transform: none;
+  letter-spacing: 0.2px;
+}
+
+.queued-msg-steering {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.queued-msg-steering .queued-msg-label {
+  color: var(--accent-text);
+  text-transform: none;
+}
+
+.queued-msg-steer {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: var(--radius-xs);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
+}
+
+.queued-msg-steer:hover {
+  color: var(--accent);
+}
+
+.queued-msg-steer svg {
+  display: block;
 }
 
 .swatch-colors {
@@ -4167,6 +4296,126 @@ body.hide-thinking .thinking-block {
   animation: dropdownInUp 0.15s var(--ease);
 }
 
+/* ── Slash-command autocomplete — opens above the composer card ── */
+.slash-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 8px;
+  right: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg-solid);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-md);
+  padding: 4px;
+  box-shadow: var(--shadow-lg);
+  z-index: 1001;
+  animation: dropdownInUp 0.15s var(--ease);
+}
+
+.slash-menu.hidden {
+  display: none;
+}
+
+.slash-menu-header {
+  padding: 6px 10px 4px;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.slash-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background var(--duration) var(--ease);
+}
+
+.slash-menu-item:hover {
+  background: var(--bg-glass-hover);
+}
+
+.slash-menu-item.active {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+
+.slash-menu-name {
+  flex-shrink: 0;
+}
+
+.slash-menu-desc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.slash-menu-item.active .slash-menu-desc {
+  color: var(--accent-text);
+  opacity: 0.75;
+}
+
+.slash-menu-source {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+/* ── Delivery mode toggle — Queue vs Steer now, shown only while the agent
+   streams with non-slash text in the composer ── */
+.delivery-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  flex-shrink: 0;
+}
+
+.delivery-toggle.hidden {
+  display: none;
+}
+
+.delivery-option {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: inherit;
+  padding: 3px 8px;
+  border-radius: calc(var(--radius-md) - 2px);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--duration) var(--ease);
+}
+
+.delivery-option:hover {
+  background: var(--bg-glass-hover);
+  color: var(--text-primary);
+}
+
+.delivery-option.active {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+
 @keyframes dropdownInUp {
   from {
     opacity: 0;
@@ -5114,6 +5363,11 @@ body.hide-thinking .thinking-block {
   #message-input {
     max-height: 120px;
     padding: 10px 12px 2px;
+  }
+
+  /* Tighter delivery toggle so Queue/Steer fits narrow toolbars */
+  .delivery-option {
+    padding: 3px 6px;
   }
 
   .input-icon-btn {

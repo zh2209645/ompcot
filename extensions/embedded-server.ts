@@ -1153,6 +1153,20 @@ export default function (omp: ExtensionAPI) {
           if (!a) break;
           if (ctx && !ctx.isIdle()) {
             const behavior = command.streamingBehavior || "steer";
+            // omp core throws when a `/`-prefixed message is delivered as
+            // steer mid-stream (slash commands only execute when idle).
+            // Reject with this exact sentence — the GUI keys off it to
+            // auto-queue the command until the agent goes idle.
+            if (behavior === "steer" && command.message.startsWith("/")) {
+              sendTo(
+                ws,
+                error(
+                  "prompt",
+                  "Slash command cannot run while the agent is streaming; it will be queued and delivered when idle",
+                ),
+              );
+              break;
+            }
             if (behavior === "steer") {
               a.sendUserMessage(command.message, { deliverAs: "steer" });
             } else {
@@ -1221,6 +1235,46 @@ export default function (omp: ExtensionAPI) {
           if (!a) break;
           a.sendUserMessage(command.message, { deliverAs: "followUp" });
           sendTo(ws, success("follow_up"));
+          break;
+        }
+
+        case "list_commands": {
+          // Enumerate the session's dynamic slash commands via
+          // `ExtensionAPI.getCommands()` (extension + custom prompt/MCP +
+          // skill commands; built-ins are intentionally excluded by omp
+          // core). Commands are session-scoped, so "no active session" is
+          // not an error: the GUI fetches lazily and gets a graceful empty
+          // result.
+          if (!aomp) {
+            sendTo(ws, success("list_commands", { commands: [], available: false }));
+            break;
+          }
+          try {
+            const commands: Array<{ name: string; description?: string; source?: string }> = [];
+            // Feature-detect: older embedded omp builds may predate
+            // `getCommands` on ExtensionAPI.
+            const raw = typeof aomp.getCommands === "function" ? aomp.getCommands() : null;
+            if (!Array.isArray(raw)) {
+              throw new Error("getCommands() is not available on this omp runtime");
+            }
+            for (const cmd of raw) {
+              if (!cmd || typeof cmd !== "object" || typeof cmd.name !== "string") continue;
+              const info: { name: string; description?: string; source?: string } = {
+                name: cmd.name,
+              };
+              if (typeof cmd.description === "string") info.description = cmd.description;
+              if (typeof cmd.source === "string") info.source = cmd.source;
+              commands.push(info);
+            }
+            sendTo(ws, success("list_commands", { commands, available: true }));
+          } catch (err) {
+            console.error(
+              `[Embedded] list_commands failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+            sendTo(ws, success("list_commands", { commands: [], available: false }));
+          }
           break;
         }
 
