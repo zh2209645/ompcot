@@ -684,6 +684,147 @@ function errMessage(e: unknown): string {
   return String(e);
 }
 
+// ─── Provider auth status (Settings → API keys panel) ────────────────────────
+//
+// omp 18.3.0 removed `ModelRegistry.getProviderAuthStatus` AND
+// `ModelRegistry.getProviderDisplayName`, which crashed the whole panel with
+// "getProviderAuthStatus is not a function". This helper rebuilds the status
+// from the 18.3.0 surface (`hasConcreteAuth`, `hasCommandBackedApiKey`,
+// `authStorage.keys.source`, `authStorage.oauth.identity`). Every probe is
+// feature-detected and failure-isolated so one missing or misbehaving method
+// degrades to a plain value instead of throwing.
+//
+// `source` is mapped onto the vocabulary `public/app-settings-editors.js`
+// renders (describeAuthStatus):
+//   "stored"      → credential entry (api_key or OAuth) — enables the Remove button
+//   "environment" → provider env var (`label` carries the variable name)
+//   "runtime"     → runtime --api-key override
+//   "command"     → models.yml `!command`-backed key (never removable here)
+//   "keyless"     → local endpoint that needs no auth
+//   "config"      → models.yml `providers.<name>.apiKey`
+//   "configured" | "unknown" | "error" → nothing finer derivable
+
+interface ProviderAuthStatus {
+  provider: string;
+  displayName?: string;
+  configured: boolean;
+  source?: string;
+  label?: string;
+}
+
+function computeProviderAuthStatus(registry: ModelRegistry, provider: string): ProviderAuthStatus {
+  const reg = registry as unknown as Record<string, unknown>;
+  const authStorage = reg.authStorage as Record<string, unknown> | undefined;
+
+  // configured: hasConcreteAuth(provider) is omp 18.3's "a concrete auth
+  // source exists" signal. Older surfaces fall back to a per-model
+  // hasConfiguredAuth probe, then to plain false.
+  let configured = false;
+  try {
+    if (typeof reg.hasConcreteAuth === "function") {
+      configured = (reg.hasConcreteAuth as (p: string) => boolean)(provider) === true;
+    } else if (
+      typeof reg.hasConfiguredAuth === "function" &&
+      typeof reg.getProviderModels === "function"
+    ) {
+      const model = ((reg.getProviderModels as (p: string) => unknown[])(provider) ?? [])[0];
+      if (model !== undefined && model !== null) {
+        configured = (reg.hasConfiguredAuth as (m: unknown) => boolean)(model) === true;
+      }
+    }
+  } catch {
+    configured = false;
+  }
+
+  let source: string | undefined;
+  let label: string | undefined;
+  try {
+    // Command-backed key (models.yml `!command`): checked first — the key is
+    // minted by a program, not stored, so the panel must not offer Remove.
+    if (
+      typeof reg.hasCommandBackedApiKey === "function" &&
+      (reg.hasCommandBackedApiKey as (p: string) => boolean)(provider) === true
+    ) {
+      source = "command";
+    }
+    if (!source && authStorage) {
+      // keys.source(): the credential cascade's winning leg (runtime >
+      // config > oauth > stored api_key > env), synchronous, refresh-free.
+      const keys = authStorage.keys as Record<string, unknown> | undefined;
+      if (keys && typeof keys.source === "function") {
+        const origin = (
+          keys.source as (p: string) => { kind?: unknown; envVar?: unknown } | undefined
+        )(provider);
+        if (origin && typeof origin === "object" && typeof origin.kind === "string") {
+          if (origin.kind === "env") {
+            source = "environment";
+            if (typeof origin.envVar === "string") label = origin.envVar;
+          } else if (origin.kind === "oauth" || origin.kind === "api_key") {
+            source = "stored";
+          } else {
+            source = origin.kind; // "runtime" | "config"
+          }
+        }
+      }
+      // Fallback probe when keys.source is unavailable: inspect the stored
+      // credential entry shape directly (OAuth vs API key).
+      if (!source) {
+        const credentials = authStorage.credentials as Record<string, unknown> | undefined;
+        const get = credentials?.get as ((p: string) => { type?: unknown } | undefined) | undefined;
+        const entry = typeof get === "function" ? get.call(credentials, provider) : undefined;
+        if (
+          entry &&
+          typeof entry === "object" &&
+          (entry.type === "oauth" || entry.type === "api_key")
+        ) {
+          source = "stored";
+        }
+      }
+    }
+    if (!source && configured && authStorage) {
+      // Keyless local endpoint (Ollama, llama.cpp, …): configured, but there
+      // is no credential to show or manage.
+      const keys = authStorage.keys as Record<string, unknown> | undefined;
+      const keyless = keys?.keyless as ((p: string) => boolean) | undefined;
+      if (typeof keyless === "function" && keyless.call(keys, provider) === true)
+        source = "keyless";
+    }
+    // Label for stored OAuth logins: the account email/id via the read-only
+    // identity lookup (no token refresh, no token material).
+    if (source === "stored" && label === undefined && authStorage) {
+      const oauth = authStorage.oauth as Record<string, unknown> | undefined;
+      const identity = oauth?.identity as (
+        p: string,
+      ) => { email?: unknown; accountId?: unknown } | undefined | null;
+      if (typeof identity === "function") {
+        const id = identity.call(oauth, provider);
+        if (id && typeof id === "object") {
+          if (typeof id.email === "string" && id.email) label = id.email;
+          else if (typeof id.accountId === "string" && id.accountId) label = id.accountId;
+        }
+      }
+    }
+  } catch {
+    source = undefined;
+    label = undefined;
+  }
+  if (!source) source = configured ? "configured" : "unknown";
+
+  // displayName: no registry API for this survives in 18.3.0 — omit and let
+  // the frontend fall back to the raw provider id.
+  let displayName: string | undefined;
+  try {
+    if (typeof reg.getProviderDisplayName === "function") {
+      const name = (reg.getProviderDisplayName as (p: string) => string)(provider);
+      if (typeof name === "string" && name) displayName = name;
+    }
+  } catch {
+    displayName = undefined;
+  }
+
+  return { provider, displayName, configured, source, label };
+}
+
 // ─── omp agent settings surface ──────────────────────────────────────────────
 //
 // Structural types for the omp runtime's Settings singleton and package
@@ -2370,14 +2511,22 @@ export default function (omp: ExtensionAPI) {
           const providers = Array.from(providerNames)
             .sort()
             .map((p) => {
-              const status = registry.getProviderAuthStatus(p);
-              return {
-                provider: p,
-                displayName: registry.getProviderDisplayName(p),
-                configured: status.configured,
-                source: status.source, // "stored" | "environment" | "runtime" | "fallback" | undefined
-                label: status.label,
-              };
+              // One bad provider must not break the whole panel — omp API
+              // drift has taken the entire Settings page down before.
+              try {
+                return computeProviderAuthStatus(registry, p);
+              } catch (e: unknown) {
+                console.error(
+                  `[Embedded] list_auth_status: provider "${p}" failed:`,
+                  errMessage(e),
+                );
+                const failed: ProviderAuthStatus = {
+                  provider: p,
+                  configured: false,
+                  source: "error",
+                };
+                return failed;
+              }
             });
           sendTo(ws, success("list_auth_status", { providers }));
           break;
@@ -2403,9 +2552,40 @@ export default function (omp: ExtensionAPI) {
             break;
           }
           try {
-            registry.authStorage.set(provider, { type: "api_key", key: apiKey });
+            // omp 18.3.0 moved the flat `authStorage.set/remove` onto the
+            // `authStorage.credentials` namespace. Prefer the new surface and
+            // fall back to the legacy flat one so both embedded versions work.
+            const authStorage = registry.authStorage as unknown as
+              | Record<string, unknown>
+              | undefined;
+            const credentialsApi = authStorage?.credentials as Record<string, unknown> | undefined;
+            const setCredential =
+              typeof credentialsApi?.set === "function"
+                ? (prov: string, cred: unknown) =>
+                    (credentialsApi.set as (p: string, c: unknown) => Promise<void> | void)(
+                      prov,
+                      cred,
+                    )
+                : typeof authStorage?.set === "function"
+                  ? (authStorage.set as (p: string, c: unknown) => Promise<void> | void).bind(
+                      authStorage,
+                    )
+                  : null;
+            if (!setCredential) {
+              sendTo(
+                ws,
+                error(
+                  "set_api_key",
+                  "This omp version's auth storage does not support writing API keys.",
+                ),
+              );
+              break;
+            }
+            await setCredential(provider, { type: "api_key", key: apiKey });
             // Refresh so getAvailable() picks up the new key without restart.
-            registry.refresh();
+            if (typeof registry.refresh === "function") {
+              await registry.refresh();
+            }
             sendTo(ws, success("set_api_key", { provider }));
           } catch (e: unknown) {
             sendTo(ws, error("set_api_key", errMessage(e)));
@@ -2428,8 +2608,33 @@ export default function (omp: ExtensionAPI) {
             break;
           }
           try {
-            registry.authStorage.remove(provider);
-            registry.refresh();
+            // Same 18.3.0 surface change as set_api_key: credentials.remove
+            // first, legacy flat authStorage.remove as fallback.
+            const authStorage = registry.authStorage as unknown as
+              | Record<string, unknown>
+              | undefined;
+            const credentialsApi = authStorage?.credentials as Record<string, unknown> | undefined;
+            const removeCredential =
+              typeof credentialsApi?.remove === "function"
+                ? (prov: string) =>
+                    (credentialsApi.remove as (p: string) => Promise<void> | void)(prov)
+                : typeof authStorage?.remove === "function"
+                  ? (authStorage.remove as (p: string) => Promise<void> | void).bind(authStorage)
+                  : null;
+            if (!removeCredential) {
+              sendTo(
+                ws,
+                error(
+                  "remove_api_key",
+                  "This omp version's auth storage does not support removing credentials.",
+                ),
+              );
+              break;
+            }
+            await removeCredential(provider);
+            if (typeof registry.refresh === "function") {
+              await registry.refresh();
+            }
             sendTo(ws, success("remove_api_key", { provider }));
           } catch (e: unknown) {
             sendTo(ws, error("remove_api_key", errMessage(e)));

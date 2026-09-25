@@ -1927,11 +1927,24 @@ body {
   margin-bottom: 8px;
 }
 
+.settings-label {
+  font-size: 13px;
+}
+
 .settings-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 6px 0;
+}
+
+/* Label grows so the control group packs against the right edge with one
+   consistent gap — multi-child rows (agent catalog: label + control + reset
+   + status) would otherwise scatter children via space-between. */
+.settings-row > .settings-label {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .settings-row-usage {
@@ -2472,10 +2485,6 @@ body {
   color: #e53935;
 }
 
-.settings-label {
-  font-size: 13px;
-}
-
 .settings-label-stack {
   display: flex;
   flex-direction: column;
@@ -2495,7 +2504,9 @@ body {
   width: 40px;
   height: 22px;
   border-radius: var(--radius-md);
-  border: none;
+  /* Visible outline in BOTH states so the OFF switch reads as a control
+     (the glass track alone is invisible against dark theme panels). */
+  border: 1px solid var(--border-bright);
   background: var(--bg-glass-strong);
   cursor: pointer;
   position: relative;
@@ -2506,8 +2517,9 @@ body {
 .settings-toggle::after {
   content: "";
   position: absolute;
-  top: 3px;
-  left: 3px;
+  /* 2px inside the 1px border = same 3px outer inset as before (border-box) */
+  top: 2px;
+  left: 2px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
@@ -2517,16 +2529,18 @@ body {
 
 .settings-toggle.on {
   background: var(--accent);
+  border-color: var(--accent);
 }
 
 .settings-toggle.on::after {
-  left: 21px;
+  left: 20px;
   background: white;
 }
 
 /* Interface language dropdown (Settings → General → Language). Mirrors the
    pkg-browse-sort control so it reads as a native settings form control. */
 .settings-select {
+  height: 26px;
   padding: 5px 10px;
   font-size: 12px;
   color: var(--text-primary);
@@ -2547,6 +2561,7 @@ body {
 }
 
 .settings-value-btn {
+  height: 26px;
   padding: 4px 10px;
   min-width: 48px;
   background: var(--bg-glass);
@@ -2567,7 +2582,6 @@ body {
 /* Per-setting reset (↺) — sits after the value control in agent-setting rows */
 .agent-setting-reset {
   flex-shrink: 0;
-  margin-left: 8px;
   width: 26px;
   height: 26px;
   display: inline-flex;
@@ -2613,6 +2627,7 @@ body {
 }
 
 .settings-input {
+  height: 26px;
   padding: 5px 10px;
   background: var(--bg-glass);
   border: 1px solid var(--border);
@@ -2748,7 +2763,9 @@ body {
     padding: 8px 0;
   }
 
-  .settings-label {
+  /* Full specificity match for .settings-row > .settings-label (base rule)
+     so labels still take their own line when rows wrap. */
+  .settings-row > .settings-label {
     flex: 1 1 100%;
     min-width: 0;
   }
