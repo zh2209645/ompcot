@@ -54,6 +54,27 @@ describe("MessageRenderer streaming markdown preview", () => {
     expect(content.querySelector("script")).toBeNull();
   });
 
+  it("keeps the streaming placeholder until finalize stamps the real entry id (F2)", () => {
+    const el = renderer.renderAssistantMessage({ content: "" }, true);
+    expect(el.dataset.messageId).toBe("streaming");
+
+    renderer.updateStreamingMessage(el, "answer");
+    renderer.finalizeStreamingMessage(el, null, "", "msg_entry_42");
+
+    expect(el.dataset.messageId).toBe("msg_entry_42");
+  });
+
+  it("leaves the placeholder untouched when finalize has no id to stamp (F2)", () => {
+    const el = renderer.renderAssistantMessage({ content: "" }, true);
+    renderer.finalizeStreamingMessage(el);
+    expect(el.dataset.messageId).toBe("streaming");
+  });
+
+  it("history renders carry the entry id passed with the message (F2)", () => {
+    const el = renderer.renderAssistantMessage({ content: "hi", id: "msg_7" }, false, true);
+    expect(el.dataset.messageId).toBe("msg_7");
+  });
+
   it("highlights keyword matches across rendered messages", () => {
     renderer.renderUserMessage({ content: "Alpha beta gamma" }, true);
     renderer.renderAssistantMessage({ content: "Beta appears twice: beta." }, false, true);

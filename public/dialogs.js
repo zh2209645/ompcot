@@ -76,20 +76,33 @@ export class DialogHandler {
   showInput(request) {
     this.clearCurrentDialog();
 
-    const { id, title, placeholder, timeout } = request;
+    const { id, title, timeout } = request;
 
     const dialog = document.createElement("div");
     dialog.className = "dialog";
+    // F6: the input element itself is NEVER part of the innerHTML template.
+    // escapeHtml() only escapes & < > (not quotes), so interpolating the
+    // untrusted `placeholder` into the attribute would allow attribute
+    // injection: `" onfocus="…` inside placeholder="…" injects a second
+    // attribute. The input is built via DOM APIs below and `placeholder` is
+    // assigned as a property — immune by construction.
     dialog.innerHTML = `
       <div class="dialog-title">${this.escapeHtml(title || t("dialog.inputTitle"))}</div>
-      <input type="text" class="dialog-input" id="dialog-input" placeholder="${this.escapeHtml(placeholder || "")}" />
       <div class="dialog-actions">
         <button id="dialog-cancel">${t("common.cancel")}</button>
         <button id="dialog-submit">${t("dialog.submit")}</button>
       </div>
     `;
 
-    const input = dialog.querySelector("#dialog-input");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "dialog-input";
+    input.id = "dialog-input";
+    input.placeholder =
+      request.placeholder === null || request.placeholder === undefined
+        ? ""
+        : String(request.placeholder);
+    dialog.insertBefore(input, dialog.querySelector(".dialog-actions"));
 
     const submit = () => {
       const value = input.value.trim();
@@ -114,20 +127,25 @@ export class DialogHandler {
   showEditor(request) {
     this.clearCurrentDialog();
 
-    const { id, title, prefill, timeout } = request;
+    const { id, title, timeout } = request;
 
     const dialog = document.createElement("div");
     dialog.className = "dialog";
     dialog.innerHTML = `
       <div class="dialog-title">${this.escapeHtml(title || t("dialog.editorTitle"))}</div>
-      <textarea class="dialog-textarea" id="dialog-textarea">${this.escapeHtml(prefill || "")}</textarea>
       <div class="dialog-actions">
         <button id="dialog-cancel">${t("common.cancel")}</button>
         <button id="dialog-save">${t("common.save")}</button>
       </div>
     `;
 
-    const textarea = dialog.querySelector("#dialog-textarea");
+    const textarea = document.createElement("textarea");
+    textarea.className = "dialog-textarea";
+    textarea.id = "dialog-textarea";
+    // Property assignment, never innerHTML interpolation — see showInput (F6).
+    textarea.value =
+      request.prefill === null || request.prefill === undefined ? "" : String(request.prefill);
+    dialog.insertBefore(textarea, dialog.querySelector(".dialog-actions"));
 
     dialog.querySelector("#dialog-save").onclick = () => {
       const value = textarea.value;
@@ -199,6 +217,12 @@ export class DialogHandler {
     });
   }
 
+  /**
+   * Escape untrusted text for ELEMENT-CONTENT positions of an innerHTML
+   * template (escapes & < >, but NOT quotes). Never use the result inside an
+   * attribute: quote characters would allow attribute injection — build such
+   * elements via DOM APIs and assign properties instead (see showInput, F6).
+   */
   escapeHtml(text) {
     const div = document.createElement("div");
     div.textContent = text;

@@ -125,6 +125,7 @@
         <div class="sidebar-actions">
           <button class="icon-btn" id="open-folder-btn" title="Open folder as workspace" aria-label="Open folder" data-i18n-title="sidebar.openFolderAsWorkspace" data-i18n-aria-label="sidebar.openFolder"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><line x1="12" y1="12" x2="12" y2="18"/><line x1="9" y1="15" x2="15" y2="15"/></svg></button>
           <button class="icon-btn" id="refresh-sessions-btn" title="Refresh sessions" aria-label="Refresh sessions" data-i18n-title="sidebar.refreshSessions" data-i18n-aria-label="sidebar.refreshSessions"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></button>
+          <button class="icon-btn" id="import-sessions-btn" title="Import sessions" aria-label="Import sessions" data-i18n-title="sidebar.importSessions" data-i18n-aria-label="sidebar.importSessions"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
         </div>
       </div>
       <div class="session-list" id="session-list">
@@ -431,6 +432,8 @@
 
       <div class="settings-tab" data-settings-panel="usage">
         <div class="settings-header"><h3 data-i18n="settings.usage">Usage</h3></div>
+        <!-- Account usage section (account-usage.js), above the cost dashboard -->
+        <div id="account-usage-root"></div>
         <div class="settings-usage-embed">
           <iframe src="/cost" title="Cost Dashboard" data-i18n-title="settings.costDashboard" class="settings-usage-iframe" scrolling="yes"></iframe>
         </div>
@@ -453,6 +456,8 @@
               <div class="settings-api-keys" id="settings-api-keys">
                 <div class="settings-api-keys-loading" data-i18n="settings.loadingProviders">Loading providers…</div>
               </div>
+              <!-- OAuth login row (account-usage.js) — below the auth keys -->
+              <div class="oauth-login" id="oauth-login-root"></div>
             </div>
             <div class="settings-section" id="settings-auth-section" style="display:none">
               <div class="settings-section-title" data-i18n="settings.protection">Protection</div>

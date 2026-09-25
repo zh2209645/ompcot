@@ -3,6 +3,7 @@
  */
 
 import { onLanguageChanged, t } from "./i18n.js";
+import { wsRpc } from "./ws-rpc.js";
 
 /**
  * Read a JSON array from localStorage without letting bad input break the
@@ -50,6 +51,9 @@ export class SessionSidebar {
     this.streamingFiles = new Set();
     this.projectVisibleSessionCounts = new Map();
     this.contextMenu = null;
+    // Anchor button of the import menu, when one is open — lets the document
+    // click handler exempt the opening click (F1).
+    this.importMenuAnchor = null;
     // `loadSeq` counts issued loads; `loadCommitted` is the highest seq that has
     // actually rendered. We discard a response only when a *newer* one has
     // already committed (out-of-order arrival), never just because a newer load
@@ -67,8 +71,18 @@ export class SessionSidebar {
     // up the new language.
     this.unsubscribeLanguageChanged = onLanguageChanged(() => this.rerenderOnLanguageChange());
 
-    // Close context menu on click anywhere
-    document.addEventListener("click", () => {
+    // Close context menu on click anywhere — except the click that OPENS the
+    // import menu (F1): that click bubbles up from the anchor button during
+    // the same event and would immediately close the menu it just opened.
+    // Clicks on the menu itself are equally exempt (row clicks stop
+    // propagation themselves, but e.g. a drag-release inside the menu
+    // shouldn't dismiss it either).
+    document.addEventListener("click", (e) => {
+      if (this.contextMenu) {
+        const insideMenu = this.contextMenu.contains(e.target);
+        const onAnchor = this.importMenuAnchor?.contains(e.target);
+        if (insideMenu || onAnchor) return;
+      }
       this.closeContextMenu();
     });
     document.addEventListener("contextmenu", (e) => {
@@ -539,6 +553,90 @@ export class SessionSidebar {
     if (this.contextMenu) {
       this.contextMenu.remove();
       this.contextMenu = null;
+    }
+    this.importMenuAnchor = null;
+  }
+
+  // ═══════════════════════════════════════
+  // Import sessions (B10) — the sidebar's single addition for imports:
+  // a small menu anchored to the header import button offering
+  // Claude Code / Codex as sources, then `import_session` over ws-rpc.
+  // ═══════════════════════════════════════
+
+  importSessions(anchorEl, { wsClient, notify = () => {}, onError = () => {} } = {}) {
+    if (!wsClient) return;
+    if (this.contextMenu) {
+      this.closeContextMenu();
+      return;
+    }
+
+    const menu = document.createElement("div");
+    menu.className = "session-context-menu import-menu";
+
+    const sources = [
+      { source: "claude", labelKey: "session.importFromClaude", icon: "⟥" },
+      { source: "codex", labelKey: "session.importFromCodex", icon: "⟥" },
+    ];
+    for (const item of sources) {
+      const row = document.createElement("div");
+      row.className = "context-menu-item";
+      row.innerHTML = `<span class="context-menu-icon">${item.icon}</span>${this.escapeHtml(t(item.labelKey))}`;
+      row.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this.closeContextMenu();
+        void this.runSessionImport(item.source, anchorEl, { wsClient, notify, onError });
+      });
+      menu.appendChild(row);
+    }
+
+    document.body.appendChild(menu);
+    // Drop below the anchor button, clamped to the viewport (same discipline
+    // as showContextMenu). Reusing this.contextMenu means the existing
+    // document click handler closes it for free; the anchor is remembered so
+    // that handler can exempt the opening click (F1).
+    const rect = menu.getBoundingClientRect();
+    let x = anchorEl.getBoundingClientRect().left;
+    let y = anchorEl.getBoundingClientRect().bottom + 4;
+    if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+    if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
+    menu.style.left = `${Math.max(8, x)}px`;
+    menu.style.top = `${Math.max(8, y)}px`;
+    this.importMenuAnchor = anchorEl;
+    this.contextMenu = menu;
+  }
+
+  async runSessionImport(source, anchorEl, { wsClient, notify, onError }) {
+    if (anchorEl) {
+      anchorEl.disabled = true;
+      anchorEl.setAttribute("aria-busy", "true");
+    }
+    notify(t("status.importing"));
+    try {
+      // Imports can scan other tools' history directories — generous timeout.
+      const result = await wsRpc(
+        wsClient,
+        { type: "import_session", source },
+        { timeoutMs: 60000 },
+      );
+      if (!result.ok) {
+        onError(result.error || t("session.importFailed"));
+        return;
+      }
+      if (result.data && result.data.ok === false) {
+        if (result.data.reason === "interactive-only") {
+          notify(t("session.importTerminalOnly", { source }));
+        } else {
+          onError(String(result.data.reason || t("session.importFailed")));
+        }
+        return;
+      }
+      notify(t("status.imported"));
+      this.loadSessions({ quiet: true }).catch(() => {});
+    } finally {
+      if (anchorEl) {
+        anchorEl.disabled = false;
+        anchorEl.removeAttribute("aria-busy");
+      }
     }
   }
 

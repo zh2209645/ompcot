@@ -72,12 +72,12 @@ describe("WebSocketClient control commands", () => {
     expect(sent[0]).toMatchObject({
       type: "broker_control",
       command: "get_omp_version",
-      requestId: "ctl-1",
     });
+    expect(sent[0].requestId).toMatch(/^ctl-/);
 
     client.handleMessage({
       type: "control_response",
-      requestId: "ctl-1",
+      requestId: sent[0].requestId,
       ok: true,
       result: "1.2.3",
     });
@@ -85,11 +85,11 @@ describe("WebSocketClient control commands", () => {
   });
 
   test("sendControl rejects on an error control_response", async () => {
-    const { client } = openClient();
+    const { client, sent } = openClient();
     const result = client.sendControl("new_session", {});
     client.handleMessage({
       type: "control_response",
-      requestId: "ctl-1",
+      requestId: sent[0].requestId,
       ok: false,
       error: "boom",
     });
@@ -97,27 +97,28 @@ describe("WebSocketClient control commands", () => {
   });
 
   test("control_progress frames invoke the onProgress callback", async () => {
-    const { client } = openClient();
+    const { client, sent } = openClient();
     const events = [];
     const result = client.sendControl(
       "download_and_install_update",
       {},
       { onProgress: (data) => events.push(data), timeoutMs: 0 },
     );
+    const rid = sent[0].requestId;
 
     client.handleMessage({
       type: "control_progress",
-      requestId: "ctl-1",
+      requestId: rid,
       data: { phase: "started", contentLength: 100 },
     });
     client.handleMessage({
       type: "control_progress",
-      requestId: "ctl-1",
+      requestId: rid,
       data: { phase: "progress", downloaded: 50, contentLength: 100 },
     });
     client.handleMessage({
       type: "control_response",
-      requestId: "ctl-1",
+      requestId: rid,
       ok: true,
       result: { installed: true },
     });
@@ -163,16 +164,14 @@ describe("WebSocketClient broker routing", () => {
 
     client.send({ type: "mirror_sync_request" });
 
-    expect(sent).toEqual([
-      {
-        type: "broker_command",
-        protocolVersion: 1,
-        requestId: "req-1",
-        workspaceId: "workspace:/tmp/project",
-        sessionId: "/tmp/project/session-a.jsonl",
-        payload: { type: "mirror_sync_request" },
-      },
-    ]);
+    expect(sent[0]).toMatchObject({
+      type: "broker_command",
+      protocolVersion: 1,
+      workspaceId: "workspace:/tmp/project",
+      sessionId: "/tmp/project/session-a.jsonl",
+      payload: { type: "mirror_sync_request" },
+    });
+    expect(sent[0].requestId).toMatch(/^req-/);
   });
 
   test("attaches broker route metadata to unwrapped rpc events", () => {
@@ -271,12 +270,49 @@ describe("WebSocketClient broker routing", () => {
     const client = new WebSocketClient("ws://127.0.0.1:49000/ui-ws");
     client.ws = { readyState: WebSocket.OPEN, send: () => {} };
 
-    expect(client.send({ type: "prompt", message: "hello" })).toBe("req-1");
+    expect(client.send({ type: "prompt", message: "hello" })).toMatch(/^req-[a-z0-9]+-1$/);
     // Pre-wrapped broker_command envelopes keep their own requestId.
     expect(client.send({ type: "broker_command", requestId: "req-custom" })).toBe("req-custom");
     // Not connected: nothing is sent and there is no requestId to track.
     client.ws = { readyState: WebSocket.CLOSED, send: () => {} };
     expect(client.send({ type: "prompt", message: "later" })).toBeNull();
+  });
+
+  test("request ids are namespaced by a per-window token so two clients cannot collide (F12)", () => {
+    const sentA = [];
+    const sentB = [];
+    const a = new WebSocketClient("ws://127.0.0.1:49000/ui-ws");
+    const b = new WebSocketClient("ws://127.0.0.1:49000/ui-ws");
+    a.ws = { readyState: WebSocket.OPEN, send: (m) => sentA.push(JSON.parse(m)) };
+    b.ws = { readyState: WebSocket.OPEN, send: (m) => sentB.push(JSON.parse(m)) };
+
+    const ids = new Set();
+    for (let i = 0; i < 50; i++) {
+      ids.add(a.send({ type: "prompt", message: "hi" }));
+      ids.add(b.send({ type: "prompt", message: "hi" }));
+    }
+
+    // Every id is unique across both windows despite identical counters.
+    expect(ids.size).toBe(100);
+  });
+
+  test("response frames whose command mismatches the recorded pending command are ignored (F12)", () => {
+    const sent = [];
+    const client = new WebSocketClient("ws://127.0.0.1:49000/ui-ws");
+    client.ws = { readyState: WebSocket.OPEN, send: (m) => sent.push(JSON.parse(m)) };
+    const seen = [];
+    client.addEventListener("commandResponse", (event) => seen.push(event.detail));
+
+    const rid = client.send({ type: "prompt", message: "hello" });
+
+    // A same-id reply for a DIFFERENT command (another window's collision) is dropped…
+    client.handleMessage({ type: "response", command: "get_messages", success: true, id: rid });
+    expect(seen).toHaveLength(0);
+
+    // …while the matching command's reply is dispatched.
+    client.handleMessage({ type: "response", command: "prompt", success: true, id: rid });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].command).toBe("prompt");
   });
 
   test("command_undeliverable dispatches a commandUndeliverable event", () => {

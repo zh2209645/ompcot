@@ -36,6 +36,22 @@ export function resolveWebSocketUrl(env = globalThis.window || globalThis) {
   return `${protocol}//${loc?.host || "127.0.0.1:47821"}/ws`;
 }
 
+// Random per-client token for request ids. The broker broadcasts every
+// upstream reply to ALL UI windows, and ids used to start at `req-1` in every
+// window — so two windows could collide (window B's reply to `req-1` being
+// mistaken for window A's). A random prefix makes cross-window collisions
+// practically impossible (F12).
+function makeRequestToken() {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID().slice(0, 8);
+    }
+  } catch {
+    // fall through to the Math.random fallback
+  }
+  return Math.random().toString(36).slice(2, 10);
+}
+
 export class WebSocketClient extends EventTarget {
   constructor(url) {
     super();
@@ -53,6 +69,11 @@ export class WebSocketClient extends EventTarget {
     this.sessionId = null;
     this.sourcePort = null;
     this.requestCounter = 0;
+    this.requestToken = makeRequestToken();
+    // Fire-and-forget commands we sent, keyed by requestId → payload type.
+    // Used to drop broadcast `response` frames whose command doesn't match
+    // what we recorded for that id (cross-window collision guard, F12).
+    this.sentCommands = new Map();
     // Whether the broker advertised native (OS/window) capabilities. Updated by
     // the `capabilities` handshake frame; consumers gate native-only UI on it.
     this.capabilities = { native: false };
@@ -186,6 +207,21 @@ export class WebSocketClient extends EventTarget {
     }, delay);
   }
 
+  nextRequestId(prefix) {
+    return `${prefix}-${this.requestToken}-${++this.requestCounter}`;
+  }
+
+  // Bound the sent-command record: replies that never arrive must not leak
+  // entries. Keeps insertion order, so the oldest entry is evicted first.
+  recordSentCommand(requestId, type) {
+    if (!requestId || !type) return;
+    this.sentCommands.set(requestId, type);
+    if (this.sentCommands.size > 500) {
+      const oldest = this.sentCommands.keys().next().value;
+      this.sentCommands.delete(oldest);
+    }
+  }
+
   send(data) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       // Prefer broker envelope, while remaining backward-compatible with
@@ -196,12 +232,15 @@ export class WebSocketClient extends EventTarget {
           : {
               type: "broker_command",
               protocolVersion: this.protocolVersion,
-              requestId: `req-${++this.requestCounter}`,
+              requestId: this.nextRequestId("req"),
               workspaceId: this.workspaceId || undefined,
               sessionId: this.sessionId || undefined,
               sourcePort: this.sourcePort || undefined,
               payload: data,
             };
+      if (data && data.type !== "broker_command") {
+        this.recordSentCommand(payload.requestId, data.type);
+      }
       console.debug("[WS route] send", {
         command: payload.payload?.type || payload.type,
         requestId: payload.requestId,
@@ -261,8 +300,8 @@ export class WebSocketClient extends EventTarget {
         reject(new Error("WebSocket not connected; cannot send control command"));
         return;
       }
-      const requestId = `ctl-${++this.requestCounter}`;
-      const entry = { resolve, reject, onProgress, timer: null };
+      const requestId = this.nextRequestId("ctl");
+      const entry = { resolve, reject, onProgress, timer: null, command };
       const effectiveTimeout = typeof timeoutMs === "number" ? timeoutMs : this.controlTimeoutMs;
       if (effectiveTimeout > 0) {
         entry.timer = setTimeout(() => {
@@ -296,6 +335,11 @@ export class WebSocketClient extends EventTarget {
     if (!requestId) return;
     const pending = this.pendingControls.get(requestId);
     if (!pending) return;
+    // Command-mismatch guard (F12): a reply whose command doesn't match the
+    // recorded pending request is not ours — ignore it and keep waiting.
+    if (pending.command && message.command != null && message.command !== pending.command) {
+      return;
+    }
     this.pendingControls.delete(requestId);
     if (pending.timer) clearTimeout(pending.timer);
     if (message.ok === false) {
@@ -399,11 +443,21 @@ export class WebSocketClient extends EventTarget {
       case "error":
         this.dispatchEvent(new CustomEvent("serverError", { detail: message }));
         break;
-      case "response":
-        // Broker acknowledgment for a broker_command we sent (requestId-keyed).
-        // No frontend handler needed currently; dispatch for future use.
+      case "response": {
+        // Broker acknowledgment for a broker_command we sent (requestId-keyed,
+        // mirrored by the upstream in `id`). The broker broadcasts every
+        // upstream reply to all UI windows, so a same-id frame carrying a
+        // DIFFERENT command is another window's reply — drop it instead of
+        // dispatching it as ours (F12).
+        const replyId = message.requestId ?? message.id;
+        const sentType = replyId != null ? this.sentCommands.get(replyId) : undefined;
+        if (sentType != null) {
+          this.sentCommands.delete(replyId);
+          if (message.command != null && message.command !== sentType) return;
+        }
         this.dispatchEvent(new CustomEvent("commandResponse", { detail: message }));
         break;
+      }
       case "session_switch":
         this.dispatchEvent(new CustomEvent("sessionSwitch"));
         break;

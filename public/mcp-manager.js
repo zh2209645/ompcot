@@ -14,6 +14,12 @@
 // - Connect/Disconnect/Reconnect buttons exist only when the server advertises
 //   capabilities.connect; with capabilities.liveStatus === false a banner
 //   explains the absence of live status and every card renders as unknown.
+//
+// Error discipline (F23): mutation errors and list errors are tracked
+// separately. The mutation error renders above the list error, and it is
+// cleared ONLY by a successful MUTATION — a list refresh (failing or
+// succeeding) never touches it. Before, a failed list refresh overwrote the
+// mutation error and a later successful list silently cleared it.
 
 import { onLanguageChanged, t } from "./i18n.js";
 import { wsRpc } from "./ws-rpc.js";
@@ -70,7 +76,11 @@ export function createMcpManager({ root, wsClient, requestTimeoutMs } = {}) {
   let servers = [];
   let capabilities = { liveStatus: true, connect: false };
   let loaded = false;
+  // Last list refresh failed (drives the list error line + error note).
   let loadFailed = false;
+  // F23: text of the last failed MUTATION, or null. Independent from list
+  // errors; only a successful mutation clears it.
+  let mutationErrorText = null;
   let formMode = null; // null | "add" | "edit"
   let mutationDepth = 0; // > 0 → action buttons render disabled
   const armedRemoves = new Map(); // server name → disarm timer
@@ -83,8 +93,13 @@ export function createMcpManager({ root, wsClient, requestTimeoutMs } = {}) {
   banner.setAttribute("data-i18n", "mcp.liveStatusUnavailable");
   banner.textContent = t("mcp.liveStatusUnavailable");
 
-  const errorLine = document.createElement("div");
-  errorLine.className = "mcp-error hidden";
+  // Two independent error lines (F23): the mutation error renders ABOVE the
+  // list error, and neither's lifecycle touches the other.
+  const mutationErrorLine = document.createElement("div");
+  mutationErrorLine.className = "mcp-error mcp-mutation-error hidden";
+
+  const listErrorLine = document.createElement("div");
+  listErrorLine.className = "mcp-error mcp-list-error hidden";
 
   const listEl = document.createElement("div");
   listEl.className = "mcp-list";
@@ -216,7 +231,7 @@ export function createMcpManager({ root, wsClient, requestTimeoutMs } = {}) {
     formActions,
   );
 
-  root.append(banner, errorLine, listEl, toolbar, form);
+  root.append(banner, mutationErrorLine, listErrorLine, listEl, toolbar, form);
 
   // ── Form behavior ───────────────────────────────────────────────────────
 
@@ -305,36 +320,26 @@ export function createMcpManager({ root, wsClient, requestTimeoutMs } = {}) {
     }
     if (destroyed) return false;
     if (!result.ok) {
-      const text = result.error || t("mcp.actionFailed");
-      if (surfaceOnForm && formMode) showFormError(text);
-      else showError(text);
+      mutationErrorText = result.error || t("mcp.actionFailed");
+      if (surfaceOnForm && formMode) showFormError(mutationErrorText);
     } else {
-      hideError();
+      // The ONLY thing that clears a mutation error (F23) — list refreshes
+      // (successful or not) deliberately leave it alone.
+      mutationErrorText = null;
     }
     await refresh();
     return result.ok;
-  }
-
-  function showError(text) {
-    errorLine.textContent = text;
-    errorLine.classList.remove("hidden");
-  }
-
-  function hideError() {
-    errorLine.classList.add("hidden");
   }
 
   async function refresh() {
     if (destroyed) return;
     const result = await wsRpc(wsClient, { type: "mcp.list" }, { timeoutMs: requestTimeoutMs });
     if (destroyed) return;
+    // F23: a failed list refresh sets the LIST error only — it must not
+    // overwrite a mutation error, and a successful one must not clear it.
     if (!result.ok) {
       loadFailed = true;
-      showError(t("mcp.loadFailed"));
     } else {
-      // Clear the error line only when it came from a failed list load —
-      // a mutation error stays visible until the next successful mutation.
-      if (loadFailed) hideError();
       loadFailed = false;
       loaded = true;
       servers = Array.isArray(result.data?.servers) ? result.data.servers : [];
@@ -515,8 +520,30 @@ export function createMcpManager({ root, wsClient, requestTimeoutMs } = {}) {
     return el;
   }
 
+  /**
+   * F23: render the two independent error lines. The mutation error renders
+   * ABOVE the list error; each is hidden iff its own state is clear.
+   */
+  function renderErrorLines() {
+    if (mutationErrorText !== null) {
+      mutationErrorLine.textContent = mutationErrorText;
+      mutationErrorLine.classList.remove("hidden");
+    } else {
+      mutationErrorLine.classList.add("hidden");
+      mutationErrorLine.textContent = "";
+    }
+    if (loadFailed) {
+      listErrorLine.textContent = t("mcp.loadFailed");
+      listErrorLine.classList.remove("hidden");
+    } else {
+      listErrorLine.classList.add("hidden");
+      listErrorLine.textContent = "";
+    }
+  }
+
   function render() {
     banner.classList.toggle("hidden", capabilities.liveStatus);
+    renderErrorLines();
     listEl.replaceChildren();
     if (loadFailed) {
       listEl.append(note(t("mcp.loadFailed")));

@@ -6275,3 +6275,223 @@ html.macos-overlay .settings-content {
 .lan-qr-btn {
   color: var(--accent-text);
 }
+
+/* ═══════════════════════════════════════════════════════
+   Extension UI request dialogs (ui-requests.js)
+   ═══════════════════════════════════════════════════════ */
+
+/* Subtle deadline countdown: dim text + a hairline drain bar */
+.dialog-countdown {
+  margin-top: 16px;
+  font-size: 11px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.dialog-countdown-bar {
+  display: block;
+  height: 2px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.dialog-countdown-fill {
+  display: block;
+  height: 100%;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0.55;
+  transition: width 1s linear;
+}
+
+/* Keyboard access for select options (dialogs.js builds them as divs) */
+.dialog-option:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+  background: var(--bg-glass-hover);
+}
+
+/* ═══════════════════════════════════════════════════════
+   Fork from message (ui-requests.js) — copy-button pattern
+   ═══════════════════════════════════════════════════════ */
+
+.message-fork-btn {
+  opacity: 0;
+  align-self: flex-start;
+  margin-top: 4px;
+  margin-left: 2px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  transition: all 0.15s var(--ease);
+  flex-shrink: 0;
+}
+
+.message:hover .message-fork-btn,
+.message-fork-btn:focus-visible {
+  opacity: 1;
+}
+
+.message-fork-btn:hover {
+  color: var(--accent-text);
+  background: var(--bg-glass-hover);
+}
+
+.message-fork-btn:active {
+  transform: scale(0.9);
+}
+
+/* ═══════════════════════════════════════════════════════
+   Account usage (Settings → Usage, above the cost dashboard)
+   ═══════════════════════════════════════════════════════ */
+
+#account-usage-root {
+  margin-bottom: 16px;
+}
+
+.account-usage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.account-usage-header .settings-section-title {
+  margin-bottom: 0;
+}
+
+.account-usage-refresh {
+  width: 26px;
+  height: 26px;
+}
+
+.account-usage-refresh:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.account-usage-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 12px 0 4px;
+}
+
+.account-usage-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-glass);
+  padding: 2px 10px;
+  margin-bottom: 4px;
+}
+
+.account-usage-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 5px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.account-usage-row:last-child {
+  border-bottom: none;
+}
+
+.account-usage-label {
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.account-usage-value {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.account-usage-pre-wrap {
+  margin: 8px 0;
+}
+
+.account-usage-pre,
+.oauth-login-output {
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.account-usage-note.account-usage-error {
+  color: var(--accent-danger, #ef4444);
+}
+
+/* ═══════════════════════════════════════════════════════
+   OAuth login (Configuration → Providers, below auth keys)
+   ═══════════════════════════════════════════════════════ */
+
+.oauth-login {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.oauth-login-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.oauth-login-label {
+  flex-shrink: 0;
+}
+
+.oauth-login-input {
+  flex: 1;
+  min-width: 160px;
+  max-width: 240px;
+}
+
+.oauth-login-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 8px;
+  line-height: 1.5;
+}
+
+.oauth-login-status.hidden {
+  display: none;
+}
+
+.oauth-login-output.hidden,
+.oauth-login-advice.hidden {
+  display: none;
+}
+
+.oauth-login-advice {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  line-height: 1.5;
+}

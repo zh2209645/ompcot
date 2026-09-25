@@ -2,6 +2,7 @@ import { JSDOM } from "jsdom";
 import { describe, expect, test, vi } from "vitest";
 import {
   createComposerCommands,
+  createComposerQueue,
   filterSlashCommands,
   isSlashCommand,
   isSlashStreamRejection,
@@ -184,6 +185,29 @@ describe("slash popup", () => {
     expect(ctx.api.isPopupOpen()).toBe(true);
   });
 
+  test("F13: replies correlated via the server's `id` field populate the list", async () => {
+    const ctx = boot();
+    ctx.type("/co");
+    await tick();
+    expect(ctx.ws.sent).toContainEqual({ type: "list_commands" });
+
+    // The embedded server echoes the requestId back as `id`, not
+    // `requestId` — correlation must accept both spellings.
+    ctx.ws.dispatchEvent(
+      new CustomEvent("commandResponse", {
+        detail: { id: "req-1", success: true, data: { commands: COMMANDS, available: true } },
+      }),
+    );
+    await tick();
+
+    expect(ctx.api.isPopupOpen()).toBe(true);
+    expect(rows(ctx).map((row) => row.querySelector(".slash-menu-name").textContent)).toEqual([
+      "/compact",
+      "/copy",
+      "/context",
+    ]);
+  });
+
   test("a warm cache serves later opens without re-querying", async () => {
     const ctx = boot();
     await primeCommands(ctx);
@@ -346,6 +370,41 @@ describe("delivery mode (queue vs steer)", () => {
     expect(ctx.showSteerQueued).toHaveBeenCalledWith("stop and reconsider");
   });
 
+  test("F14: beginSend resolves Steer-now BEFORE the post-send refresh resets the toggle", () => {
+    const ctx = boot({ streaming: true });
+    ctx.type("pivot please");
+    ctx.toggleEl.querySelector('[data-mode="steer"]').click();
+    expect(ctx.api.getDeliveryMode()).toBe("steer");
+
+    const plan = ctx.api.beginSend();
+
+    // The decision was captured while the toggle still said "steer"…
+    expect(plan).toEqual({ message: "pivot please", delivery: "steer" });
+    // …even though clearing the input + refreshing the controls reset the
+    // visible mode back to Queue — reading the mode after the reset is what
+    // used to downgrade the send.
+    expect(ctx.input.value).toBe("");
+    expect(ctx.api.getDeliveryMode()).toBe("queue");
+  });
+
+  test("F14: wired like app.js, a steer-mode send emits the steer RPC instead of queueing", () => {
+    const ctx = boot({ streaming: true });
+    const steerSent = [];
+    const originalSend = ctx.ws.send.bind(ctx.ws);
+    ctx.ws.send = (data) => {
+      steerSent.push(data);
+      return originalSend(data);
+    };
+    ctx.type("pivot please");
+    ctx.toggleEl.querySelector('[data-mode="steer"]').click();
+
+    const plan = ctx.api.beginSend();
+    if (plan.delivery === "steer") ctx.api.sendSteerNow(plan.message);
+
+    expect(steerSent).toContainEqual({ type: "steer", message: "pivot please" });
+    expect(ctx.showSteerQueued).toHaveBeenCalledWith("pivot please");
+  });
+
   test("slash-while-streaming rejection is converted back into a queued message", () => {
     const ctx = boot({ streaming: true });
 
@@ -367,5 +426,66 @@ describe("delivery mode (queue vs steer)", () => {
     expect(isSlashStreamRejection(`  ${SLASH_STREAM_REJECTION} `)).toBe(true);
     expect(isSlashStreamRejection("cannot run while streaming")).toBe(false);
     expect(isSlashStreamRejection(undefined)).toBe(false);
+  });
+});
+
+describe("createComposerQueue (F15)", () => {
+  test("steer echoes render in the strip but are never flushed", () => {
+    const queue = createComposerQueue();
+    queue.queuePrompt("/compact", { kind: "slash" });
+    queue.addSteerEcho("already steered");
+    queue.queuePrompt("follow-up", { kind: "queue" });
+
+    const snapshot = queue.snapshot();
+    expect(snapshot.map((entry) => entry.message)).toEqual([
+      "/compact",
+      "follow-up",
+      "already steered",
+    ]);
+    // Only the genuinely pending commands are interactive/flushable; the
+    // steer echo is a visual-only acknowledgement.
+    expect(snapshot.filter((entry) => entry.flushable).map((entry) => entry.message)).toEqual([
+      "/compact",
+      "follow-up",
+    ]);
+    expect(snapshot.find((entry) => entry.kind === "steer").flushable).toBe(false);
+    expect(snapshot.find((entry) => entry.kind === "steer").item).toBeNull();
+
+    // Flushes drain pending items only, oldest first…
+    expect(queue.takeFlushable()).toMatchObject({ message: "/compact", kind: "slash" });
+    expect(queue.takeFlushable()).toMatchObject({ message: "follow-up", kind: "queue" });
+    expect(queue.takeFlushable()).toBeNull();
+    expect(queue.flushableCount).toBe(0);
+
+    // …while the steer echo survives flushes until its user-message echo
+    // retires it.
+    expect(queue.isEmpty).toBe(false);
+    expect(queue.removeSteerEcho("already steered")).toBe(true);
+    expect(queue.isEmpty).toBe(true);
+    expect(queue.removeSteerEcho("already steered")).toBe(false);
+  });
+
+  test("cancel/promote remove only the targeted pending item", () => {
+    const queue = createComposerQueue();
+    queue.queuePrompt("one", { kind: "queue" });
+    queue.queuePrompt("two", { kind: "queue" });
+    const snapshot = queue.snapshot();
+    const [first, second] = snapshot.map((entry) => entry.item);
+
+    queue.remove(first);
+    expect(queue.snapshot().map((entry) => entry.message)).toEqual(["two"]);
+
+    queue.remove(second);
+    expect(queue.snapshot()).toEqual([]);
+    expect(queue.flushableCount).toBe(0);
+  });
+
+  test("clear empties pending items and steer echoes together", () => {
+    const queue = createComposerQueue();
+    queue.queuePrompt("/compact", { kind: "slash" });
+    queue.addSteerEcho("steered away");
+    queue.clear();
+    expect(queue.isEmpty).toBe(true);
+    expect(queue.snapshot()).toEqual([]);
   });
 });

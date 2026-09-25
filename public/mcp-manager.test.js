@@ -199,6 +199,65 @@ describe("mcp manager page", () => {
     expect(errorLine.textContent).toBe("config file is read-only");
   });
 
+  // ── F23: mutation vs list error persistence ─────────────────────────────
+
+  test("F23: a failed list refresh does not overwrite the mutation error", async () => {
+    const ctx = createManager();
+    await loadList(ctx, LIST_OK);
+
+    cardOf("search").querySelector(".settings-toggle").click();
+    await tick();
+    // The mutation fails, and the follow-up list refresh fails too.
+    ctx.ws.respond(undefined, { success: false, error: "config file is read-only" });
+    await tick();
+    ctx.ws.respond(undefined, { success: false, error: "list blew up" });
+    await tick();
+    await tick();
+
+    const errors = Array.from(rootEl().querySelectorAll(".mcp-error"));
+    expect(errors).toHaveLength(2);
+    // Mutation error renders above the list error and keeps its own text.
+    expect(errors[0].classList.contains("hidden")).toBe(false);
+    expect(errors[0].textContent).toBe("config file is read-only");
+    expect(errors[1].classList.contains("hidden")).toBe(false);
+    expect(errors[1].textContent).toBe("Failed to load MCP servers");
+  });
+
+  test("F23: a later successful list does not clear the mutation error", async () => {
+    const ctx = createManager();
+    await loadList(ctx, LIST_OK);
+
+    cardOf("search").querySelector(".settings-toggle").click();
+    await tick();
+    await completeMutation(ctx, LIST_OK, { success: false, error: "nope" });
+
+    const mutationError = rootEl().querySelector(".mcp-mutation-error");
+    expect(mutationError.classList.contains("hidden")).toBe(false);
+    expect(mutationError.textContent).toBe("nope");
+    expect(rootEl().querySelector(".mcp-list-error").classList.contains("hidden")).toBe(true);
+
+    // A plain list refresh succeeds — the mutation error must survive it.
+    await loadList(ctx, LIST_OK);
+    expect(rootEl().querySelector(".mcp-mutation-error").classList.contains("hidden")).toBe(false);
+    expect(rootEl().querySelector(".mcp-mutation-error").textContent).toBe("nope");
+  });
+
+  test("F23: only a successful mutation clears the mutation error", async () => {
+    const ctx = createManager();
+    await loadList(ctx, LIST_OK);
+
+    cardOf("search").querySelector(".settings-toggle").click();
+    await tick();
+    await completeMutation(ctx, LIST_OK, { success: false, error: "nope" });
+    expect(rootEl().querySelector(".mcp-mutation-error").classList.contains("hidden")).toBe(false);
+
+    cardOf("search").querySelector(".settings-toggle").click();
+    await tick();
+    await completeMutation(ctx, LIST_OK);
+    expect(rootEl().querySelector(".mcp-mutation-error").classList.contains("hidden")).toBe(true);
+    expect(rootEl().querySelector(".mcp-mutation-error").textContent).toBe("");
+  });
+
   test("connect actions follow capabilities.connect and the server status", async () => {
     const ctx = createManager();
     await loadList(ctx, LIST_OK);

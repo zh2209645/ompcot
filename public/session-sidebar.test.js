@@ -82,3 +82,42 @@ describe("SessionSidebar guarded localStorage construction", () => {
     expect(sidebar.unread.has("/c.jsonl")).toBe(true);
   });
 });
+
+describe("import sessions menu (F1)", () => {
+  test("the opening click does not close the menu it just opened", () => {
+    const sidebar = makeSidebar();
+    const anchor = document.createElement("button");
+    anchor.id = "import-sessions-btn";
+    document.body.appendChild(anchor);
+    // Mirror the app.js wiring: the menu opens from the button's click
+    // listener, and that same click then bubbles to the sidebar's
+    // document-level outside-click handler.
+    anchor.addEventListener("click", () => {
+      sidebar.importSessions(anchor, { wsClient: {} });
+    });
+
+    anchor.click();
+
+    const menu = document.querySelector(".session-context-menu.import-menu");
+    expect(menu).not.toBeNull();
+
+    // A click elsewhere on the document still closes it.
+    document.body.click();
+    expect(document.querySelector(".session-context-menu.import-menu")).toBeNull();
+  });
+
+  test("clicking the anchor while the menu is open toggles it closed", () => {
+    const sidebar = makeSidebar();
+    const anchor = document.createElement("button");
+    document.body.appendChild(anchor);
+    anchor.addEventListener("click", () => {
+      sidebar.importSessions(anchor, { wsClient: {} });
+    });
+
+    anchor.click();
+    expect(document.querySelector(".session-context-menu.import-menu")).not.toBeNull();
+
+    anchor.click();
+    expect(document.querySelector(".session-context-menu.import-menu")).toBeNull();
+  });
+});

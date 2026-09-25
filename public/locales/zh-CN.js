@@ -277,6 +277,48 @@ export const zhCN = {
   "mcp.argsPlaceholder": "每行一个参数",
   "mcp.envPlaceholder": "KEY=值（每行一条）",
 
+  // ── fork availability (feature-detected from the server reply) ──
+  "fork.unavailable": "当前版本不支持分叉",
+
+  // ── 账户用量（设置 → 用量，成本仪表盘上方）──
+  "usage.accountUsage": "账户用量",
+  "usage.refresh": "刷新",
+  "usage.empty": "暂无用量数据",
+  "usage.loadFailed": "账户用量加载失败",
+  "usage.authHint": "若为认证错误，请先在提供商页面登录。",
+  "usage.general": "通用",
+
+  // ── OAuth 登录（配置 → 提供商）──
+  "oauth.title": "OAuth 登录",
+  "oauth.providerPlaceholder": "anthropic / openai-codex",
+  "oauth.login": "登录",
+  "oauth.browserHint": "已在浏览器中打开，如未打开请手动完成…",
+  "oauth.pending": "等待登录完成…",
+  "oauth.invalidProvider": "提供商只能包含字母、数字、连字符和下划线",
+  "oauth.loginSuccess": "登录完成",
+  "oauth.loginFailed": "登录失败",
+  "oauth.terminalHint": "若流程需要终端交互，请在终端运行：omp login {provider}",
+
+  // ── 从消息分叉（悬浮操作 + 命令面板）──
+  "fork.fromHere": "从此处分叉",
+  "fork.failed": "分叉失败",
+  "palette.fork": "从最新消息分叉",
+  "palette.forkDesc": "从最新一条消息创建分叉",
+  "status.forking": "正在分叉...",
+  "status.forked": "已创建分叉",
+
+  // ── 扩展 UI 请求对话框 ──
+  "uiRequest.autoCancelIn": "{seconds} 秒后自动取消",
+
+  // ── 导入会话（侧边栏）──
+  "sidebar.importSessions": "导入会话",
+  "session.importFromClaude": "从 Claude Code",
+  "session.importFromCodex": "从 Codex",
+  "status.importing": "正在导入...",
+  "status.imported": "导入完成",
+  "session.importFailed": "导入失败",
+  "session.importTerminalOnly": "此来源需要在终端中导入：omp --from-{source}",
+
   // ── modals ──
   "dialog.agentConfig": "智能体配置",
 

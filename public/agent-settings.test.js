@@ -345,7 +345,7 @@ describe("createAgentSettings saving", () => {
 });
 
 describe("createAgentSettings reset to default", () => {
-  test("POSTs the key to /api/agent-settings/reset, shows ok status and reloads the catalog", async () => {
+  test("POSTs the key to /api/agent-settings/reset, patches the single row, and leaves other rows untouched", async () => {
     const before = makeCatalog();
     const after = makeCatalog();
     after.settings = before.settings.map((entry) =>
@@ -365,13 +365,18 @@ describe("createAgentSettings reset to default", () => {
     });
     const { settings, container, fetchJson: fn } = setup({ fetchJson });
     await settings.load();
-    expect(controlOf(container, "model.temperature").value).toBe("0.7");
+    const tempInput = controlOf(container, "model.temperature");
+    expect(tempInput.value).toBe("0.7");
+
+    // Another row carries an unsaved edit that must survive the reset (F18b).
+    const nameInput = controlOf(container, "model.name");
+    nameInput.value = "opus";
 
     const resetBtn = resetButtonOf(container, "model.temperature");
     expect(resetBtn.title).toBe("Reset to default");
     resetBtn.click();
     await vi.waitFor(() => {
-      expect(controlOf(container, "model.temperature").value).toBe("0.5");
+      expect(tempInput.value).toBe("0.5");
     });
 
     const postCalls = fn.mock.calls.filter(([, options]) => options?.method === "POST");
@@ -383,7 +388,14 @@ describe("createAgentSettings reset to default", () => {
     expect(status.dataset.tone).toBe("ok");
     expect(status.textContent).toBe("Saved");
 
-    // Catalog reload: the initial load plus one refresh after the reset.
+    // The reset row was patched IN PLACE — same element, no rebuild...
+    expect(controlOf(container, "model.temperature")).toBe(tempInput);
+    // ...and the other row's unsaved edit is intact (F18b: no load() rebuild
+    // cancelling unrelated pending edits).
+    expect(controlOf(container, "model.name")).toBe(nameInput);
+    expect(nameInput.value).toBe("opus");
+
+    // The initial load plus the single-row refresh — still exactly two GETs.
     expect(getCalls(fn)).toHaveLength(2);
   });
 
@@ -424,6 +436,95 @@ describe("createAgentSettings reset to default", () => {
     expect(putCalls(fn)).toHaveLength(0); // the debounced PUT never fires
     const postCalls = fn.mock.calls.filter(([, options]) => options?.method === "POST");
     expect(postCalls).toHaveLength(1);
+  });
+
+  // ── F18: reset races ────────────────────────────────────────────────────
+
+  test("F18a: reset waits for the row's in-flight save before POSTing", async () => {
+    vi.useFakeTimers();
+    const catalog = makeCatalog();
+    let resolvePut;
+    const order = [];
+    const fetchJson = vi.fn(async (_url, options = {}) => {
+      order.push(options.method || "GET");
+      if (options.method === "PUT" && options.body?.key === "model.name") {
+        return new Promise((resolve) => {
+          resolvePut = resolve;
+        });
+      }
+      if (options.method === "PUT") return { ok: true };
+      if (options.method === "POST") {
+        expect(_url).toBe("/api/agent-settings/reset");
+        return { ok: true, key: options.body?.key };
+      }
+      return catalog;
+    });
+    const { settings, container } = setup({ fetchJson });
+    await settings.load();
+
+    const input = controlOf(container, "model.name");
+    input.value = "opus";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(600); // PUT for model.name now in flight
+
+    resetButtonOf(container, "model.name").click();
+    const flush = async () => {
+      for (let i = 0; i < 10; i++) {
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+    };
+    await flush();
+    // The reset is parked behind the in-flight PUT — no POST yet.
+    expect(order).toEqual(["GET", "PUT"]);
+
+    resolvePut({ ok: true, key: "model.name", value: "opus" });
+    await flush();
+    // The PUT settled strictly before the reset POST, then the single-row
+    // refresh GET followed.
+    expect(order).toEqual(["GET", "PUT", "POST", "GET"]);
+    expect(statusOf(container, "model.name").dataset.tone).toBe("ok");
+  });
+
+  test("F18b: reset patches only its row — other rows' pending saves still fire", async () => {
+    vi.useFakeTimers();
+    const catalog = makeCatalog();
+    const fetchJson = vi.fn(async (_url, options = {}) => {
+      if (options.method === "PUT") {
+        return { ok: true, key: options.body?.key, value: options.body?.value };
+      }
+      if (options.method === "POST") return { ok: true, key: options.body?.key };
+      return catalog;
+    });
+    const { settings, container, fetchJson: fn } = setup({ fetchJson });
+    await settings.load();
+
+    const nameInput = controlOf(container, "model.name");
+    nameInput.value = "opus";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true })); // debounce pending
+
+    const tempInput = controlOf(container, "model.temperature");
+    resetButtonOf(container, "model.temperature").click();
+    const flush = async () => {
+      for (let i = 0; i < 10; i++) {
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+    };
+    await flush();
+
+    // Reset refreshed its own row in place...
+    expect(controlOf(container, "model.temperature")).toBe(tempInput);
+    expect(statusOf(container, "model.temperature").dataset.tone).toBe("ok");
+    // ...while the other row's debounced edit is intact and still pending.
+    expect(controlOf(container, "model.name")).toBe(nameInput);
+    expect(nameInput.value).toBe("opus");
+    expect(putCalls(fn)).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(600);
+    const puts = putCalls(fn);
+    expect(puts).toHaveLength(1); // not cancelled by the reset
+    expect(puts[0][1].body).toEqual({ key: "model.name", value: "opus" });
   });
 });
 

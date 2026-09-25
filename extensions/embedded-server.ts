@@ -15,6 +15,13 @@
  *   `/api/open`, `/api/agent-settings`, `/api/agent-config`,
  *   `/api/models-config`, `/api/instances`
  * - Forward all omp lifecycle events to connected browsers
+ * - Bridge omp's interactive-UI dialogs (`ctx.ui.select/confirm/input/editor`)
+ *   to the WebView as `extension_ui_request` events resolved by the
+ *   `ui_response` / `ui_cancel` commands
+ * - Shell out to the embedded omp CLI for GUI features with no extension API:
+ *   `get_usage` (usage --json), `run_omp_login` (login, headless),
+ *   `import_session` (interactive-only probe), `fork_session` (ctx.branch),
+ *   `list_memory_files` (read-only storage probe)
  * - Generate session titles from user messages
  *
  * What's intentionally NOT here anymore (vs the old mirror-server.ts):
@@ -513,7 +520,10 @@ interface RpcCommand {
   type: string;
   id?: string;
   apiKey?: string;
+  confirmed?: boolean;
+  cancelled?: boolean;
   customInstructions?: string;
+  entryId?: string;
   images?: Array<{ data?: string; mimeType?: string }>;
   level?: string;
   message: string;
@@ -522,7 +532,11 @@ interface RpcCommand {
   outputPath?: string;
   provider?: string;
   sessionPath?: string;
+  source?: string;
   streamingBehavior?: string;
+  timedOut?: boolean;
+  transportRequestId?: string;
+  value?: string | boolean;
   [key: string]: unknown;
 }
 
@@ -599,6 +613,45 @@ type EmbeddedServerGlobal = {
   mcpStatusByServer: Map<string, string>;
   // Idempotence flag for the process-scoped MCP status listener attach.
   mcpStatusListenerAttached: boolean;
+  // ─── Interactive-UI bridge (tier-1 `ui_response`) ─────────────────────────
+  //
+  // omp's RPC mode routes `ctx.ui.select/confirm/input/editor` to
+  // `extension_ui_request` frames on the RPC stdio channel and waits for
+  // `extension_ui_response` frames from the RPC client. In Ompcot the WebView
+  // is NOT that client — the embedded server is the only UI host — so those
+  // requests would hang until timeout. We instead patch the *shared*
+  // RpcExtensionUIContext instance (the same object every extension ctx and
+  // the ask tool receive; verified in omp 18.3 runner.ts `ui: this.#uiContext`)
+  // to broadcast requests over our WS and resolve them via the
+  // `ui_response` / `ui_cancel` commands. The patch is per-instance
+  // idempotent: `patchedUiContext` records which instance we already wrapped
+  // so extension reloads (new_session / switch_session / fork) don't
+  // double-wrap, and `uiPendingRequests` survives those reloads so a reply
+  // racing a session switch still resolves.
+  uiPendingRequests: Map<string, PendingUiRequest>;
+  patchedUiContext: unknown | null;
+  uiRequestCounter: number;
+};
+
+// One in-flight interactive-UI dialog originated from a patched
+// RpcExtensionUIContext method. `resolve` settles the caller's promise with
+// the runtime's own default semantics (select/input/editor → undefined,
+// confirm → false) whenever the dialog is cancelled or times out.
+type PendingUiRequest = {
+  kind: "select" | "confirm" | "input" | "editor";
+  resolve: (value: unknown) => void;
+  timer: NodeJS.Timeout | null;
+  cleanup: () => void;
+  // F3 (P1): verbatim replayable copy of the broadcast request frame. A
+  // dialog is broadcast exactly once at creation; if the WebView reloads or
+  // the WS drops before answering, the pending promise would be stranded.
+  // We keep the frame so (re)connecting clients can be re-served the dialog
+  // (same id → frontend dedupes, so re-broadcasts never stack dialogs).
+  frame: Record<string, unknown>;
+  // F3: session this dialog belongs to (session file id, see
+  // currentSessionIdFromCtx). Replay only hands a dialog back to clients
+  // that are looking at the session it came from.
+  sessionKey: string | null;
 };
 
 const EMBEDDED_GLOBAL_KEY = "__ompcotEmbeddedServer__";
@@ -808,6 +861,17 @@ function isCredentialLikeKey(key: string): boolean {
 // re-compose the command line so both layouts work.
 const OMP_CLI_TIMEOUT_MS = 15000;
 
+// `omp usage --json` fans out to provider usage APIs over the network — give
+// it more headroom than a local config read.
+const OMP_USAGE_TIMEOUT_MS = 45000;
+
+// `omp login <provider>` is a terminal OAuth flow: it can wait on a browser
+// round-trip plus pasted codes. Long leash; the GUI shows a spinner.
+const OMP_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+
+// Login output is echoed to the GUI; cap the tail we hand back.
+const LOGIN_OUTPUT_TAIL_MAX_CHARS = 4096;
+
 function resolveOmpCliInvocation(): { cmd: string; prefix: string[] } {
   // Preferred: the Rust manager passes the exact omp binary it spawned via
   // env (works for both compiled binaries and shim installs).
@@ -835,6 +899,208 @@ function execFileText(command: string, args: string[], timeoutMs: number): Promi
       if (err) reject(err);
       else resolve(typeof stdout === "string" ? stdout : String(stdout ?? ""));
     });
+  });
+}
+
+// ─── omp CLI helpers for the GUI feature RPCs ─────────────────────────────────
+//
+// `execOmpCli` resolves only on success (exit 0) and returns stdout alone.
+// Two things the new RPCs need that it can't express:
+//   - the stderr tail for error envelopes (`get_usage`),
+//   - combined stdout+stderr plus the real exit code (`run_omp_login`), where
+//     a non-zero exit is a *result*, not a failure of the helper itself.
+//
+// execFile errors carry `code` (exit status), `stderr`, and `stdout` fields.
+
+const CLI_ERROR_TAIL_MAX_CHARS = 2000;
+
+function cliErrorTail(e: unknown, maxChars = CLI_ERROR_TAIL_MAX_CHARS): string {
+  if (e && typeof e === "object" && "stderr" in e) {
+    const stderr = (e as { stderr?: unknown }).stderr;
+    if (typeof stderr === "string" && stderr.trim()) {
+      return `stderr: ${tailText(stderr, maxChars)}`;
+    }
+  }
+  if (e && typeof e === "object" && "message" in e) {
+    const msg = (e as { message?: unknown }).message;
+    if (typeof msg === "string" && msg.trim()) return tailText(msg, maxChars);
+  }
+  return tailText(String(e ?? ""), maxChars);
+}
+
+function tailText(text: string, maxChars: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `…${trimmed.slice(trimmed.length - maxChars)}`;
+}
+
+// F8/F10 knobs for `runOmpCliCaptured`:
+//   - KILL: terminate the whole process tree on timeout, escalate to a
+//     forced kill after the grace window, and bound finalization so the
+//     promise always resolves shortly after the timeout no matter what the
+//     OS does with the child.
+//   - TAIL: once the output cap is hit, retain the LAST bytes instead of
+//     the first, so late failure text (where login errors explain
+//     themselves) survives in the returned tail.
+const CLI_KILL_GRACE_MS = 5000;
+const CLI_FINALIZE_BOUND_MS = 10000;
+const CLI_ROLLING_TAIL_BYTES = 16 * 1024;
+
+// Kill a child AND its process tree. Windows has no signal-based tree kill;
+// `taskkill /T /F` is the only reliable reach into grandchildren. POSIX: we
+// spawn without a new process group (detached:false), so killing `-pgid`
+// would take *us* down too — instead signal the child directly and, best
+// effort, its direct children via `pkill -P` (grandchildren are reaped by
+// the forced escalation because orphans get re-parented as they exit).
+function killChildTree(
+  child: { pid?: number; kill: (signal?: string) => boolean },
+  force: boolean,
+) {
+  const pid = child.pid;
+  if (process.platform === "win32") {
+    if (typeof pid === "number" && pid > 0) {
+      try {
+        execFileSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        return;
+      } catch {}
+    }
+    try {
+      child.kill();
+    } catch {}
+    return;
+  }
+  try {
+    child.kill(force ? "SIGKILL" : "SIGTERM");
+  } catch {}
+  if (typeof pid === "number" && pid > 0) {
+    try {
+      const reaper = spawn("pkill", [force ? "-KILL" : "-TERM", "-P", String(pid)], {
+        stdio: "ignore",
+      });
+      reaper.unref();
+    } catch {}
+  }
+}
+
+// Spawn the embedded omp CLI with stdin detached and capture combined output.
+// Used by `run_omp_login`: the OAuth flow is a terminal interaction we do NOT
+// emulate — if it needs a TTY it exits non-zero and that surfaces in `output`
+// for the GUI to explain. Resolves with the real exit code (never rejects for
+// a non-zero exit; only for spawn failures / timeout).
+type OmpCliRunResult = {
+  exitCode: number | null;
+  output: string;
+  timedOut: boolean;
+};
+
+function runOmpCliCaptured(
+  args: string[],
+  timeoutMs: number,
+  maxOutputBytes = 256 * 1024,
+): Promise<OmpCliRunResult> {
+  const { cmd, prefix } = resolveOmpCliInvocation();
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cmd, [...prefix, ...args], {
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: false,
+        windowsHide: true,
+      });
+    } catch (e: unknown) {
+      resolve({
+        exitCode: null,
+        output: `Failed to launch omp: ${errMessage(e)}`,
+        timedOut: false,
+      });
+      return;
+    }
+
+    // F10: bounded rolling tail. Below the cap we keep everything; the
+    // first chunk that would overflow switches us to retaining only the
+    // LAST CLI_ROLLING_TAIL_BYTES, so the end of the output — where login
+    // failures print their actionable text — always survives in `output`.
+    const chunks: Buffer[] = [];
+    let buffered = 0;
+    let rolling = false;
+    const append = (chunk: Buffer) => {
+      if (!rolling && buffered + chunk.length > maxOutputBytes) rolling = true;
+      chunks.push(chunk);
+      buffered += chunk.length;
+      if (rolling) {
+        while (buffered > CLI_ROLLING_TAIL_BYTES && chunks.length > 1) {
+          buffered -= chunks[0].length;
+          chunks.shift();
+        }
+      }
+    };
+
+    let timedOut = false;
+    let settled = false;
+    let escalateTimer: NodeJS.Timeout | null = null;
+    let boundTimer: NodeJS.Timeout | null = null;
+
+    // Release the pipe handles so a child that refuses to die cannot hold
+    // the event loop open after we've stopped caring (part of F8 reaping).
+    const detachStreams = () => {
+      try {
+        child.stdout?.destroy();
+      } catch {}
+      try {
+        child.stderr?.destroy();
+      } catch {}
+    };
+
+    const finish = (exitCode: number | null) => {
+      if (settled) return;
+      settled = true;
+      if (escalateTimer) clearTimeout(escalateTimer);
+      if (boundTimer) clearTimeout(boundTimer);
+      const combined = chunks.length ? Buffer.concat(chunks).toString("utf8") : "(no output)";
+      resolve({
+        exitCode,
+        output: tailText(combined, LOGIN_OUTPUT_TAIL_MAX_CHARS),
+        // `timedOut` reflects OUR patience, not the child's fate: it stays
+        // true even if the child exits 0 while being torn down, and the
+        // eventual (possibly late) exit code never un-flags it.
+        timedOut,
+      });
+    };
+
+    if (typeof timeoutMs === "number" && timeoutMs > 0) {
+      setTimeout(() => {
+        timedOut = true;
+        // F8: take down the child AND its process tree. A bare SIGTERM +
+        // resolve-on-close could hang forever when the child (or one of its
+        // descendants, e.g. a browser helper spawned by an OAuth flow)
+        // ignores the signal or inherits a leaked pipe.
+        killChildTree(child, false);
+        // Escalate to a forced kill after the grace window.
+        escalateTimer = setTimeout(() => killChildTree(child, true), CLI_KILL_GRACE_MS);
+        // Hard bound: resolve within ~CLI_FINALIZE_BOUND_MS of the timeout
+        // no matter what the OS reports. After that we no longer care
+        // about the child: detach pipes and unref it so a straggler can't
+        // pin the event loop (the `close` listener still fires whenever it
+        // finally exits, and the settled guard makes that a no-op).
+        boundTimer = setTimeout(() => {
+          detachStreams();
+          try {
+            child.unref();
+          } catch {}
+          finish(null);
+        }, CLI_FINALIZE_BOUND_MS);
+        escalateTimer.unref?.();
+        boundTimer.unref?.();
+      }, timeoutMs);
+    }
+
+    child.stdout?.on("data", (chunk: Buffer) => append(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => append(chunk));
+    child.on("error", (e: Error) => {
+      append(Buffer.from(`\n[spawn error] ${e.message}\n`));
+      finish(null);
+    });
+    child.on("close", (code: number | null) => finish(code));
   });
 }
 
@@ -944,6 +1210,9 @@ function getOrCreateGlobalState(): EmbeddedServerGlobal {
       mcpModuleCache: { promise: null },
       mcpStatusByServer: new Map<string, string>(),
       mcpStatusListenerAttached: false,
+      uiPendingRequests: new Map<string, PendingUiRequest>(),
+      patchedUiContext: null,
+      uiRequestCounter: 0,
     } as EmbeddedServerGlobal;
   }
   return g[EMBEDDED_GLOBAL_KEY] as EmbeddedServerGlobal;
@@ -1053,6 +1322,395 @@ export default function (omp: ExtensionAPI) {
   // instance entry) happens in the `session_shutdown` handler instead.
 
   // ═══════════════════════════════════════
+  // Interactive-UI bridge (tier-1 `ui_response`)
+  // ═══════════════════════════════════════
+  //
+  // How omp natively moves these dialogs (verified against omp 18.3.0 source,
+  // src/modes/rpc/rpc-mode.ts): `ctx.ui.select/confirm/input/editor` create an
+  // id, park a resolver in the mode's `pendingExtensionRequests` map, and
+  // `output()` an `extension_ui_request` frame on the RPC stdio channel; the
+  // RPC client answers with an `extension_ui_response` frame
+  // ({id, value} | {id, confirmed} | {id, cancelled, timedOut?}) that
+  // `dispatchRpcControlFrame` routes back to the resolver.
+  //
+  // Ompcot's WebView is not that RPC client, so in our topology those frames
+  // go to the Rust manager's pipe and die there — every ask/select would hang
+  // until the dialog's timeout. The fix: patch the shared UI-context instance
+  // (runner.ts hands the SAME object to every extension ctx and the ask tool)
+  // so the four dialog methods broadcast verbatim `extension_ui_request`
+  // frames to the WebView and resolve through our `ui_response` /
+  // `ui_cancel` commands instead. Fire-and-forget `notify` is teed (original
+  // stdio frame + WS broadcast) since it needs no answer.
+  //
+  // Semantics mirrored from rpc-mode.ts so extension/ask-tool callers can't
+  // tell the difference: timeout resolves the default (undefined / false) and
+  // fires `dialogOptions.onTimeout`; `signal` abort cancels with the default
+  // and emits a `{method:"cancel", targetId}` frame; cancelled responses
+  // resolve the default for the kind.
+
+  function nextUiRequestId(): string {
+    globalState.uiRequestCounter += 1;
+    return `ompcot-ui-${Date.now().toString(36)}-${globalState.uiRequestCounter}`;
+  }
+
+  function broadcastUiFrame(frame: Record<string, unknown>) {
+    broadcast({ type: "event", event: { type: "extension_ui_request", ...frame } });
+  }
+
+  // F4 (P1): cancel frame shape — the single wire contract for "this dialog
+  // went away without a client answer" (server timeout, AbortSignal, session
+  // teardown). Broadcast as:
+  //   { type: "event",
+  //     event: { type: "extension_ui_request", id, method: "cancel", targetId } }
+  // where `id` and `targetId` are BOTH the dialog's id. The frontend
+  // (ui-requests.js lane) dismisses the queued/active dialog matching
+  // `targetId` (falling back to `id`) and must NOT send a ui_response for it.
+  function broadcastUiCancelFrame(id: string) {
+    broadcastUiFrame({ id, method: "cancel", targetId: id });
+  }
+
+  function defaultUiValue(kind: PendingUiRequest["kind"]): unknown {
+    return kind === "confirm" ? false : undefined;
+  }
+
+  function settleUiRequest(id: string, value: unknown, announceCancel = false): boolean {
+    const pending = globalState.uiPendingRequests.get(id);
+    if (!pending) return false;
+    globalState.uiPendingRequests.delete(id);
+    if (pending.timer) clearTimeout(pending.timer);
+    try {
+      pending.cleanup();
+    } catch {}
+    if (announceCancel) broadcastUiCancelFrame(id);
+    pending.resolve(value);
+    return true;
+  }
+
+  function cancelAllUiRequests() {
+    for (const id of Array.from(globalState.uiPendingRequests.keys())) {
+      const pending = globalState.uiPendingRequests.get(id);
+      // F4: announce each cancellation on the wire before settling so
+      // connected clients dismiss rendered dialogs (session_shutdown /
+      // teardown previously settled promises silently, leaving ghost
+      // dialogs on screen that could never be answered).
+      settleUiRequest(id, defaultUiValue(pending?.kind ?? "select"), true);
+    }
+  }
+
+  // F3 (P1): re-serve pending dialogs. Called whenever a WebSocket client
+  // (re)connects/attaches, and after a session swap's snapshot push. Only
+  // dialogs belonging to the session the client is looking at are replayed;
+  // the frontend dedupes by request id, so clients that already saw a frame
+  // simply ignore the re-broadcast. Frames carry their original `expiresAt`
+  // (F5), so a replayed dialog keeps its true deadline instead of restarting
+  // the countdown.
+  function replayPendingUiRequests(target?: UnifiedWS) {
+    if (globalState.uiPendingRequests.size === 0) return;
+    const currentKey = currentSessionIdFromCtx(globalState.getLatestCtx?.() ?? latestCtx);
+    for (const pending of globalState.uiPendingRequests.values()) {
+      // Skip dialogs from a different session than the active one (only
+      // possible for entries parked in the shutdown→start gap). Entries
+      // without a recorded session key are replayed defensively.
+      if (pending.sessionKey && currentKey && pending.sessionKey !== currentKey) continue;
+      const frame = { type: "event", event: { type: "extension_ui_request", ...pending.frame } };
+      if (target) {
+        sendTo(target, frame);
+      } else {
+        broadcast(frame);
+      }
+    }
+  }
+
+  // Structural view of the shared ExtensionUIContext we patch. Everything is
+  // optional — a mismatched embedded omp version simply leaves that method
+  // on its native stdio round-trip (degrades, never crashes).
+  type UiDialogOptionsLike = {
+    timeout?: unknown;
+    onTimeout?: () => void;
+    signal?: AbortSignal;
+  };
+
+  function uiSelectOptionLabel(option: unknown): string {
+    if (typeof option === "string") return option;
+    if (option && typeof option === "object") {
+      const o = option as { label?: unknown; value?: unknown };
+      if (typeof o.label === "string") return o.label;
+      if (typeof o.value === "string") return o.value;
+    }
+    return String(option ?? "");
+  }
+
+  function recordUiDialog(
+    kind: PendingUiRequest["kind"],
+    frame: Record<string, unknown>,
+    dialogOptions: UiDialogOptionsLike | undefined,
+  ): Promise<unknown> {
+    const id = nextUiRequestId();
+    return new Promise((resolve) => {
+      let timer: NodeJS.Timeout | null = null;
+
+      const onAbort = () => {
+        // Mirror the runtime: emit a cancel frame so hosts dismiss the
+        // dialog, then settle with the kind's default value.
+        settleUiRequest(id, defaultUiValue(kind), true);
+      };
+      // F4: if the caller's signal is ALREADY aborted, settle immediately
+      // with the default instead of parking an unanswerable request (and
+      // skip the cancel frame — nothing was ever broadcast).
+      if (dialogOptions?.signal?.aborted) {
+        resolve(defaultUiValue(kind));
+        return;
+      }
+      dialogOptions?.signal?.addEventListener("abort", onAbort, { once: true });
+
+      const cleanup = () => {
+        dialogOptions?.signal?.removeEventListener("abort", onAbort);
+      };
+
+      const timeout = dialogOptions?.timeout;
+      if (typeof timeout === "number" && timeout > 0) {
+        timer = setTimeout(() => {
+          try {
+            dialogOptions?.onTimeout?.();
+          } catch {}
+          // F5: the server-side timeout resolves the promise locally with
+          // the kind's default — NO client reply is needed or waited for.
+          // The entry is deleted here, so a late client reply for an
+          // expired request fails the lookup and gets the standard
+          // "Unknown or expired UI request" error envelope. F4: announce
+          // with a cancel frame so clients dismiss the rendered dialog.
+          settleUiRequest(id, defaultUiValue(kind), true);
+        }, timeout);
+      }
+
+      // F5 (P1): absolute expiry (epoch ms) in addition to the relative
+      // `timeout`, so clients that receive the dialog late — replayed after
+      // a reload (F3) or queued behind another dialog — can compute the
+      // true remaining time instead of restarting the countdown.
+      const expiresAt =
+        typeof timeout === "number" && timeout > 0 ? Date.now() + timeout : undefined;
+      const requestFrame: Record<string, unknown> = {
+        id,
+        method: kind,
+        timeout: typeof timeout === "number" ? timeout : undefined,
+        ...(expiresAt !== undefined ? { expiresAt } : {}),
+        ...frame,
+      };
+      globalState.uiPendingRequests.set(id, {
+        kind,
+        resolve,
+        timer,
+        cleanup,
+        frame: requestFrame,
+        sessionKey: currentSessionIdFromCtx(latestCtx),
+      });
+      broadcastUiFrame(requestFrame);
+    });
+  }
+
+  function installUiBridge(ctx: ExtensionContext) {
+    const ui = (ctx as { ui?: unknown }).ui;
+    if (!ui || typeof ui !== "object") return;
+    if (globalState.patchedUiContext === ui) return; // idempotent across reloads
+
+    const target = ui as Record<string, unknown>;
+
+    const patchDialog = (
+      name: "select" | "confirm" | "input" | "editor",
+      buildFrame: (...args: unknown[]) => {
+        frame: Record<string, unknown>;
+        options?: UiDialogOptionsLike;
+      },
+    ) => {
+      if (typeof target[name] !== "function") return;
+      target[name] = (...args: unknown[]) => {
+        const { frame, options } = buildFrame(...args);
+        return recordUiDialog(name, frame, options);
+      };
+    };
+
+    patchDialog(
+      "select",
+      (title: unknown, options: unknown, dialogOptions?: UiDialogOptionsLike) => {
+        const items = Array.isArray(options) ? options : [];
+        const labels = items.map(uiSelectOptionLabel);
+        // Mirror requestRpcSelect: attach descriptions only when at least one
+        // option object carries a non-empty description.
+        let optionDetails: Array<{ description?: string }> | undefined;
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          const description =
+            item && typeof item === "object"
+              ? ((item as { description?: unknown }).description as string | undefined)?.trim()
+              : undefined;
+          if (!description) continue;
+          optionDetails ??= items.map(() => ({}));
+          optionDetails[i] = { description };
+        }
+        return {
+          frame: {
+            title: String(title ?? ""),
+            options: labels,
+            ...(optionDetails ? { optionDetails } : {}),
+          },
+          options: dialogOptions,
+        };
+      },
+    );
+
+    patchDialog(
+      "confirm",
+      (title: unknown, message: unknown, dialogOptions?: UiDialogOptionsLike) => ({
+        frame: { title: String(title ?? ""), message: String(message ?? "") },
+        options: dialogOptions,
+      }),
+    );
+
+    patchDialog(
+      "input",
+      (title: unknown, placeholder: unknown, dialogOptions?: UiDialogOptionsLike) => ({
+        frame: {
+          title: String(title ?? ""),
+          ...(typeof placeholder === "string" && placeholder ? { placeholder } : {}),
+        },
+        options: dialogOptions,
+      }),
+    );
+
+    patchDialog(
+      "editor",
+      (
+        title: unknown,
+        prefill: unknown,
+        dialogOptions?: UiDialogOptionsLike,
+        editorOptions?: { promptStyle?: boolean },
+      ) => ({
+        frame: {
+          title: String(title ?? ""),
+          ...(typeof prefill === "string" && prefill ? { prefill } : {}),
+          ...(editorOptions?.promptStyle !== undefined
+            ? { promptStyle: editorOptions.promptStyle }
+            : {}),
+        },
+        options: dialogOptions,
+      }),
+    );
+
+    // `notify` is fire-and-forget: keep the native stdio frame (harmless) and
+    // additionally surface it in the WebView (dialogs.js handles method
+    // "notify"). The other fire-and-forget methods (setStatus / setWidget /
+    // setEditorText / setTitle) stay untouched — the current GUI has no
+    // renderer for them and teeing would only spam console warnings.
+    if (typeof target.notify === "function") {
+      const originalNotify = target.notify as (
+        message: string,
+        type?: "info" | "warning" | "error",
+      ) => void;
+      target.notify = (message: string, type?: "info" | "warning" | "error") => {
+        try {
+          originalNotify.call(ui, message, type);
+        } catch {}
+        broadcastUiFrame({ id: nextUiRequestId(), method: "notify", message, notifyType: type });
+      };
+    }
+
+    globalState.patchedUiContext = ui;
+    console.log("[Embedded] Interactive-UI bridge installed on shared ui context");
+  }
+
+  // ─── Memory file listing (tier-3 probe) ────────────────────────────────────
+  //
+  // Read-only probe of omp's memory storage roots. omp 18.3 keeps per-project
+  // memory under `<agentDir>/memories/state/<encoded-cwd>/` (plus
+  // `<agentDir>/memories/mnemopi/` for the mnemopi backend); we probe the
+  // agent-level `memories/` + legacy `memory/` spellings and the
+  // workspace-local `.omp/memory/`. No parsing — just file facts.
+
+  const MEMORY_LIST_MAX_FILES = 500;
+
+  type MemoryFileRow = { path: string; size: number; mtime: number };
+
+  async function collectMemoryFilesFromRoot(
+    root: string,
+    files: Map<string, MemoryFileRow>,
+  ): Promise<boolean> {
+    let existed = false;
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (files.size >= MEMORY_LIST_MAX_FILES || depth > 4) return;
+      let entries: fs.Dirent[];
+      try {
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        existed = true;
+      } catch {
+        return; // root or subdir missing — normal for a fresh install
+      }
+      for (const entry of entries) {
+        if (files.size >= MEMORY_LIST_MAX_FILES) return;
+        const full = path.join(dir, entry.name);
+        try {
+          if (entry.isDirectory()) {
+            if (entry.name === ".git" || entry.name === "node_modules") continue;
+            await walk(full, depth + 1);
+          } else if (entry.isFile()) {
+            const stats = await fs.promises.stat(full);
+            const resolved = path.resolve(full);
+            if (!files.has(resolved)) {
+              files.set(resolved, { path: resolved, size: stats.size, mtime: stats.mtimeMs });
+            }
+          }
+        } catch {
+          /* raced or unreadable — skip */
+        }
+      }
+    };
+    await walk(root, 0);
+    return existed;
+  }
+
+  async function listMemoryFiles(ctx: ExtensionContext | null): Promise<{
+    files: MemoryFileRow[];
+    available: boolean;
+    backend?: string;
+    roots: string[];
+  }> {
+    // Cheap settings read for the configured backend id (best-effort).
+    let backend: string | undefined;
+    try {
+      const raw = getSettingsInstance()?.get?.("memory.backend");
+      if (typeof raw === "string" && raw) backend = raw;
+    } catch {}
+
+    const agentRoot = (() => {
+      try {
+        const fromSettings = getSettingsInstance()?.getAgentDir?.();
+        if (typeof fromSettings === "string" && fromSettings.trim()) return fromSettings;
+      } catch {}
+      return OMP_AGENT_ROOT;
+    })();
+
+    const workspace = ctx?.cwd || process.cwd();
+    const roots = [
+      path.join(agentRoot, "memories"),
+      path.join(agentRoot, "memory"),
+      path.join(workspace, ".omp", "memory"),
+    ];
+
+    const files = new Map<string, MemoryFileRow>();
+    const rootsFound: string[] = [];
+    for (const root of roots) {
+      const existed = await collectMemoryFilesFromRoot(root, files);
+      if (existed) rootsFound.push(root);
+    }
+
+    return {
+      files: Array.from(files.values()).sort((a, b) => b.mtime - a.mtime),
+      available: files.size > 0,
+      ...(backend ? { backend } : {}),
+      roots: rootsFound,
+    };
+  }
+
+  // ═══════════════════════════════════════
   // Event forwarding — subscribe to all OMP events
   // ═══════════════════════════════════════
   const eventTypes = [
@@ -1107,6 +1765,13 @@ export default function (omp: ExtensionAPI) {
 
   omp.on("session_start", async (_event, ctx) => {
     rememberCtx(ctx);
+    // Attach the interactive-UI bridge to the shared ui context (idempotent —
+    // the same instance survives new_session / switch_session / fork reloads).
+    try {
+      installUiBridge(ctx);
+    } catch (e: unknown) {
+      console.error("[Embedded] Failed to install UI bridge:", errMessage(e));
+    }
     turnCount = 0;
     titleSet = false;
     userMessages = [];
@@ -1413,6 +2078,139 @@ export default function (omp: ExtensionAPI) {
           break;
         }
 
+        // ─── Interactive-UI replies (tier-1) ───
+        //
+        // Completes the dialog loop opened by the patched ui context (see
+        // installUiBridge). The frontend's dialogs.js sends command type
+        // `extension_ui_response` with the runtime's frame payload
+        // ({id, value} | {id, confirmed} | {id, cancelled}); the frozen GUI
+        // contract also allows `ui_response`. Both names resolve the same
+        // pending request; `ui_cancel` (and its `extension_ui_cancel` alias)
+        // cancels one.
+        //
+        // F9 (P2) ack correlation: `command.id` here is the DIALOG id (the
+        // payload's id), but clients correlate replies by their transport
+        // requestId (ws-rpc matches response.id against the broker
+        // envelope's requestId). Acknowledgments therefore echo the
+        // TRANSPORT requestId when one exists — standard envelope behavior
+        // like every other command — and the dialog payload `id` rides
+        // inside `data`. Raw (non-broker) frames have no transport id and
+        // fall back to echoing the dialog id.
+        //
+        // Retry semantics (F3): an ERROR ack (missing/invalid answer, or
+        // "unknown request") does NOT settle the pending promise — the
+        // dialog stays answerable until a valid ui_response/ui_cancel or
+        // its own timeout/cancel arrives. Only success paths settle.
+        case "ui_response":
+        case "extension_ui_response": {
+          const requestId = command.id;
+          const ackId =
+            typeof command.transportRequestId === "string" && command.transportRequestId
+              ? command.transportRequestId
+              : requestId;
+          const ackSuccess = (data: Record<string, unknown>) => {
+            const resp: Record<string, unknown> = {
+              type: "response",
+              command: command.type,
+              success: true,
+              id: ackId,
+              data: { id: requestId, ...data },
+            };
+            sendTo(ws, resp);
+          };
+          const ackError = (message: string) => {
+            sendTo(ws, {
+              type: "response",
+              command: command.type,
+              success: false,
+              error: message,
+              id: ackId,
+            });
+          };
+          if (typeof requestId !== "string" || !requestId) {
+            ackError("id is required");
+            break;
+          }
+          const pending = globalState.uiPendingRequests.get(requestId);
+          if (!pending) {
+            ackError(`Unknown or expired UI request: ${requestId}`);
+            break;
+          }
+
+          // Cancelled variant — resolves the kind's default (undefined for
+          // select/input/editor, false for confirm), matching how the native
+          // RPC layer treats {cancelled: true} responses.
+          if (command.cancelled === true) {
+            settleUiRequest(requestId, defaultUiValue(pending.kind));
+            ackSuccess({ cancelled: true });
+            break;
+          }
+
+          if (pending.kind === "confirm") {
+            let confirmed: boolean | undefined;
+            if (typeof command.confirmed === "boolean") confirmed = command.confirmed;
+            else if (typeof command.value === "boolean") confirmed = command.value;
+            else if (command.value === "true") confirmed = true;
+            else if (command.value === "false") confirmed = false;
+            if (confirmed === undefined) {
+              ackError("Confirm dialogs require a boolean answer (confirmed)");
+              break;
+            }
+            settleUiRequest(requestId, confirmed);
+            ackSuccess({ confirmed });
+            break;
+          }
+
+          if (typeof command.value !== "string") {
+            ackError(`${pending.kind} dialogs require a string answer (value)`);
+            break;
+          }
+          settleUiRequest(requestId, command.value);
+          ackSuccess({ value: command.value });
+          break;
+        }
+
+        case "ui_cancel":
+        case "extension_ui_cancel": {
+          const requestId = command.id;
+          const ackId =
+            typeof command.transportRequestId === "string" && command.transportRequestId
+              ? command.transportRequestId
+              : requestId;
+          if (typeof requestId !== "string" || !requestId) {
+            sendTo(ws, {
+              type: "response",
+              command: command.type,
+              success: false,
+              error: "id is required",
+              id: ackId,
+            });
+            break;
+          }
+          const pending = globalState.uiPendingRequests.get(requestId);
+          if (!pending) {
+            sendTo(ws, {
+              type: "response",
+              command: command.type,
+              success: false,
+              error: `Unknown or expired UI request: ${requestId}`,
+              id: ackId,
+            });
+            break;
+          }
+          // No cancel frame on the wire here: the client itself initiated
+          // the cancel, so it has already dismissed the dialog.
+          settleUiRequest(requestId, defaultUiValue(pending.kind));
+          sendTo(ws, {
+            type: "response",
+            command: command.type,
+            success: true,
+            id: ackId,
+            data: { id: requestId, cancelled: true },
+          });
+          break;
+        }
+
         case "new_session": {
           if (!ctx) {
             sendTo(ws, error("new_session", "No context available"));
@@ -1454,6 +2252,40 @@ export default function (omp: ExtensionAPI) {
           }
           const result = await ctx.switchSession(command.sessionPath);
           sendTo(ws, success("switch_session", result || {}));
+          break;
+        }
+
+        // ─── Fork (tier-1) ───
+        // Branch the current session from a specific entry. `branch` lives on
+        // the command-context surface (ExtensionCommandContext in omp's
+        // types); the session_start ctx carries it in RPC mode. Feature-detect
+        // so an older embedded omp degrades to a clear error instead of a
+        // thrown TypeError.
+        case "fork_session": {
+          if (!ctx) {
+            sendTo(ws, error("fork_session", "No context available"));
+            break;
+          }
+          const entryId = command.entryId;
+          if (typeof entryId !== "string" || !entryId.trim()) {
+            sendTo(ws, error("fork_session", "entryId is required"));
+            break;
+          }
+          const branchFn = (
+            ctx as unknown as {
+              branch?: (entryId: string) => Promise<{ cancelled?: boolean } | undefined>;
+            }
+          ).branch;
+          if (typeof branchFn !== "function") {
+            sendTo(ws, error("fork_session", "Fork unavailable in this build"));
+            break;
+          }
+          try {
+            const result = await branchFn.call(ctx, entryId);
+            sendTo(ws, success("fork_session", { cancelled: result?.cancelled ?? false }));
+          } catch (e: unknown) {
+            sendTo(ws, error("fork_session", errMessage(e)));
+          }
           break;
         }
 
@@ -1919,6 +2751,103 @@ export default function (omp: ExtensionAPI) {
             sendTo(ws, success(command.type, result));
           } catch (e: unknown) {
             sendTo(ws, error(command.type, errMessage(e)));
+          }
+          break;
+        }
+
+        // ─── Usage dashboard (tier-1) ───
+        //
+        // `omp usage --json` reports provider quota windows; it may hit
+        // provider APIs over the network, hence the longer timeout. On CLI
+        // failure (no auth, network down) the error envelope carries the
+        // stderr tail so the GUI can explain what to fix.
+        case "get_usage": {
+          try {
+            const stdout = await execOmpCli(["usage", "--json"], OMP_USAGE_TIMEOUT_MS);
+            let usage: unknown;
+            try {
+              usage = JSON.parse(stdout);
+            } catch {
+              sendTo(ws, error("get_usage", "omp usage --json produced non-JSON output"));
+              break;
+            }
+            sendTo(ws, success("get_usage", { usage }));
+          } catch (e: unknown) {
+            sendTo(ws, error("get_usage", `omp usage --json failed — ${cliErrorTail(e)}`));
+          }
+          break;
+        }
+
+        // ─── Terminal OAuth login (tier-2) ───
+        //
+        // `omp login <provider>` is a terminal flow (browser round-trip +
+        // pasted code prompts). We run it headless with stdin detached and a
+        // 5-minute leash: providers that hard-require a TTY exit non-zero and
+        // that surfaces in `output` for the GUI to show alongside advice
+        // ("run omp login <provider> in a terminal"). No TTY emulation.
+        case "run_omp_login": {
+          const provider = typeof command.provider === "string" ? command.provider.trim() : "";
+          if (!provider) {
+            sendTo(ws, error("run_omp_login", "provider is required"));
+            break;
+          }
+          if (!/^[a-z0-9_-]+$/i.test(provider)) {
+            sendTo(ws, error("run_omp_login", "Invalid provider id"));
+            break;
+          }
+          try {
+            const result = await runOmpCliCaptured(["login", provider], OMP_LOGIN_TIMEOUT_MS);
+            sendTo(
+              ws,
+              success("run_omp_login", {
+                exitCode: result.exitCode,
+                output: result.output,
+                timedOut: result.timedOut,
+                provider,
+              }),
+            );
+          } catch (e: unknown) {
+            sendTo(ws, error("run_omp_login", errMessage(e)));
+          }
+          break;
+        }
+
+        // ─── Claude/Codex session import (tier-2, degraded) ───
+        //
+        // Verified against omp 18.3.0: `--from-claude` / `--from-codex` are
+        // *launch* flags that open the interactive TUI session picker to
+        // choose which foreign session to import; headless (stdin closed)
+        // they exit immediately without importing, and there is no
+        // `omp import` one-shot subcommand. Until omp grows a headless
+        // import, this RPC reports interactive-only so the GUI can direct
+        // users to a terminal instead of silently doing nothing.
+        case "import_session": {
+          const source = command.source;
+          if (source !== "claude" && source !== "codex") {
+            sendTo(ws, error("import_session", 'source must be "claude" or "codex"'));
+            break;
+          }
+          sendTo(
+            ws,
+            success("import_session", {
+              ok: false,
+              reason: "interactive-only",
+              output: `omp --from-${source} requires the interactive terminal launcher; run it in a terminal to pick the session to import.`,
+            }),
+          );
+          break;
+        }
+
+        // ─── Memory files probe (tier-3) ───
+        //
+        // Read-only listing of candidate memory storage roots. See
+        // listMemoryFiles for the probed paths; nothing is parsed or written.
+        case "list_memory_files": {
+          try {
+            const listing = await listMemoryFiles(ctx);
+            sendTo(ws, success("list_memory_files", listing));
+          } catch (e: unknown) {
+            sendTo(ws, error("list_memory_files", errMessage(e)));
           }
           break;
         }
@@ -2741,15 +3670,92 @@ export default function (omp: ExtensionAPI) {
     return input as McpServerConfigLike;
   }
 
+  // F19 (P1): non-destructive merge for `mcp.save`.
+  //
+  // Both writers we can reach — omp's `updateMCPServer` and the local
+  // fallback writer — REPLACE the whole server entry. A GUI edit that only
+  // changes `command` (and legitimately omits env/headers/timeout/enabled/
+  // cwd/auth because its form never shows them) would silently destroy
+  // those fields. So before writing we load the existing raw entry for
+  // name+scope and merge:
+  //   - every field present in the submitted config wins verbatim;
+  //   - omitted fields are preserved from the existing entry;
+  //   - EXPLICIT CLEARING for the container fields: submitting env:"" /
+  //     env:{} / headers:"" / headers:{} / args:[] clears that field (the
+  //     caller saying "no value" on purpose). Scalars can't express
+  //     "clear" — send the value you want (e.g. enabled:false).
+  //   - transport-switch hygiene: when the submitted config explicitly
+  //     changes `type`, fields that only make sense for the OTHER transport
+  //     family are dropped instead of carried over as dead weight
+  //     (stdio→http drops command/args/env/cwd; http→stdio drops
+  //     url/headers), unless the submitted config sets them itself.
+  const MCP_CLEARABLE_FIELDS = new Set(["env", "headers", "args"]);
+  const MCP_STDIO_ONLY_FIELDS = ["command", "args", "env", "cwd"];
+  const MCP_HTTP_ONLY_FIELDS = ["url", "headers"];
+
+  function isEmptyMcpValue(value: unknown): boolean {
+    if (value === "") return true;
+    if (Array.isArray(value)) return value.length === 0;
+    if (value !== null && typeof value === "object") return Object.keys(value).length === 0;
+    return false;
+  }
+
+  function mergeMcpServerConfig(
+    existing: McpServerConfigLike | undefined,
+    submitted: McpServerConfigLike,
+  ): McpServerConfigLike {
+    if (!existing || typeof existing !== "object") return submitted;
+    const merged: Record<string, unknown> = { ...existing };
+
+    const existingType = typeof existing.type === "string" ? existing.type : undefined;
+    const submittedType = typeof submitted.type === "string" ? submitted.type : undefined;
+    if (submittedType && existingType && submittedType !== existingType) {
+      const staleFields = submittedType === "stdio" ? MCP_HTTP_ONLY_FIELDS : MCP_STDIO_ONLY_FIELDS;
+      for (const key of staleFields) {
+        if (!(key in submitted)) delete merged[key];
+      }
+    }
+
+    for (const [key, value] of Object.entries(submitted as Record<string, unknown>)) {
+      if (value === undefined) continue; // JSON round-trips never carry undefined
+      if (MCP_CLEARABLE_FIELDS.has(key) && isEmptyMcpValue(value)) {
+        delete merged[key]; // explicit clear (see rules above)
+        continue;
+      }
+      merged[key] = value;
+    }
+    return merged as McpServerConfigLike;
+  }
+
   async function saveMcpServer(
     name: string,
     configInput: unknown,
     scope: "user" | "project",
   ): Promise<{ name: string; scope: string; path: string; created: boolean }> {
-    const config = requireMcpConfigInput(configInput);
     const cwd = currentWorkspaceCwd();
     const filePath = scope === "user" ? mcpUserConfigPath() : mcpProjectConfigPath(cwd);
     const mod = await resolveMcpModule();
+    const submitted = requireMcpConfigInput(configInput);
+
+    // F19: load the existing raw entry for name+scope BEFORE writing so the
+    // merge can preserve fields the caller omitted (both omp's
+    // updateMCPServer and the local writer REPLACE the whole entry — see
+    // mergeMcpServerConfig for the exact rules).
+    let existingEntry: McpServerConfigLike | undefined;
+    if (mod?.readMCPConfigFile) {
+      try {
+        existingEntry = (await mod.readMCPConfigFile(filePath)).mcpServers?.[name];
+      } catch {}
+    } else if (scope === "user") {
+      existingEntry = readLocalMcpConfigFile(filePath).mcpServers?.[name];
+    }
+    let existing = existingEntry !== undefined;
+    if (!existing && mod?.listMCPServers) {
+      try {
+        existing = (await mod.listMCPServers(filePath)).includes(name);
+      } catch {}
+    }
+    const config = mergeMcpServerConfig(existingEntry, submitted);
 
     if (mod?.validateServerName) {
       const nameError = mod.validateServerName(name);
@@ -2763,12 +3769,6 @@ export default function (omp: ExtensionAPI) {
     }
 
     if (mod?.addMCPServer && mod.updateMCPServer) {
-      let existing = false;
-      if (mod.listMCPServers) {
-        existing = (await mod.listMCPServers(filePath)).includes(name);
-      } else if (mod.readMCPConfigFile) {
-        existing = (await mod.readMCPConfigFile(filePath)).mcpServers?.[name] !== undefined;
-      }
       if (existing) {
         await mod.updateMCPServer(filePath, name, config);
       } else {
@@ -4440,6 +5440,13 @@ export default function (omp: ExtensionAPI) {
             console.error("[Embedded] Failed to build initial snapshot:", err);
           });
       }
+
+      // F3 (P1): re-serve any dialogs still pending for this session. A
+      // page reload drops the client's knowledge of every in-flight dialog;
+      // without this replay those requests could only ever time out. The
+      // frontend dedupes by request id, so this is a no-op for state the
+      // client already has.
+      replayPendingUiRequests(ws);
     }
 
     function onClientMessage(ws: UnifiedWS, raw: string | ArrayBuffer | Buffer) {
@@ -4453,7 +5460,18 @@ export default function (omp: ExtensionAPI) {
         const incoming = JSON.parse(text);
         const command =
           incoming?.type === "broker_command"
-            ? { ...(incoming.payload || {}), id: incoming.payload?.id ?? incoming.requestId }
+            ? {
+                ...(incoming.payload || {}),
+                id: incoming.payload?.id ?? incoming.requestId,
+                // F9: keep the transport-level requestId of the broker
+                // envelope. For commands whose payload carries its own `id`
+                // (ui_response / ui_cancel echo the DIALOG id there), the
+                // acknowledgment must correlate with what the client's
+                // transport layer (ws-rpc) tracks — the envelope
+                // requestId — not the dialog id.
+                transportRequestId:
+                  typeof incoming.requestId === "string" ? incoming.requestId : undefined,
+              }
             : incoming;
         const dispatch = globalState.handleCommand;
         if (dispatch) {
@@ -4892,6 +5910,11 @@ export default function (omp: ExtensionAPI) {
     } catch (err) {
       console.error("[Embedded] Failed to broadcast post-switch snapshot:", err);
     }
+    // F3: after a session swap (switch/new/fork), re-serve any dialogs that
+    // are still pending for the new session — e.g. ones created in the gap
+    // between the old instance's shutdown and this start — so clients that
+    // just re-anchored to the new session can answer them.
+    replayPendingUiRequests();
   });
 
   // ═══════════════════════════════════════
@@ -4901,6 +5924,11 @@ export default function (omp: ExtensionAPI) {
     // Drop our captured ctx so we don't accidentally use a torn-down session
     // before the next instance re-publishes its bindings.
     latestCtx = null;
+    // Settle any interactive-UI dialogs still waiting on a WebView reply:
+    // their callers belong to the outgoing session, so resolve them with the
+    // kind's default (mirrors the runtime rejecting pending requests when the
+    // RPC client goes away — we degrade to "cancelled" instead of hanging).
+    cancelAllUiRequests();
     // Tear down the global pointers IFF they still point at *this* instance,
     // so any WS messages that arrive in the gap before the next
     // session_start fail cleanly with "No active session" instead of hitting

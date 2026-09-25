@@ -259,6 +259,9 @@ export function createAgentSettings({
       statusEl,
       timer: null,
       saving: false,
+      // Promise of the currently in-flight PUT (if any). Reset serializes
+      // against it so a late save cannot resurrect the old value (F18).
+      savePromise: null,
       savedValue: entry.value,
       resetBtn,
       resetting: false,
@@ -365,34 +368,49 @@ export function createAgentSettings({
     }
     field.saving = true;
     showSavingStatus(field.statusEl);
-    try {
-      const res = await fetchJson("/api/agent-settings", {
-        method: "PUT",
-        body: { key: field.entry.key, value: parsed.value },
-      });
-      if (!res || res.ok === false) {
-        throw new Error(res?.error || "Failed to save setting");
+    // The promise is remembered on the field so resetField can serialize
+    // behind it (F18): a PUT landing after a reset would resurrect the old
+    // value, because the server applies the last write it receives.
+    const run = async () => {
+      try {
+        const res = await fetchJson("/api/agent-settings", {
+          method: "PUT",
+          body: { key: field.entry.key, value: parsed.value },
+        });
+        if (!res || res.ok === false) {
+          throw new Error(res?.error || "Failed to save setting");
+        }
+        field.savedValue = res.value !== undefined ? res.value : parsed.value;
+        showSettingsSaveSuccess(field.statusEl);
+      } catch (err) {
+        showSettingsSaveError(
+          field.statusEl,
+          String(err?.message || err || "Failed to save setting"),
+        );
+        // A boolean toggle is optimistic — restore the last saved state so the
+        // control reflects reality after a failed PUT.
+        if (isToggleType(field.entry.type)) {
+          field.control.classList.toggle("on", Boolean(field.savedValue));
+        }
+      } finally {
+        field.saving = false;
       }
-      field.savedValue = res.value !== undefined ? res.value : parsed.value;
-      showSettingsSaveSuccess(field.statusEl);
-    } catch (err) {
-      showSettingsSaveError(
-        field.statusEl,
-        String(err?.message || err || "Failed to save setting"),
-      );
-      // A boolean toggle is optimistic — restore the last saved state so the
-      // control reflects reality after a failed PUT.
-      if (isToggleType(field.entry.type)) {
-        field.control.classList.toggle("on", Boolean(field.savedValue));
-      }
-    } finally {
-      field.saving = false;
-    }
+    };
+    field.savePromise = run();
+    await field.savePromise;
   }
 
-  // Reset one setting to its default via POST /api/agent-settings/reset,
-  // then reload the catalog so the restored value shows in the control.
+  // Reset one setting to its default via POST /api/agent-settings/reset.
   // Mirrors saveField's per-row status handling (tone "ok" / "error").
+  //
+  // F18, two race fixes:
+  // (a) serialize with an in-flight save: the reset endpoint is not called
+  //     until the row's pending PUT settles, so a late save can no longer
+  //     resurrect the old value (the server applies the last write).
+  // (b) refresh ONLY this row: a full load()/renderCatalog() rebuild would
+  //     cancel every other row's pending debounced save and silently
+  //     discard their unsaved edits. Instead the fresh catalog is fetched
+  //     and the single row's control is patched in place.
   async function resetField(field) {
     if (field.resetting) return;
     // Cancel any pending debounced edit so it cannot overwrite the reset.
@@ -405,6 +423,16 @@ export function createAgentSettings({
     field.statusEl.textContent = "Resetting...";
     field.statusEl.classList.remove("hidden");
     try {
+      if (field.savePromise) {
+        await field.savePromise.catch(() => {});
+        field.savePromise = null;
+        // The wait may have re-armed the debounce (user typed during it) —
+        // cancel again so the reset is the final write for this row.
+        if (field.timer) {
+          clearTimeout(field.timer);
+          field.timer = null;
+        }
+      }
       const res = await fetchJson("/api/agent-settings/reset", {
         method: "POST",
         body: { key: field.entry.key },
@@ -412,11 +440,9 @@ export function createAgentSettings({
       if (!res || res.ok === false) {
         throw new Error(res?.error || "Failed to reset setting");
       }
-      // Reload first: renderCatalog() replaces every row, so the ok status
-      // must be shown on the freshly rendered row for this key.
-      await load();
-      const fresh = fields.get(field.entry.key);
-      showSettingsSaveSuccess(fresh?.statusEl || field.statusEl);
+      // The reset response carries no value ({ok, key}) — fetch the fresh
+      // catalog and patch this row only.
+      await refreshFieldAfterReset(field);
     } catch (err) {
       showSettingsSaveError(
         field.statusEl,
@@ -425,6 +451,38 @@ export function createAgentSettings({
     } finally {
       field.resetting = false;
     }
+  }
+
+  /**
+   * F18(b): refresh a single row after a successful reset. Re-fetches the
+   * catalog but never re-renders it — only this field's entry, savedValue
+   * and control value are patched, so every other row (including rows with
+   * pending debounced edits) keeps its DOM node, timers and unsaved text.
+   */
+  async function refreshFieldAfterReset(field) {
+    const key = field.entry.key;
+    let fresh = null;
+    try {
+      fresh = await fetchJson("/api/agent-settings");
+    } catch {
+      // The reset itself succeeded; keep the row as-is rather than falling
+      // back to a full rebuild.
+    }
+    const entry = Array.isArray(fresh?.settings)
+      ? fresh.settings.find((setting) => setting && !setting.redacted && setting.key === key)
+      : null;
+    if (!entry) {
+      showSettingsSaveError(field.statusEl, "Reset done, but reloading the value failed");
+      return;
+    }
+    field.entry = entry;
+    field.savedValue = entry.value;
+    setControlValue(field, entry.value);
+    if (catalog && Array.isArray(catalog.settings)) {
+      const index = catalog.settings.findIndex((setting) => setting?.key === key);
+      if (index !== -1) catalog.settings[index] = entry;
+    }
+    showSettingsSaveSuccess(field.statusEl);
   }
 
   function setControlValue(field, value) {

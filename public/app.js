@@ -2,6 +2,7 @@
  * Main App - Ties everything together
  */
 
+import { createAccountUsage, createOAuthLogin } from "./account-usage.js";
 import { createAgentHub } from "./agent-hub.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { pageForKey } from "./agent-settings-pages.js";
@@ -10,8 +11,12 @@ import { setupSettingsEditors } from "./app-settings-editors.js";
 import { setupSettingsToggles } from "./app-settings-toggles.js";
 import { createAppUpdater } from "./app-updater.js";
 import { setupVoiceInput } from "./app-voice-input.js";
-import { createComposerCommands, isSlashCommand, resolveDelivery } from "./composer-commands.js";
-import { DialogHandler } from "./dialogs.js";
+import {
+  createComposerCommands,
+  createComposerQueue,
+  isSlashCommand,
+  isSlashStreamRejection,
+} from "./composer-commands.js";
 import { FileBrowser } from "./file-browser.js";
 import { anchorHistoryToBottom } from "./history-scroll-anchor.js";
 import {
@@ -45,12 +50,14 @@ import { applyTheme, getCurrentTheme, themes } from "./themes.js";
 import { setupThinkingLevelMenu } from "./thinking-level-menu.js";
 import { ToolCardRenderer } from "./tool-card.js";
 import { initTransport } from "./transport.js";
+import { createForkActions, FORK_ICON_SVG, UIRequestManager } from "./ui-requests.js";
 import { resolveWebSocketUrl, WebSocketClient } from "./websocket-client.js";
 import {
   openFolderAsWorkspace,
   startInWindowNewSession,
   startNewProjectChat,
 } from "./workspace-actions.js";
+import { wsRpc } from "./ws-rpc.js";
 
 const fetchInstances = async () => {
   try {
@@ -178,7 +185,11 @@ const canUseSessionControl = () => transport.capabilities.native;
 const state = new StateManager();
 const messageRenderer = new MessageRenderer(document.getElementById("messages"));
 const toolCardRenderer = new ToolCardRenderer(document.getElementById("messages"));
-const dialogHandler = new DialogHandler(document.getElementById("dialog-container"), wsClient);
+// Extension UI request dialogs (select/confirm/input): queueing, deadline
+// countdown and the ui_response/ui_cancel wire contract live in ui-requests.js.
+// This is the single path for `extension_ui_request` events (it reuses the
+// dialogs.js primitives internally).
+const uiRequests = new UIRequestManager(document.getElementById("dialog-container"), wsClient);
 
 // Session sidebar
 const sidebar = new SessionSidebar(
@@ -261,6 +272,11 @@ let sessionsLoaded = false;
 let sessionSelectChain = Promise.resolve();
 let deferredMirrorSync = null;
 let lastRenderedWelcomeWorkspacePath = null;
+// Set when the user hits "Resync transcript" while the agent is streaming.
+// Re-rendering the transcript mid-run would detach the live streaming node
+// (remaining deltas would target an orphaned element), so the resync waits
+// for agent_end instead (F22).
+let pendingResync = false;
 // Maps port -> sessionFile for each omp process we're tracking
 const portSessionMap = new Map();
 // The port that wsClient is currently connected to (the "foreground" session)
@@ -458,6 +474,74 @@ document.getElementById("file-sidebar-finder").addEventListener("click", () => {
 // Agent hub → "view transcript": route through the same selection flow the
 // sidebar uses. Prefer the real sidebar entry (keeps project metadata); fall
 // back to a synthesized session for transcripts the list doesn't contain yet.
+//
+// Subagent transcripts are the exception (F20): they live in a nested tree
+// under the sessions root (`…/<project>/<session>/<agent>.jsonl`) that the
+// two-segment /api/sessions/:dir/:file route cannot address. Those render
+// read-only through the dedicated get_agent_transcript RPC, without
+// switching the active session/process.
+
+/** Best-effort sessions-root path inferred from any known sidebar session. */
+function sessionsRootHint() {
+  for (const project of Array.isArray(sidebar.projects) ? sidebar.projects : []) {
+    for (const session of project.sessions || []) {
+      const norm = String(session.filePath || "").replace(/\\/g, "/");
+      const idx = norm.lastIndexOf("/sessions/");
+      if (idx >= 0) return norm.slice(0, idx + "/sessions".length);
+    }
+  }
+  return null;
+}
+
+/**
+ * True for paths more than one directory level under the sessions root —
+ * i.e. subagent transcript files the /api/sessions route can't address.
+ * Unknown layouts return false so main sessions keep the switch flow.
+ */
+function isNestedAgentTranscriptPath(sessionFile) {
+  const norm = String(sessionFile || "").replace(/\\/g, "/");
+  let underRoot = null;
+  const root = sessionsRootHint();
+  if (root && norm.startsWith(`${root}/`)) {
+    underRoot = norm.slice(root.length + 1);
+  } else {
+    const idx = norm.lastIndexOf("/sessions/");
+    if (idx >= 0) underRoot = norm.slice(idx + "/sessions/".length);
+  }
+  if (!underRoot) return false;
+  return underRoot.split("/").filter(Boolean).length > 2;
+}
+
+/**
+ * Render a subagent transcript read-only via the get_agent_transcript RPC.
+ * The active session, process routing and input state are untouched — this
+ * is a peek, not a switch (F20).
+ */
+async function showAgentTranscript(sessionFile) {
+  messageRenderer.clear();
+  toolCardRenderer.clear();
+  resetTranscriptTotals();
+  messageRenderer.renderSystemMessage(t("session.loadingSession"));
+  const result = await wsRpc(
+    wsClient,
+    { type: "get_agent_transcript", sessionPath: sessionFile },
+    { timeoutMs: 15000 },
+  );
+  messageRenderer.clear();
+  toolCardRenderer.clear();
+  if (!result.ok) {
+    showTransientStatus(t("session.loadFailed"));
+    renderWorkspaceWelcome({ force: true });
+    return;
+  }
+  const entries = Array.isArray(result.data?.entries) ? result.data.entries : [];
+  if (entries.length === 0) {
+    renderWorkspaceWelcome({ force: true });
+    return;
+  }
+  renderSessionHistory(entries);
+}
+
 function openSessionFromFile(sessionFile) {
   if (!sessionFile) return;
   for (const project of Array.isArray(sidebar.projects) ? sidebar.projects : []) {
@@ -466,6 +550,13 @@ function openSessionFromFile(sessionFile) {
       handleSessionSelect(session, project);
       return;
     }
+  }
+  if (isNestedAgentTranscriptPath(sessionFile)) {
+    showAgentTranscript(sessionFile).catch((err) => {
+      console.error("[AgentHub] transcript load failed:", err);
+      showTransientStatus(t("session.loadFailed"));
+    });
+    return;
   }
   const segments = String(sessionFile).split(/[\\/]/);
   handleSessionSelect(
@@ -737,6 +828,8 @@ wsClient.addEventListener("disconnected", () => {
     pendingSessionSwitchPath = null;
     updateUI();
   }
+  // Same for a deferred resync: it could only fail while disconnected.
+  pendingResync = false;
 
   // If the streaming state is still true 3 s after disconnect (omp likely
   // crashed — agent_end won't re-fire after reconnect), unlock the UI.
@@ -794,6 +887,35 @@ wsClient.addEventListener("commandUndeliverable", (e) => {
     messageInput.value = pending.message;
     messageInput.style.height = "auto";
   }
+});
+
+// The upstream replies to prompts with a `response` frame (dispatched as a
+// commandResponse event, correlated by requestId/id). A FAILED prompt
+// response is the server's only rejection channel — most importantly the
+// slash-while-streaming sentinel, which must be recovered into the queue
+// instead of surfacing an error (F16).
+wsClient.addEventListener("commandResponse", (e) => {
+  const detail = e.detail || {};
+  const requestId = detail.requestId ?? detail.id;
+  if (!requestId) return;
+  const pending = inFlightPrompts.get(requestId);
+  if (!pending) return;
+  // Acknowledged either way — stop considering this command in flight.
+  clearTimeout(pending.timer);
+  inFlightPrompts.delete(requestId);
+  if (detail.success !== false) return;
+
+  if (isSlashStreamRejection(detail.error)) {
+    // Re-queue the full slash payload for idle delivery and drop the
+    // optimistic render — the queued strip becomes the source of truth.
+    pending.element?.remove();
+    composerQueue.queuePrompt(pending.message, { kind: "slash" });
+    lastSentMessage = pending.message;
+    renderQueuedMessages();
+    return;
+  }
+
+  messageRenderer.renderError(detail.error || "Message not delivered");
 });
 
 // Mirror mode: receive full state snapshot on connect
@@ -998,6 +1120,14 @@ function handleAgentEnd(event = null) {
   currentStreamingText = "";
   updateUI();
 
+  // A resync requested mid-run runs now that the agent is idle (F22) — unless
+  // a deferred session switch is about to take over the transcript anyway.
+  const runPendingResync = pendingResync && !pendingSessionSwitchPath;
+  pendingResync = false;
+  if (runPendingResync) {
+    resyncTranscriptFromAgent().catch(() => {});
+  }
+
   // Deferred session switch: user clicked a history session while streaming.
   // Now that the agent run is done, tell omp to switch — no abort needed.
   if (pendingSessionSwitchPath) {
@@ -1036,14 +1166,21 @@ function handleMessageStart(message) {
   if (message.role === "assistant") {
     currentStreamingText = "";
     currentStreamingThinking = "";
-    currentStreamingElement = messageRenderer.renderAssistantMessage({ content: "" }, true);
+    // Carry the real entry id when the event provides one; the renderer
+    // falls back to the "streaming" placeholder until finalize (F2).
+    currentStreamingElement = messageRenderer.renderAssistantMessage(
+      { content: "", id: message.id },
+      true,
+    );
   } else if (message.role === "user") {
     // In mirror mode, user messages from TUI appear via events
     // Only render if we didn't just send this message ourselves
-    if (!lastSentMessage || getMessageText(message) !== lastSentMessage) {
-      const content = getMessageText(message);
-      if (content) {
-        messageRenderer.renderUserMessage({ content });
+    const echoText = getMessageText(message);
+    // The echo of a steered message retires its visual-only chip (F15).
+    removeSteeredEcho(echoText);
+    if (!lastSentMessage || echoText !== lastSentMessage) {
+      if (echoText) {
+        messageRenderer.renderUserMessage({ content: echoText });
       }
     }
     lastSentMessage = null;
@@ -1082,7 +1219,10 @@ function ensureStreamingAssistantElement(message = null) {
   if (currentStreamingElement) return currentStreamingElement;
   currentStreamingText = getAssistantText(message);
   currentStreamingThinking = getAssistantThinking(message);
-  currentStreamingElement = messageRenderer.renderAssistantMessage({ content: "" }, true);
+  currentStreamingElement = messageRenderer.renderAssistantMessage(
+    { content: "", id: message?.id },
+    true,
+  );
   if (currentStreamingThinking) {
     messageRenderer.updateStreamingThinking(currentStreamingElement, currentStreamingThinking);
   }
@@ -1128,11 +1268,13 @@ function handleMessageEnd(message) {
   if (currentStreamingElement) {
     // Pass usage info for cost display
     const usage = message?.usage || null;
-    // Pass thinking content so finalize can render the thinking block
+    // Pass thinking content so finalize can render the thinking block, and
+    // the real entry id so the fork action can resolve this message (F2).
     messageRenderer.finalizeStreamingMessage(
       currentStreamingElement,
       usage,
       currentStreamingThinking,
+      typeof message?.id === "string" ? message.id : null,
     );
     currentStreamingElement = null;
     currentStreamingThinking = "";
@@ -1189,25 +1331,7 @@ function handleToolExecutionEnd(event) {
 }
 
 function handleExtensionUIRequest(event) {
-  switch (event.method) {
-    case "select":
-      dialogHandler.showSelect(event);
-      break;
-    case "confirm":
-      dialogHandler.showConfirm(event);
-      break;
-    case "input":
-      dialogHandler.showInput(event);
-      break;
-    case "editor":
-      dialogHandler.showEditor(event);
-      break;
-    case "notify":
-      dialogHandler.showNotification(event);
-      break;
-    default:
-      console.warn("[App] Unknown extension UI method:", event.method);
-  }
+  uiRequests.handle(event);
 }
 
 function formatToolOutput(result) {
@@ -1276,12 +1400,14 @@ const composerCommands = createComposerCommands({
   isStreaming: () => state.isStreaming,
   onSubmit: () => sendMessage(),
   queueSlash: (message) => {
-    messageQueue.push({ type: "prompt", message, kind: "slash" });
+    composerQueue.queuePrompt(message, { kind: "slash" });
     lastSentMessage = message;
     renderQueuedMessages();
   },
   showSteerQueued: (message) => {
-    messageQueue.push({ type: "prompt", message, kind: "steer" });
+    // Visual-only echo (F15): the steer RPC already went out; this chip must
+    // never be flushed. It is retired when the user message echoes back.
+    composerQueue.addSteerEcho(message);
     lastSentMessage = message;
     renderQueuedMessages();
   },
@@ -1417,26 +1543,36 @@ function renderImagePreviews() {
 // Send message (with images)
 // ═══════════════════════════════════════
 
-let messageQueue = [];
+// Queued-strip model (F15): pending prompts + visual-only steer echoes.
+// Steer-now sends are delivered immediately, so they never enter the
+// flushable queue — the strip chip is just an acknowledgement.
+const composerQueue = createComposerQueue();
+
+function removeSteeredEcho(message) {
+  if (typeof message !== "string") return;
+  if (composerQueue.removeSteerEcho(message)) renderQueuedMessages();
+}
 
 function clearMessageQueue() {
-  messageQueue = [];
+  composerQueue.clear();
   renderQueuedMessages();
 }
 
 // Prompts are sent fire-and-forget over the WebSocket. The broker replies with
 // `command_undeliverable` (correlated by requestId) when it cannot route the
-// command to a live omp process. We track in-flight prompt requestIds here so the
-// `commandUndeliverable` handler can tell a real dropped prompt apart from
-// background/system commands and recover the user's text. Entries self-expire:
-// the broker decides deliverability synchronously, so anything not reported
-// undeliverable within a few seconds was forwarded successfully.
+// command to a live omp process, and the upstream replies with a `response`
+// frame when it accepts or rejects the prompt (see the commandResponse
+// listener below for the rejection-recovery path, F16). We track in-flight
+// prompt requestIds here so both handlers can tell a real dropped prompt
+// apart from background/system commands and recover the user's text. Entries
+// self-expire: anything not answered within a few seconds was forwarded
+// successfully.
 const inFlightPrompts = new Map();
 
-function trackPromptDelivery(requestId, message) {
+function trackPromptDelivery(requestId, message, element = null) {
   if (!requestId) return;
   const timer = setTimeout(() => inFlightPrompts.delete(requestId), 8000);
-  inFlightPrompts.set(requestId, { message, timer });
+  inFlightPrompts.set(requestId, { message, timer, element });
 }
 
 // Delayed sidebar/instance refreshes issued after a user prompt. Tracked so a
@@ -1463,12 +1599,13 @@ function refreshSidebarAfterUserPrompt() {
 function sendMessage() {
   if (!currentOnboardingState().canQuery) return;
 
-  const message = messageInput.value.trim();
-  if (!message) return;
-
-  messageInput.value = "";
-  messageInput.style.height = "auto";
-  composerCommands.refresh();
+  // F14: resolve the delivery decision FIRST — beginSend() clears the input
+  // and refreshes the composer controls, and that refresh hides the toggle
+  // and resets the mode back to "queue", which would silently downgrade a
+  // Steer-now send to Queue if the mode were read afterwards.
+  const plan = composerCommands.beginSend();
+  if (!plan) return;
+  const { message, delivery } = plan;
 
   const cmd = {
     type: "prompt",
@@ -1488,19 +1625,12 @@ function sendMessage() {
     renderImagePreviews();
   }
 
-  // Delivery decision while the agent is streaming: slash commands ALWAYS
-  // queue (the server rejects steered slash commands — see
-  // consumeStreamRejection for the recovery path), plain messages follow the
-  // Queue / Steer-now toggle.
-  const delivery = resolveDelivery({
-    message,
-    isStreaming: state.isStreaming,
-    deliveryMode: composerCommands.getDeliveryMode(),
-  });
-
   if (delivery === "queue") {
     // Queue it — show as bubble above input
-    messageQueue.push({ ...cmd, kind: isSlashCommand(message) ? "slash" : "queue" });
+    composerQueue.queuePrompt(message, {
+      kind: isSlashCommand(message) ? "slash" : "queue",
+      images: cmd.images,
+    });
     lastSentMessage = message;
     renderQueuedMessages();
     return;
@@ -1512,8 +1642,17 @@ function sendMessage() {
   }
 
   lastSentMessage = message;
+  sendPromptNow(cmd, message);
+}
+
+// Optimistic send: render the user bubble, ship the prompt, and keep the
+// rendered element attached to the in-flight entry so a server rejection can
+// clear it again (F16).
+function sendPromptNow(cmd, message) {
   messageRenderer.renderUserMessage({ content: message, images: cmd.images });
-  trackPromptDelivery(wsClient.send(cmd), message);
+  const element = messagesContainer.querySelector(".message.user:last-of-type");
+  const requestId = wsClient.send(cmd);
+  trackPromptDelivery(requestId, message, element);
   refreshSidebarAfterUserPrompt();
 }
 
@@ -1524,40 +1663,45 @@ const STEER_ICON_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="no
 
 function renderQueuedMessages() {
   queuedMessagesEl.innerHTML = "";
-  if (messageQueue.length === 0) {
+  const items = composerQueue.snapshot();
+  if (items.length === 0) {
     queuedMessagesEl.classList.add("hidden");
     return;
   }
   queuedMessagesEl.classList.remove("hidden");
-  messageQueue.forEach((cmd, i) => {
-    const kind = cmd.kind || "queue";
+  for (const entry of items) {
+    const kind = entry.kind || "queue";
     // Label per kind: plain → Queued, slash → idle hint (they can only be
-    // delivered when the agent idles), steer → already on its way.
+    // delivered when the agent idles), steer → already on its way (a
+    // visual-only echo of an immediately-delivered steer, never flushed).
     const label =
       kind === "slash" ? t("slash.queuedHint") : kind === "steer" ? t("slash.steerNow") : "Queued";
     const el = document.createElement("div");
     el.className = `queued-msg queued-msg-${kind}`;
     el.innerHTML = `
       <span class="queued-msg-label">${label}</span>
-      <span class="queued-msg-text">${escapeHtml(cmd.message)}</span>
-      ${kind === "queue" ? `<button type="button" class="queued-msg-steer" title="${t("slash.steerNow")}" aria-label="${t("slash.steerNow")}">${STEER_ICON_SVG}</button>` : ""}
-      <button type="button" class="queued-msg-cancel" title="${t("common.cancel")}" aria-label="${t("common.cancel")}">×</button>
+      <span class="queued-msg-text">${escapeHtml(entry.message)}</span>
+      ${entry.flushable && kind === "queue" ? `<button type="button" class="queued-msg-steer" title="${t("slash.steerNow")}" aria-label="${t("slash.steerNow")}">${STEER_ICON_SVG}</button>` : ""}
+      ${entry.flushable ? `<button type="button" class="queued-msg-cancel" title="${t("common.cancel")}" aria-label="${t("common.cancel")}">×</button>` : ""}
     `;
     // Bump a queued item ahead of the running turn immediately.
     const steerBtn = el.querySelector(".queued-msg-steer");
     if (steerBtn) {
       steerBtn.addEventListener("click", () => {
-        const [pending] = messageQueue.splice(i, 1);
+        composerQueue.remove(entry.item);
         renderQueuedMessages();
-        composerCommands.sendSteerNow(pending.message);
+        composerCommands.sendSteerNow(entry.message);
       });
     }
-    el.querySelector(".queued-msg-cancel").addEventListener("click", () => {
-      messageQueue.splice(i, 1);
-      renderQueuedMessages();
-    });
+    const cancelBtn = el.querySelector(".queued-msg-cancel");
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", () => {
+        composerQueue.remove(entry.item);
+        renderQueuedMessages();
+      });
+    }
     queuedMessagesEl.appendChild(el);
-  });
+  }
 }
 
 function escapeHtml(text) {
@@ -1567,13 +1711,19 @@ function escapeHtml(text) {
 }
 
 function flushQueue() {
-  if (messageQueue.length > 0 && !state.isStreaming) {
-    const cmd = messageQueue.shift();
+  // Only genuinely pending commands flush (F15) — steer echoes were already
+  // delivered and are excluded from the flushable queue by design.
+  if (composerQueue.flushableCount > 0 && !state.isStreaming) {
+    const cmd = composerQueue.takeFlushable();
     // `kind` is UI-only routing metadata — strip it from the wire payload.
     const { kind: _kind, ...payload } = cmd;
     messageRenderer.renderUserMessage({ content: cmd.message, images: cmd.images });
     renderQueuedMessages();
-    trackPromptDelivery(wsClient.send(payload), cmd.message);
+    trackPromptDelivery(
+      wsClient.send(payload),
+      cmd.message,
+      messagesContainer.querySelector(".message.user:last-of-type"),
+    );
     refreshSidebarAfterUserPrompt();
   }
 }
@@ -1598,9 +1748,20 @@ const resyncIconSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="non
 // (get_messages) and re-render #messages from them. Empty or failed syncs
 // keep the current transcript; only the status line changes.
 async function resyncTranscriptFromAgent() {
+  // Never re-render mid-run: clearing the transcript would orphan the live
+  // streaming node and remaining deltas would target a detached element.
+  // Defer to agent_end instead (F22).
+  if (state.isStreaming) {
+    pendingResync = true;
+    return;
+  }
+  pendingResync = false;
   await resyncTranscript({
     wsClient,
     renderEntries: (entries) => {
+      // Totals are recomputed from the fresh transcript — without the reset
+      // a resync would double-count every historic usage (F21).
+      resetTranscriptTotals();
       messageRenderer.clear();
       toolCardRenderer.clear();
       renderSessionHistory(entries, { searchQuery: sidebar.searchQuery });
@@ -1625,6 +1786,127 @@ async function resyncTranscriptFromAgent() {
   });
 }
 
+// Transcript-derived totals (cost / tokens) are recomputed by every full
+// transcript render. All render paths funnel through this reset so a
+// re-render (history load, mirror snapshot, resync, agent transcript) can
+// never stack on top of the previous totals (F21).
+function resetTranscriptTotals() {
+  sessionTotalCost = 0;
+  lastInputTokens = 0;
+  updateCostDisplay();
+  updateTokenUsage();
+}
+
+// Transient header status (fork / import feedback): show a message, then
+// fall back to whatever the AUTHORITATIVE status is at that moment — the
+// connection may have dropped or a run may have started while the transient
+// message was up, so blindly writing "Connected" would overwrite it (F11).
+let statusRevertTimer = null;
+function showTransientStatus(message, holdMs = 3000) {
+  if (statusRevertTimer) clearTimeout(statusRevertTimer);
+  statusText.textContent = message;
+  statusRevertTimer = setTimeout(() => {
+    statusRevertTimer = null;
+    if (state.isStreaming) {
+      statusText.textContent = t("status.working");
+      return;
+    }
+    if (lastConnectionStatus) {
+      updateConnectionStatus(lastConnectionStatus);
+      return;
+    }
+    statusText.textContent = t("status.connected");
+  }, holdMs);
+}
+
+// A newer authoritative status write (connection change, streaming change)
+// cancels a pending transient-status revert — the timer must not clobber it.
+function clearTransientStatusRevert() {
+  if (statusRevertTimer) {
+    clearTimeout(statusRevertTimer);
+    statusRevertTimer = null;
+  }
+}
+
+// Fork from message (B7): hover action on assistant messages, plus the
+// "Fork from latest" palette command below.
+//
+// Build feature-detection (F2): the embedded server reports builds without
+// ctx.branch support by replying "Fork unavailable in this build". Remember
+// that per session and disable the affordances with a tooltip instead of
+// erroring on every click.
+const forkUnavailableSessions = new Set();
+const forkSessionKey = () => sidebar.activeSessionFile || mirrorActiveSessionFile || "";
+function isForkUnavailable() {
+  return forkUnavailableSessions.has(forkSessionKey());
+}
+
+function applyForkAvailabilityToButtons() {
+  const unavailable = isForkUnavailable();
+  for (const btn of messagesContainer.querySelectorAll(".message-fork-btn")) {
+    btn.disabled = unavailable;
+    if (unavailable) {
+      btn.title = t("fork.unavailable");
+      btn.setAttribute("aria-disabled", "true");
+    } else {
+      btn.title = t("fork.fromHere");
+      btn.removeAttribute("aria-disabled");
+    }
+  }
+}
+
+// Fork buttons are attached asynchronously by ui-requests.js's observer; once
+// the current session is known unavailable, keep freshly attached buttons
+// disabled too. The observer only runs while some session is marked.
+let forkAvailabilityObserver = null;
+function startForkAvailabilityObserver() {
+  if (forkAvailabilityObserver || typeof MutationObserver !== "function") return;
+  forkAvailabilityObserver = new MutationObserver(() => applyForkAvailabilityToButtons());
+  forkAvailabilityObserver.observe(messagesContainer, { childList: true, subtree: true });
+}
+
+const forkActions = createForkActions({
+  wsClient,
+  messagesContainer,
+  onStatus: (message) => showTransientStatus(message),
+  onError: (message) => {
+    if (String(message ?? "").includes("Fork unavailable")) {
+      const key = forkSessionKey();
+      if (key && !forkUnavailableSessions.has(key)) forkUnavailableSessions.add(key);
+      startForkAvailabilityObserver();
+      applyForkAvailabilityToButtons();
+      showTransientStatus(t("fork.unavailable"));
+      return;
+    }
+    messageRenderer.renderError(message);
+  },
+  onRefresh: () => {
+    sidebar.loadSessions({ quiet: true }).catch(() => {});
+    pollInstances().catch(() => {});
+  },
+});
+const forkPaletteAction = () => forkActions.forkFromLatest();
+
+/**
+ * Last REAL assistant entry id in the transcript ("streaming" placeholders
+ * don't count). Fork needs a real entryId — the server rejects id-less fork
+ * commands, so the palette affordance is disabled when none exists (F2).
+ */
+function latestRealEntryId() {
+  const messages = messagesContainer?.querySelectorAll(".message.assistant") || [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const id = messages[i]?.dataset?.messageId;
+    if (id && id !== "streaming") return id;
+  }
+  return null;
+}
+
+function isForkPaletteBlocked() {
+  // Blocked when the build lacks fork support for this session, or when the
+  // transcript carries no real entry id to fork from.
+  return isForkUnavailable() || !latestRealEntryId();
+}
+
 // Labels are translated at render time (see openCommandPalette) so an
 // interface-language switch updates an open palette too.
 const commands = [
@@ -1639,6 +1921,12 @@ const commands = [
     labelKey: "palette.resync",
     descKey: "palette.resyncDesc",
     action: () => resyncTranscriptFromAgent(),
+  },
+  {
+    icon: FORK_ICON_SVG,
+    labelKey: "palette.fork",
+    descKey: "palette.forkDesc",
+    action: forkPaletteAction,
   },
   {
     icon: "📋",
@@ -1678,10 +1966,20 @@ function openCommandPalette() {
         <div class="command-desc">${t(cmd.descKey)}</div>
       </div>
     `;
-    el.addEventListener("click", () => {
-      closeCommandPalette();
-      cmd.action();
-    });
+    // Fork is disabled for sessions whose server already reported the build
+    // lacks fork support, or when no real entry id exists to fork from — the
+    // server requires an entryId (F2).
+    if (cmd.action === forkPaletteAction && isForkPaletteBlocked()) {
+      el.style.opacity = "0.5";
+      el.style.pointerEvents = "none";
+      el.setAttribute("aria-disabled", "true");
+      el.title = t("fork.unavailable");
+    } else {
+      el.addEventListener("click", () => {
+        closeCommandPalette();
+        cmd.action();
+      });
+    }
     commandList.appendChild(el);
   });
   commandPalette.classList.remove("hidden");
@@ -1780,6 +2078,10 @@ let availableModels = [];
 let hasLoadedAvailableModels = false;
 let didAutoOpenEmptyModelsDropdown = false;
 let currentThinkingLevel = "off";
+// Generation counter for model-info/state loads (F17): overlapping loads are
+// common (a post-mutation refresh racing the periodic context-window fetch),
+// and an OLDER get_state reply must never overwrite newer local state.
+let modelInfoGeneration = 0;
 
 function currentOnboardingState() {
   return getOnboardingState({
@@ -1808,6 +2110,7 @@ function updateOnboardingUI() {
 }
 
 async function fetchModelInfo() {
+  const generation = ++modelInfoGeneration;
   try {
     const [modelsResp, stateResp] = await Promise.all([
       fetch("/api/rpc", {
@@ -1823,6 +2126,10 @@ async function fetchModelInfo() {
     ]);
     const modelsData = await modelsResp.json();
     const stateData = await stateResp.json();
+
+    // A newer load was issued while this one was in flight — drop the stale
+    // replies so they cannot clobber the newer state (F17).
+    if (generation !== modelInfoGeneration) return;
 
     if (modelsData.success && Array.isArray(modelsData.data?.models)) {
       availableModels = modelsData.data.models;
@@ -1848,9 +2155,11 @@ async function fetchModelInfo() {
   } catch (_e) {
     // ignore
   } finally {
-    updateModelLabel();
-    updateUI();
-    maybeAutoOpenEmptyModelsDropdown();
+    if (generation === modelInfoGeneration) {
+      updateModelLabel();
+      updateUI();
+      maybeAutoOpenEmptyModelsDropdown();
+    }
   }
 }
 
@@ -1989,17 +2298,21 @@ document.addEventListener("click", (e) => {
 
 // Thinking level button — opens the effort picker menu (any level in one
 // click). The Settings-tab cycle button keeps its click-to-cycle behavior
-// (app-settings-toggles.js). The server's set_thinking_level reply carries
-// no data, so the chip updates optimistically and then refreshes through the
-// existing get_state path (fetchModelInfo).
+// (app-settings-toggles.js). The chip updates optimistically; the state
+// refresh runs only AFTER the mutation is acknowledged, and get_state loads
+// are generation-guarded, so a stale reply can no longer overwrite the chip
+// (F17).
 setupThinkingLevelMenu({
   button: thinkingBtn,
   getCurrentLevel: () => currentThinkingLevel,
-  onSelect: (level) => {
-    wsClient.send({ type: "set_thinking_level", level });
+  onSelect: async (level) => {
     currentThinkingLevel = level;
     updateThinkingBtn();
-    fetchModelInfo();
+    const result = await wsRpc(wsClient, { type: "set_thinking_level", level });
+    if (!result.ok) {
+      console.error("[App] set_thinking_level failed:", result.error);
+    }
+    await fetchModelInfo();
   },
 });
 
@@ -2103,6 +2416,16 @@ refreshSessionsBtn.addEventListener("click", () => {
   sidebar.loadSessions().then(() => {
     setTimeout(() => refreshSessionsBtn.classList.remove("spinning"), 600);
     if (isMirrorMode) updateMirrorLiveIndicator();
+  });
+});
+
+// Import sessions (B10): header affordance → Claude Code / Codex menu.
+const importSessionsBtn = document.getElementById("import-sessions-btn");
+importSessionsBtn?.addEventListener("click", () => {
+  sidebar.importSessions(importSessionsBtn, {
+    wsClient,
+    notify: (message) => showTransientStatus(message),
+    onError: (message) => messageRenderer.renderError(message),
   });
 });
 
@@ -2381,10 +2704,7 @@ async function handleSessionSelectImpl(session, project) {
     selectedSession: session.filePath,
     targetLiveInstance,
   });
-  sessionTotalCost = 0;
-  lastInputTokens = 0;
-  updateCostDisplay();
-  updateTokenUsage();
+  resetTranscriptTotals();
 
   // Native host: switch session via control command to the current omp instance
   if (nativeAvailable() && session.filePath) {
@@ -2703,8 +3023,7 @@ function handleMirrorSync(data) {
 
   // Clear and render message history
   messageRenderer.clear();
-  sessionTotalCost = 0;
-  lastInputTokens = 0;
+  resetTranscriptTotals();
 
   // Keep Welcome stable when there are already sessions in the sidebar and
   // the user has not explicitly selected one yet.
@@ -2776,11 +3095,29 @@ function updateMirrorInputState() {
 // Session history rendering
 // ═══════════════════════════════════════
 
+/**
+ * Session JSONL entries carry the entry id on the ENTRY (`{id, type:
+ * "message", message}`), while the transcript renderer hands only
+ * `entry.message` to the renderer. Copy the entry id onto the message so
+ * rendered assistant elements get `data-message-id` = the REAL id — fork
+ * actions resolve their entryId from it (F2). Streaming live messages keep
+ * the "streaming" placeholder until finalize.
+ */
+function entriesWithMessageIds(entries) {
+  return (Array.isArray(entries) ? entries : []).map((entry) => {
+    if (entry?.type !== "message" || !entry.message || typeof entry.message !== "object") {
+      return entry;
+    }
+    if (entry.message.id || !entry.id) return entry;
+    return { ...entry, message: { ...entry.message, id: entry.id } };
+  });
+}
+
 function renderSessionHistory(entries, { searchQuery = "" } = {}) {
   console.log(`[History] Rendering ${entries.length} entries`);
   // Entry→renderer mapping lives in session-resync.js so the palette
   // "Resync transcript" action re-renders exactly like history loads.
-  const counts = renderTranscriptFromEntries(entries, {
+  const counts = renderTranscriptFromEntries(entriesWithMessageIds(entries), {
     messageRenderer,
     toolCardRenderer,
     searchQuery,
@@ -2996,6 +3333,9 @@ async function refreshLanUrl() {
 let lastConnectionStatus = null;
 
 function updateConnectionStatus(status) {
+  // Authoritative write — cancels any pending transient-status revert so the
+  // timer can't clobber this status later (F11).
+  clearTransientStatusRevert();
   lastConnectionStatus = status;
   statusIndicator.className = `status-indicator ${status}`;
 
@@ -3026,13 +3366,19 @@ function updateUI() {
   composerCard.classList.toggle("streaming", isStreaming);
 
   if (isStreaming) {
+    // Authoritative write — cancels a pending transient-status revert (F11).
+    clearTransientStatusRevert();
     statusIndicator.classList.add("streaming");
     statusIndicator.classList.remove("connected");
     statusText.textContent = t("status.working");
   } else {
     statusIndicator.classList.remove("streaming");
     statusIndicator.classList.add("connected");
-    statusText.textContent = t("status.connected");
+    // Don't clobber a live transient status from a routine updateUI pass —
+    // only connection/streaming changes cancel it explicitly (F11).
+    if (!statusRevertTimer) {
+      statusText.textContent = t("status.connected");
+    }
   }
 
   messageInput.disabled = !onboarding.canType;
@@ -3111,6 +3457,9 @@ function selectSettingsTab(tabKey = "general") {
   }
   if (targetTabKey === "extensions") {
     loadBrowsePackages();
+  }
+  if (targetTabKey === "usage") {
+    accountUsage.refresh().catch(() => {});
   }
 }
 
@@ -3808,6 +4157,21 @@ agentSettings.attach(document.getElementById("agent-settings-container"));
 const mcpManager = createMcpManager({
   root: document.getElementById("mcp-manager-root"),
   wsClient,
+});
+
+// Settings → Usage: account usage section above the cost dashboard (B6).
+// Refreshed each time the Usage tab opens (see selectSettingsTab).
+const accountUsage = createAccountUsage({
+  root: document.getElementById("account-usage-root"),
+  wsClient,
+});
+
+// Settings → Configuration → Providers: OAuth login row (B3). A successful
+// login refreshes the existing API-keys panel.
+createOAuthLogin({
+  root: document.getElementById("oauth-login-root"),
+  wsClient,
+  reloadApiKeys: () => loadApiKeysPanel(),
 });
 
 // Settings → Configuration sub-pages (see settings-config-subnav.js). Each

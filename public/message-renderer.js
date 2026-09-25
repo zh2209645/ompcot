@@ -246,7 +246,13 @@ export class MessageRenderer {
     }
   }
 
-  finalizeStreamingMessage(messageElement, usage = null, thinking = "") {
+  finalizeStreamingMessage(messageElement, usage = null, thinking = "", id = null) {
+    // Stamp the real session-entry id once known — the element carried the
+    // "streaming" placeholder until now, and fork actions need the real id
+    // to resolve this message (F2).
+    if (typeof id === "string" && id) {
+      messageElement.dataset.messageId = id;
+    }
     const contentDiv = messageElement.querySelector(".message-content");
     if (contentDiv) {
       contentDiv.classList.remove("streaming");

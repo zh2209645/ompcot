@@ -91,6 +91,78 @@ const EMPTY_REFETCH_THROTTLE_MS = 5000;
 const LIST_COMMANDS_TIMEOUT_MS = 4000;
 
 /**
+ * Queued-strip model (F15): genuinely pending commands (queue / slash) live
+ * in `pending` and are flushed one-by-one when the agent idles. A Steer-now
+ * send is delivered IMMEDIATELY over its own RPC, so its strip chip is a
+ * visual-only echo that must never be flushed — flushing it would re-send an
+ * already-delivered message.
+ *
+ * @returns {{ queuePrompt, addSteerEcho, removeSteerEcho, clear, remove,
+ *   takeFlushable, snapshot, flushableCount, isEmpty }}
+ */
+export function createComposerQueue() {
+  const pending = []; // flushable { type:"prompt", message, kind, images? }
+  const steerEchoes = []; // visual-only message strings
+
+  return {
+    /** Queue a genuinely pending prompt for idle delivery. */
+    queuePrompt(message, { kind = "queue", images } = {}) {
+      const item = { type: "prompt", message, kind };
+      if (images && images.length > 0) item.images = images;
+      pending.push(item);
+    },
+    /** Mirror an already-delivered steer in the strip (visual only). */
+    addSteerEcho(message) {
+      steerEchoes.push(message);
+    },
+    /** Drop the echo once its user message lands in the transcript.
+     *  Returns true when an echo was actually removed. */
+    removeSteerEcho(message) {
+      const idx = steerEchoes.indexOf(message);
+      if (idx === -1) return false;
+      steerEchoes.splice(idx, 1);
+      return true;
+    },
+    clear() {
+      pending.length = 0;
+      steerEchoes.length = 0;
+    },
+    /** Cancel / promote a pending item (identity-based, from snapshot()). */
+    remove(item) {
+      const idx = pending.indexOf(item);
+      if (idx !== -1) pending.splice(idx, 1);
+    },
+    /** Pop the oldest flushable command, or null when none are pending. */
+    takeFlushable() {
+      return pending.shift() || null;
+    },
+    /** Render model: interactive pending items, then non-interactive echoes. */
+    snapshot() {
+      return [
+        ...pending.map((item) => ({
+          item,
+          message: item.message,
+          kind: item.kind || "queue",
+          flushable: true,
+        })),
+        ...steerEchoes.map((message) => ({
+          item: null,
+          message,
+          kind: "steer",
+          flushable: false,
+        })),
+      ];
+    },
+    get flushableCount() {
+      return pending.length;
+    },
+    get isEmpty() {
+      return pending.length === 0 && steerEchoes.length === 0;
+    },
+  };
+}
+
+/**
  * Creates the slash-command popup + delivery toggle and returns the small
  * surface app.js wires into its composer listeners.
  *
@@ -158,8 +230,12 @@ export function createComposerCommands(deps) {
         resolve(response || { commands: [], available: false });
       }
       function onResponse(event) {
-        if (event.detail && event.detail.requestId !== requestId) return;
-        finish(normalizeCommandResponse(event.detail));
+        const detail = event.detail || {};
+        // The embedded server / broker mirrors the requestId back as `id` —
+        // accept both spellings so correlation survives either hop (F13).
+        const replyId = detail.requestId ?? detail.id;
+        if (replyId !== requestId) return;
+        finish(normalizeCommandResponse(detail));
       }
       wsClient.addEventListener("commandResponse", onResponse);
     });
@@ -373,6 +449,29 @@ export function createComposerCommands(deps) {
     return deliveryMode;
   }
 
+  /**
+   * Begin a send: reads the message and resolves its delivery decision
+   * BEFORE clearing the input and refreshing the controls. refresh() hides
+   * the toggle and resets the mode back to "queue", so reading the mode
+   * after the reset would silently downgrade a Steer-now send to Queue
+   * (F14). Returns `{ message, delivery }`, or null when there is nothing
+   * to send.
+   */
+  function beginSend() {
+    const message = input.value.trim();
+    if (!message) return null;
+    const delivery = resolveDelivery({
+      message,
+      isStreaming: isStreaming(),
+      deliveryMode,
+    });
+    input.value = "";
+    input.style.height = "auto";
+    refreshPopup();
+    renderToggle();
+    return { message, delivery };
+  }
+
   function setDeliveryMode(mode) {
     deliveryMode = mode === "steer" ? "steer" : "queue";
     renderToggle();
@@ -451,6 +550,7 @@ export function createComposerCommands(deps) {
     isPopupOpen,
     getDeliveryMode,
     setDeliveryMode,
+    beginSend,
     sendSteerNow,
     consumeStreamRejection,
     destroy: () => {

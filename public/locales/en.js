@@ -283,6 +283,48 @@ export const en = {
   "mcp.argsPlaceholder": "one argument per line",
   "mcp.envPlaceholder": "KEY=value (one per line)",
 
+  // ── fork availability (feature-detected from the server reply) ──
+  "fork.unavailable": "Fork unavailable in this build",
+
+  // ── account usage (Settings → Usage, above the cost dashboard) ──
+  "usage.accountUsage": "Account usage",
+  "usage.refresh": "Refresh",
+  "usage.empty": "No usage data available",
+  "usage.loadFailed": "Failed to load account usage",
+  "usage.authHint": "If this is an authentication error, log in on the Providers page first.",
+  "usage.general": "General",
+
+  // ── OAuth login (Configuration → Providers) ──
+  "oauth.title": "OAuth login",
+  "oauth.providerPlaceholder": "anthropic / openai-codex",
+  "oauth.login": "Login",
+  "oauth.browserHint": "Opened in your browser — if it didn't open, complete the flow manually…",
+  "oauth.pending": "Waiting for login to complete…",
+  "oauth.invalidProvider": "Provider may only contain letters, digits, dashes and underscores",
+  "oauth.loginSuccess": "Login complete",
+  "oauth.loginFailed": "Login failed",
+  "oauth.terminalHint": "If the flow needs terminal interaction, run: omp login {provider}",
+
+  // ── fork from message (hover action + palette) ──
+  "fork.fromHere": "Fork from here",
+  "fork.failed": "Fork failed",
+  "palette.fork": "Fork from latest",
+  "palette.forkDesc": "Create a fork from the latest message",
+  "status.forking": "Forking...",
+  "status.forked": "Fork created",
+
+  // ── extension UI request dialogs ──
+  "uiRequest.autoCancelIn": "Auto-cancels in {seconds}s",
+
+  // ── import sessions (sidebar) ──
+  "sidebar.importSessions": "Import sessions",
+  "session.importFromClaude": "From Claude Code",
+  "session.importFromCodex": "From Codex",
+  "status.importing": "Importing...",
+  "status.imported": "Import complete",
+  "session.importFailed": "Import failed",
+  "session.importTerminalOnly": "This source must be imported from a terminal: omp --from-{source}",
+
   // ── modals ──
   "dialog.agentConfig": "Agent Configuration",
 
