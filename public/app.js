@@ -11,6 +11,14 @@ import { setupVoiceInput } from "./app-voice-input.js";
 import { DialogHandler } from "./dialogs.js";
 import { FileBrowser } from "./file-browser.js";
 import { anchorHistoryToBottom } from "./history-scroll-anchor.js";
+import {
+  applyTranslations,
+  getLanguage,
+  onLanguageChanged,
+  SUPPORTED_LANGUAGES,
+  setLanguage,
+  t,
+} from "./i18n.js";
 import { setupMessagesInsets } from "./layout-insets.js";
 import { MessageRenderer } from "./message-renderer.js";
 import { resolveNewSessionLiveFile } from "./new-session-refresh.js";
@@ -280,7 +288,7 @@ document
 const gitBranchEl = document.createElement("div");
 gitBranchEl.id = "git-branch-indicator";
 gitBranchEl.className = "pill git-branch-indicator hidden";
-gitBranchEl.title = "Current git branch";
+gitBranchEl.title = t("header.currentGitBranch");
 document
   .querySelector(".header-right")
   ?.insertBefore(gitBranchEl, document.querySelector("#context-viz"));
@@ -294,7 +302,7 @@ function updateGitBranchIndicator(branch = "") {
   }
   gitBranchEl.classList.remove("hidden");
   gitBranchEl.textContent = name;
-  gitBranchEl.title = `Branch: ${name}`;
+  gitBranchEl.title = t("header.branch", { name });
 }
 
 async function refreshGitBranch() {
@@ -370,7 +378,9 @@ function setWorkspaceLaunchInProgress(inProgress) {
   if (openFolderBtn) {
     openFolderBtn.disabled = inProgress;
     openFolderBtn.setAttribute("aria-busy", inProgress ? "true" : "false");
-    openFolderBtn.title = inProgress ? "Opening workspace..." : "Open folder as workspace";
+    openFolderBtn.title = inProgress
+      ? t("sidebar.openingWorkspace")
+      : t("sidebar.openFolderAsWorkspace");
   }
 }
 
@@ -503,8 +513,11 @@ function refreshHeaderOpenAppButton() {
   }
   headerOpenApp.el.classList.remove("hidden");
   if (headerOpenApp.logo) headerOpenApp.logo.innerHTML = renderOpenAppLogo(selected);
-  headerOpenApp.btn.title = `Open ${path} in ${selected.label}`;
-  headerOpenApp.btn.setAttribute("aria-label", `Open workspace in ${selected.label}`);
+  headerOpenApp.btn.title = t("header.openPathInApp", { path, app: selected.label });
+  headerOpenApp.btn.setAttribute(
+    "aria-label",
+    t("header.openWorkspaceInApp", { app: selected.label }),
+  );
 }
 
 async function openWorkspaceInApp(app) {
@@ -540,8 +553,8 @@ function toggleHeaderOpenAppMenu() {
     row.type = "button";
     row.className = "header-open-app-menu-item";
     if (app.id === headerOpenApp.selectedId) row.classList.add("active");
-    row.title = `Open in ${app.label}`;
-    row.setAttribute("aria-label", `Open in ${app.label}`);
+    row.title = t("header.openInApp", { app: app.label });
+    row.setAttribute("aria-label", t("header.openInApp", { app: app.label }));
     row.innerHTML = `<span class="header-open-app-logo" aria-hidden="true">${renderOpenAppLogo(app)}</span><span>${app.label}</span>`;
     row.addEventListener("click", (ev) => {
       ev.stopPropagation();
@@ -1453,35 +1466,37 @@ const commandPalette = document.getElementById("command-palette");
 const commandPaletteOverlay = document.getElementById("command-palette-overlay");
 const commandList = document.getElementById("command-list");
 
+// Labels are translated at render time (see openCommandPalette) so an
+// interface-language switch updates an open palette too.
 const commands = [
   {
     icon: "🗜️",
-    label: "Compact",
-    desc: "Compact context to save tokens",
-    action: () => rpcCommand({ type: "compact" }, "Compacting..."),
+    labelKey: "palette.compact",
+    descKey: "palette.compactDesc",
+    action: () => rpcCommand({ type: "compact" }, t("status.compacting")),
   },
   {
     icon: "📋",
-    label: "Export HTML",
-    desc: "Export session as HTML file",
+    labelKey: "palette.exportHtml",
+    descKey: "palette.exportHtmlDesc",
     action: () => rpcExportHtml(),
   },
   {
     icon: "📊",
-    label: "Session Stats",
-    desc: "Show session statistics",
+    labelKey: "palette.sessionStats",
+    descKey: "palette.sessionStatsDesc",
     action: () => showSessionStats(),
   },
   {
     icon: "⬇️",
-    label: "Expand All Tools",
-    desc: "Expand all tool cards",
+    labelKey: "palette.expandAll",
+    descKey: "palette.expandAllDesc",
     action: () => toolCardRenderer.expandAll(),
   },
   {
     icon: "⬆️",
-    label: "Collapse All Tools",
-    desc: "Collapse all tool cards",
+    labelKey: "palette.collapseAll",
+    descKey: "palette.collapseAllDesc",
     action: () => toolCardRenderer.collapseAll(),
   },
 ];
@@ -1494,8 +1509,8 @@ function openCommandPalette() {
     el.innerHTML = `
       <div class="command-icon">${cmd.icon}</div>
       <div>
-        <div class="command-label">${cmd.label}</div>
-        <div class="command-desc">${cmd.desc}</div>
+        <div class="command-label">${t(cmd.labelKey)}</div>
+        <div class="command-desc">${t(cmd.descKey)}</div>
       </div>
     `;
     el.addEventListener("click", () => {
@@ -1526,37 +1541,37 @@ async function rpcCommand(cmd, statusMsg) {
     });
     const data = await resp.json();
     if (data.success) {
-      statusText.textContent = "Done";
+      statusText.textContent = t("status.done");
       setTimeout(() => {
-        statusText.textContent = "Connected";
+        statusText.textContent = t("status.connected");
       }, 2000);
     } else {
-      statusText.textContent = data.error || "Failed";
+      statusText.textContent = data.error || t("status.failed");
       setTimeout(() => {
-        statusText.textContent = "Connected";
+        statusText.textContent = t("status.connected");
       }, 3000);
     }
     return data;
   } catch (_e) {
-    statusText.textContent = "Error";
+    statusText.textContent = t("status.error");
     setTimeout(() => {
-      statusText.textContent = "Connected";
+      statusText.textContent = t("status.connected");
     }, 3000);
   }
 }
 
 async function rpcExportHtml() {
-  const data = await rpcCommand({ type: "export_html" }, "Exporting...");
+  const data = await rpcCommand({ type: "export_html" }, t("status.exporting"));
   if (data?.success && data.data?.path) {
-    statusText.textContent = `Exported: ${data.data.path}`;
+    statusText.textContent = t("status.exported", { path: data.data.path });
     setTimeout(() => {
-      statusText.textContent = "Connected";
+      statusText.textContent = t("status.connected");
     }, 4000);
   }
 }
 
 async function showSessionStats() {
-  const data = await rpcCommand({ type: "get_session_stats" }, "Loading stats...");
+  const data = await rpcCommand({ type: "get_session_stats" }, t("status.loadingStats"));
   if (data?.success && data.data) {
     const s = data.data;
     const lines = [
@@ -1581,17 +1596,17 @@ const modelDropdownLabel = document.getElementById("model-dropdown-label");
 const modelDropdownMenu = document.getElementById("model-dropdown-menu");
 const thinkingBtn = document.getElementById("thinking-btn");
 function formatThinkingLevelLabel(level) {
-  return `Thinking: ${level || "off"}`;
+  return t("composer.thinkingLevel", { level: level || "off" });
 }
 function formatCompactThinkingLevelLabel(level) {
-  return `Think ${level || "off"}`;
+  return t("composer.thinkLevel", { level: level || "off" });
 }
 function updateThinkingBtn() {
   thinkingBtn.textContent = formatCompactThinkingLevelLabel(currentThinkingLevel);
-  thinkingBtn.title = "Thinking effort controls reasoning depth. Click to cycle.";
+  thinkingBtn.title = t("composer.thinkingTitle");
   thinkingBtn.setAttribute(
     "aria-label",
-    `Thinking effort: ${currentThinkingLevel}. Click to cycle reasoning depth.`,
+    t("composer.thinkingAriaDynamic", { level: currentThinkingLevel }),
   );
   thinkingBtn.classList.toggle("off", currentThinkingLevel === "off");
 }
@@ -1685,7 +1700,7 @@ function maybeAutoOpenEmptyModelsDropdown() {
 
 function updateModelLabel() {
   const shortName = currentModelId.replace(/^claude-/, "").replace(/-\d{8}$/, "");
-  modelDropdownLabel.textContent = shortName || "model";
+  modelDropdownLabel.textContent = shortName || t("model.defaultLabel");
 }
 
 function toggleModelDropdown() {
@@ -1703,7 +1718,7 @@ function openModelDropdown() {
   // Search input
   const search = document.createElement("input");
   search.className = "model-dropdown-search";
-  search.placeholder = "Search models…";
+  search.placeholder = t("model.search");
   search.type = "text";
   modelDropdownMenu.appendChild(search);
 
@@ -1723,9 +1738,9 @@ function openModelDropdown() {
       empty.className = "model-dropdown-empty";
       empty.innerHTML = `
         <div style="padding:14px;color:var(--text-dim);font-size:12px;line-height:1.5">
-          <div style="color:var(--text-primary);margin-bottom:6px">No models available</div>
-          <div>No API keys configured. Set a key in Settings &rarr; Configuration.</div>
-          <button type="button" class="btn-primary" style="margin-top:10px">Open Settings</button>
+          <div style="color:var(--text-primary);margin-bottom:6px">${t("model.noneAvailable")}</div>
+          <div>${t("model.noKeys")}</div>
+          <button type="button" class="btn-primary" style="margin-top:10px">${t("model.openSettings")}</button>
         </div>`;
       empty.querySelector("button").addEventListener("click", () => {
         closeModelDropdown();
@@ -1757,7 +1772,7 @@ function openModelDropdown() {
         const display = m.id.replace(/^claude-/, "").replace(/-\d{8}$/, "");
         await rpcCommand(
           { type: "set_model", provider: m.provider, modelId: m.id },
-          `Switching to ${display}...`,
+          t("status.switchingModel", { model: display }),
         );
         currentModelId = m.id;
         updateModelLabel();
@@ -1805,7 +1820,7 @@ document.addEventListener("click", (e) => {
 
 // Thinking level button — cycles through levels
 thinkingBtn.addEventListener("click", async () => {
-  const data = await rpcCommand({ type: "cycle_thinking_level" }, "Cycling thinking...");
+  const data = await rpcCommand({ type: "cycle_thinking_level" }, t("status.cyclingThinking"));
   if (data?.success && data.data?.level) {
     currentThinkingLevel = data.data.level;
     updateThinkingBtn();
@@ -2072,7 +2087,7 @@ async function newSession() {
   updateTokenUsage();
   const data = await rpcCommand({ type: "new_session" }, "Starting new session...");
   if (data?.success === false || data?.data?.cancelled) {
-    messageRenderer.renderError(data?.error || "New session was cancelled");
+    messageRenderer.renderError(data?.error || t("session.cancelled"));
     return;
   }
   await resetUiForNewSession();
@@ -2303,7 +2318,7 @@ async function renderSelectedSessionHistory(session, project) {
     return;
   }
 
-  messageRenderer.renderSystemMessage("Loading session…");
+  messageRenderer.renderSystemMessage(t("session.loadingSession"));
   const dirName = project?.dirName;
   const file = session.file;
   if (!dirName || !file) {
@@ -2352,7 +2367,7 @@ async function switchSession(sessionFile, session = null, project = null) {
     toolCardRenderer.clear();
 
     if (sessionFile && session) {
-      messageRenderer.renderSystemMessage("Loading session...");
+      messageRenderer.renderSystemMessage(t("session.loadingSession"));
 
       const dirName = project?.dirName;
       const file = session.file;
@@ -2572,11 +2587,11 @@ function updateMirrorInputState() {
   const inputArea = document.querySelector(".input-area");
   if (viewingActiveSession) {
     messageInput.disabled = false;
-    messageInput.placeholder = "Message...";
+    messageInput.placeholder = t("composer.message");
     inputArea?.classList.remove("mirror-readonly");
   } else {
     messageInput.disabled = true;
-    messageInput.placeholder = "Viewing historical session (read-only)";
+    messageInput.placeholder = t("composer.readonlyHistory");
     inputArea?.classList.add("mirror-readonly");
   }
 }
@@ -2748,7 +2763,10 @@ function updateTokenUsage() {
     } else if (pct >= 60) {
       tokenUsageEl.classList.add("warning");
     }
-    tokenUsageEl.title = `Context: ${(lastInputTokens / 1000).toFixed(1)}k / ${(contextWindowSize / 1000).toFixed(0)}k tokens`;
+    tokenUsageEl.title = t("ctx.usageTitle", {
+      used: `${(lastInputTokens / 1000).toFixed(1)}k`,
+      total: `${(contextWindowSize / 1000).toFixed(0)}k`,
+    });
     if (pct >= 80) {
       showCompactButton();
     } else {
@@ -2767,10 +2785,10 @@ function showCompactButton() {
   const btn = document.createElement("button");
   btn.id = "compact-btn";
   btn.className = "compact-btn";
-  btn.textContent = "Compact";
-  btn.title = "Context is over 80% — compact to save tokens";
+  btn.textContent = t("ctx.compact");
+  btn.title = t("ctx.compactTitle");
   btn.addEventListener("click", () => {
-    rpcCommand({ type: "compact" }, "Compacting...");
+    rpcCommand({ type: "compact" }, t("status.compacting"));
     hideCompactButton();
   });
   // Insert next to token usage in header
@@ -2830,7 +2848,7 @@ async function openLanQrModal() {
     }
     if (lanQrLoading) lanQrLoading.style.display = "none";
   } catch {
-    if (lanQrLoading) lanQrLoading.textContent = "QR code unavailable";
+    if (lanQrLoading) lanQrLoading.textContent = t("session.qrUnavailable");
   }
 }
 
@@ -2865,10 +2883,10 @@ async function refreshLanUrl() {
     lanUrl = typeof data?.lanUrl === "string" ? data.lanUrl : "";
     if (!lanUrl && lanUrls.length > 0) lanUrl = lanUrls[0];
     if (tailscaleUrl) {
-      statusText.textContent = "Connected • TS";
+      statusText.textContent = t("status.connectedTs");
       statusText.title = tailscaleUrl;
     } else if (lanUrl) {
-      statusText.textContent = "Connected • LAN";
+      statusText.textContent = t("status.connectedLan");
       statusText.title = lanUrl;
     }
     updateLanQrButton(lanUrl);
@@ -2877,18 +2895,24 @@ async function refreshLanUrl() {
   }
 }
 
+// Last status reported by updateConnectionStatus ("connected" /
+// "disconnected"), so an interface-language switch can re-render the
+// status text in the new language without a WS round-trip.
+let lastConnectionStatus = null;
+
 function updateConnectionStatus(status) {
+  lastConnectionStatus = status;
   statusIndicator.className = `status-indicator ${status}`;
 
   if (status === "connected") {
     if (tailscaleUrl) {
-      statusText.textContent = "Connected • TS";
+      statusText.textContent = t("status.connectedTs");
       statusText.title = tailscaleUrl;
     } else if (lanUrl) {
-      statusText.textContent = "Connected • LAN";
+      statusText.textContent = t("status.connectedLan");
       statusText.title = lanUrl;
     } else {
-      statusText.textContent = "Connected";
+      statusText.textContent = t("status.connected");
       statusText.title = "";
     }
     // Fetch network link metadata on first connect
@@ -2896,7 +2920,7 @@ function updateConnectionStatus(status) {
       void refreshLanUrl();
     }
   } else if (status === "disconnected") {
-    statusText.textContent = "Disconnected";
+    statusText.textContent = t("status.disconnected");
   }
 }
 
@@ -2909,11 +2933,11 @@ function updateUI() {
   if (isStreaming) {
     statusIndicator.classList.add("streaming");
     statusIndicator.classList.remove("connected");
-    statusText.textContent = "Working...";
+    statusText.textContent = t("status.working");
   } else {
     statusIndicator.classList.remove("streaming");
     statusIndicator.classList.add("connected");
-    statusText.textContent = "Connected";
+    statusText.textContent = t("status.connected");
   }
 
   messageInput.disabled = !onboarding.canType;
@@ -2934,9 +2958,9 @@ function updateUI() {
     messageInput.disabled = true;
     sendBtn.disabled = true;
     abortBtn.classList.add("hidden");
-    messageInput.placeholder = "Waiting for current session to finish…";
+    messageInput.placeholder = t("composer.waitingFinish");
   } else if (onboarding.canQuery) {
-    messageInput.placeholder = "Type a message...";
+    messageInput.placeholder = t("composer.placeholder");
   }
 }
 
@@ -3092,8 +3116,7 @@ async function loadBrowsePackages(force = false) {
     return;
   }
   browseLoading = true;
-  browseListEl.innerHTML =
-    '<div class="settings-api-keys-loading pkg-browse-full-row">Loading packages...</div>';
+  browseListEl.innerHTML = `<div class="settings-api-keys-loading pkg-browse-full-row">${t("settings.loadingPackages")}</div>`;
   try {
     const [packages, installed] = await Promise.all([
       fetchBrowsePackages(),
@@ -3555,7 +3578,7 @@ async function openSettings() {
     selectSettingsTab("general");
     buildThemeGrid();
     if (piVersionValue) {
-      piVersionValue.textContent = piVersionCache || "Loading...";
+      piVersionValue.textContent = piVersionCache || t("common.loading");
     }
     setTimeout(() => {
       if (!settingsPanel.classList.contains("hidden")) {
@@ -3635,6 +3658,7 @@ setupSettingsToggles({
   toggleShowThinking,
   toggleAuth,
   rpcCommand,
+  formatThinkingLevelLabel,
   getCurrentThinkingLevel: () => currentThinkingLevel,
   setCurrentThinkingLevel: (level) => {
     currentThinkingLevel = level;
@@ -3677,6 +3701,50 @@ agentSettings.attach(document.getElementById("agent-settings-container"));
 // Restore saved theme
 const savedTheme = getCurrentTheme();
 applyTheme(savedTheme);
+
+// ═══════════════════════════════════════
+// Interface language (Settings → General → Language)
+// ═══════════════════════════════════════
+
+const languageSelect = document.getElementById("language-select");
+
+function setupLanguageSetting() {
+  if (!languageSelect) return;
+  // Options are labeled in their own language (English / 简体中文).
+  for (const lang of SUPPORTED_LANGUAGES) {
+    const option = document.createElement("option");
+    option.value = lang.id;
+    option.textContent = lang.label;
+    languageSelect.appendChild(option);
+  }
+  languageSelect.value = getLanguage();
+  languageSelect.addEventListener("change", () => {
+    setLanguage(languageSelect.value);
+  });
+}
+
+// Translate the static markup once on boot. Subsequent switches go through
+// setLanguage(), which re-runs applyTranslations() itself.
+applyTranslations();
+setupLanguageSetting();
+
+// setLanguage() has already refreshed the data-i18n markup; re-render the
+// JS-owned dynamic labels that static attributes cannot reach. Everything
+// here is local state — no re-fetch needed.
+onLanguageChanged(() => {
+  updateThinkingBtn();
+  updateModelLabel();
+  setWorkspaceLaunchInProgress(workspaceLaunchInProgress);
+  if (state.isStreaming) {
+    statusText.textContent = t("status.working");
+  } else if (lastConnectionStatus) {
+    updateConnectionStatus(lastConnectionStatus);
+  }
+  updateTokenUsage();
+  const modelSearch = modelDropdownMenu.querySelector(".model-dropdown-search");
+  if (modelSearch) modelSearch.placeholder = t("model.search");
+  if (!commandPalette.classList.contains("hidden")) openCommandPalette();
+});
 
 setupContextViz({
   tokenUsageEl,

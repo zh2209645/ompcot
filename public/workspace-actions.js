@@ -29,6 +29,7 @@
 // across the navigation boundary via sessionStorage; the new page boots
 // straight into it (see index.html bootstrap script).
 
+import { t } from "./i18n.js";
 import { appendOmpBinaryHint } from "./omp-binary-errors.js";
 
 // Append the broker WS URL to a navigation target so the freshly-loaded
@@ -99,7 +100,7 @@ async function attachToWorkspace({
   const existing = instances.find((i) => i.cwd === targetCwd);
   let targetPort = existing?.port;
 
-  const dismissOverlay = runOnBeforeSwap(onBeforeSwap, "Opening workspace…");
+  const dismissOverlay = runOnBeforeSwap(onBeforeSwap, t("sidebar.openingWorkspace"));
   if (!targetPort) {
     try {
       targetPort = await transport.openWorkspace(targetCwd, {
@@ -109,7 +110,7 @@ async function attachToWorkspace({
       });
     } catch (e) {
       dismissOverlay();
-      if (renderError) renderError(appendOmpBinaryHint(`Failed to attach to workspace: ${e}`));
+      if (renderError) renderError(appendOmpBinaryHint(t("ws.attachFailed", { error: String(e) })));
       return null;
     }
   }
@@ -136,7 +137,7 @@ export async function startInWindowNewSession({
   renderError,
 }) {
   if (!transport) {
-    renderError("New session is only supported with a native host.");
+    renderError(t("ws.newSessionNativeOnly"));
     return false;
   }
 
@@ -160,12 +161,12 @@ export async function startInWindowNewSession({
   }
 
   if (!targetCwd) {
-    renderError("Failed to start new session: current workspace path is unavailable");
+    renderError(t("ws.newSessionNoCwd"));
     return false;
   }
 
   if (typeof navigate !== "function") {
-    renderError("Failed to start new session: navigation is unavailable");
+    renderError(t("ws.newSessionNavUnavailable"));
     return false;
   }
 
@@ -189,7 +190,7 @@ export async function startInWindowNewSession({
       // If the in-place target port has drifted to a dead/unmanaged process,
       // don't fail — recover by spawning a fresh process for this workspace.
       if (!isDeadPortError(e)) {
-        renderError(`Failed to start new session: ${e}`);
+        renderError(t("ws.newSessionFailed", { error: String(e) }));
         return false;
       }
       console.warn("[Session route] newSession:in-place-dead-port, spawning fresh process", {
@@ -206,7 +207,7 @@ export async function startInWindowNewSession({
     onBeforeSwap,
     onParallelSessionCreated,
     renderError,
-    label: "Starting session…",
+    labelKey: "status.startingSession",
     debugTag: "newSession",
   });
 }
@@ -222,11 +223,11 @@ async function spawnFreshSession({
   onBeforeSwap,
   onParallelSessionCreated,
   renderError,
-  label,
+  labelKey,
   debugTag,
-  errorLabel = "Failed to start new session",
+  errorKey = "ws.newSessionFailed",
 }) {
-  const dismissOverlay = runOnBeforeSwap(onBeforeSwap, label);
+  const dismissOverlay = runOnBeforeSwap(onBeforeSwap, t(labelKey));
   try {
     // Wait before both in-place activation and full-page navigation. Otherwise
     // remote/mobile clients can land on a not-yet-listening embedded port and
@@ -257,7 +258,7 @@ async function spawnFreshSession({
     return true;
   } catch (e) {
     dismissOverlay();
-    renderError(appendOmpBinaryHint(`${errorLabel}: ${e}`));
+    renderError(appendOmpBinaryHint(t(errorKey, { error: String(e) })));
     return false;
   }
 }
@@ -287,18 +288,18 @@ export async function startNewProjectChat({
   renderError,
 }) {
   if (!transport) {
-    renderError("Project new chat is only supported with a native host.");
+    renderError(t("ws.newChatNativeOnly"));
     return false;
   }
 
   const targetCwd = resolveProjectCwd(project);
   if (!targetCwd) {
-    renderError("Failed to start new chat: project path is unavailable");
+    renderError(t("ws.newChatNoPath"));
     return false;
   }
 
   if (typeof navigate !== "function") {
-    renderError("Failed to start new chat: navigation is unavailable");
+    renderError(t("ws.newChatNavUnavailable"));
     return false;
   }
 
@@ -331,7 +332,7 @@ export async function startNewProjectChat({
       // Drifted/dead foreground port: fall through to spawning a fresh
       // process for this workspace instead of surfacing the raw RPC error.
       if (!isDeadPortError(e)) {
-        renderError(`Failed to start new chat: ${e}`);
+        renderError(t("ws.newChatFailed", { error: String(e) }));
         return false;
       }
       console.warn("[Session route] projectNewChat:in-place-dead-port, spawning fresh process", {
@@ -345,9 +346,9 @@ export async function startNewProjectChat({
         onBeforeSwap,
         onParallelSessionCreated,
         renderError,
-        label: "Starting new chat…",
+        labelKey: "ws.startingNewChat",
         debugTag: "projectNewChat",
-        errorLabel: "Failed to start new chat",
+        errorKey: "ws.newChatFailed",
       });
     }
   }
@@ -372,9 +373,9 @@ export async function startNewProjectChat({
     onBeforeSwap,
     onParallelSessionCreated,
     renderError,
-    label: "Starting new chat…",
+    labelKey: "ws.startingNewChat",
     debugTag: "projectNewChat",
-    errorLabel: "Failed to start new chat",
+    errorKey: "ws.newChatFailed",
   });
 }
 
@@ -392,13 +393,13 @@ export async function openProjectWorkspace({
   renderError,
 }) {
   if (!transport) {
-    renderError("Open project is only supported with a native host.");
+    renderError(t("ws.openProjectNativeOnly"));
     return false;
   }
 
   const targetCwd = resolveProjectCwd(project);
   if (!targetCwd) {
-    renderError("Failed to open project: project path is unavailable");
+    renderError(t("ws.openProjectNoPath"));
     return false;
   }
 
@@ -414,7 +415,7 @@ export async function openProjectWorkspace({
     });
     return result !== null;
   } catch (e) {
-    renderError(`Failed to open project: ${e}`);
+    renderError(t("ws.openProjectFailed", { error: String(e) }));
     return false;
   }
 }
@@ -428,7 +429,7 @@ export async function openFolderAsWorkspace({
   renderError,
 }) {
   if (!transport) {
-    renderError("Open folder is only supported with a native host.");
+    renderError(t("ws.openFolderNativeOnly"));
     return false;
   }
 
@@ -447,7 +448,7 @@ export async function openFolderAsWorkspace({
     });
     return result !== null;
   } catch (e) {
-    renderError(`Failed to open folder: ${e}`);
+    renderError(t("ws.openFolderFailed", { error: String(e) }));
     return false;
   }
 }

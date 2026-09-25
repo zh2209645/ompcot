@@ -7,9 +7,10 @@ export function setupSettingsToggles({
   getCurrentThinkingLevel,
   setCurrentThinkingLevel,
   updateThinkingBtn,
+  // Optional i18n formatter (app.js passes a t()-based one); defaults to
+  // the English label so standalone use keeps working.
+  formatThinkingLevelLabel = (level) => `Thinking: ${level || "off"}`,
 }) {
-  const formatThinkingLevelLabel = (level) => `Thinking: ${level || "off"}`;
-
   toggleAutoCompact?.addEventListener("click", async () => {
     const isOn = toggleAutoCompact.classList.contains("on");
     toggleAutoCompact.className = `settings-toggle${isOn ? "" : " on"}`;

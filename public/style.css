@@ -2402,6 +2402,28 @@ body {
   background: white;
 }
 
+/* Interface language dropdown (Settings → General → Language). Mirrors the
+   pkg-browse-sort control so it reads as a native settings form control. */
+.settings-select {
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  outline: none;
+}
+
+.settings-select:hover {
+  border-color: var(--border-hover);
+}
+
+.settings-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
 .settings-value-btn {
   padding: 4px 10px;
   min-width: 48px;

@@ -2,6 +2,8 @@
  * File Browser — right sidebar file tree with drag-and-drop
  */
 
+import { onLanguageChanged, t } from "./i18n.js";
+
 const FILE_ICONS = {
   // Folders
   directory: "📁",
@@ -63,12 +65,21 @@ export class FileBrowser {
     this.pathEl = pathEl;
     this.messageInput = messageInput;
     this.currentPath = null;
+    // Which placeholder label ("loading" | "error" | "empty") is on screen,
+    // or null when a real listing (or a server-provided error) is shown.
+    this.labelState = null;
+
+    // Re-render the current placeholder label when the interface language
+    // changes and the browser pane is open; rendered listings contain only
+    // file names/paths, which are never translated.
+    this.unsubscribeLanguageChanged = onLanguageChanged(() => this.refreshLabels());
 
     this.setupDropTarget();
   }
 
   async load(dirPath) {
-    this.container.innerHTML = '<div class="file-loading">Loading…</div>';
+    this.labelState = "loading";
+    this.container.innerHTML = `<div class="file-loading">${t("files.loading")}</div>`;
 
     try {
       const url = dirPath ? `/api/files?path=${encodeURIComponent(dirPath)}` : "/api/files";
@@ -76,6 +87,8 @@ export class FileBrowser {
       const data = await res.json();
 
       if (data.error) {
+        // Server-provided message — dynamic content, keep verbatim.
+        this.labelState = null;
         this.container.innerHTML = `<div class="file-loading">${data.error}</div>`;
         return;
       }
@@ -85,8 +98,23 @@ export class FileBrowser {
       this.pathEl.title = data.path;
       this.render(data.items);
     } catch (_err) {
-      this.container.innerHTML = '<div class="file-loading">Failed to load</div>';
+      this.labelState = "error";
+      this.container.innerHTML = `<div class="file-loading">${t("files.loadFailed")}</div>`;
     }
+  }
+
+  refreshLabels() {
+    if (!this.container.isConnected || this.container.closest(".collapsed")) return;
+    const label =
+      this.labelState === "loading"
+        ? t("files.loading")
+        : this.labelState === "error"
+          ? t("files.loadFailed")
+          : this.labelState === "empty"
+            ? t("files.emptyDirectory")
+            : null;
+    if (label === null) return;
+    this.container.innerHTML = `<div class="file-loading">${label}</div>`;
   }
 
   getParentPath() {
@@ -100,9 +128,11 @@ export class FileBrowser {
     this.container.innerHTML = "";
 
     if (items.length === 0) {
-      this.container.innerHTML = '<div class="file-loading">Empty directory</div>';
+      this.labelState = "empty";
+      this.container.innerHTML = `<div class="file-loading">${t("files.emptyDirectory")}</div>`;
       return;
     }
+    this.labelState = null;
 
     for (const item of items) {
       const el = document.createElement("div");

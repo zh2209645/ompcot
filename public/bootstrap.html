@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Ompcot Startup</title>
+  <title data-i18n="bootstrap.windowTitle">Ompcot Startup</title>
   <style>
     :root { color-scheme: dark; }
     body {
@@ -63,17 +63,21 @@
 </head>
 <body>
   <main class="card">
-    <h1>Ompcot could not start</h1>
-    <p>The embedded <code>omp</code> runtime that ships with Ompcot failed to launch.</p>
-    <p>This usually means the installation is incomplete or corrupted. Reinstalling Ompcot normally fixes it. Click <b>Retry startup</b> after reinstalling or rebooting.</p>
+    <h1 data-i18n="bootstrap.heading">Ompcot could not start</h1>
+    <p data-i18n-html="bootstrap.embeddedFailed">The embedded <code>omp</code> runtime that ships with Ompcot failed to launch.</p>
+    <p data-i18n-html="bootstrap.reinstallHint">This usually means the installation is incomplete or corrupted. Reinstalling Ompcot normally fixes it. Click <b>Retry startup</b> after reinstalling or rebooting.</p>
     <div id="startup-error" class="error"></div>
     <div class="actions">
-      <button id="retry-btn" type="button">Retry startup</button>
-      <button id="pick-binary-btn" type="button">Specify omp binary path…</button>
+      <button id="retry-btn" type="button" data-i18n="bootstrap.retry">Retry startup</button>
+      <button id="pick-binary-btn" type="button" data-i18n="bootstrap.pickBinary">Specify omp binary path…</button>
     </div>
     <div id="hint" class="hint"></div>
   </main>
-  <script>
+  <script type="module">
+    import { applyTranslations, t } from './i18n.js';
+
+    applyTranslations();
+
     const retryBtn = document.getElementById('retry-btn');
     const pickBinaryBtn = document.getElementById('pick-binary-btn');
     const hint = document.getElementById('hint');
@@ -89,7 +93,7 @@
     function getInvoke() {
       const invoke = window.__TAURI__?.core?.invoke;
       if (typeof invoke !== 'function') {
-        hint.textContent = 'Tauri runtime is unavailable in this window.';
+        hint.textContent = t('bootstrap.tauriUnavailable');
         return null;
       }
       return invoke;
@@ -100,12 +104,12 @@
       if (!invoke) return;
       retryBtn.disabled = true;
       pickBinaryBtn.disabled = true;
-      hint.textContent = 'Starting Pi runtime...';
+      hint.textContent = t('bootstrap.startingRuntime');
       try {
         const port = await invoke('cmd_retry_startup');
         window.location.href = `http://localhost:${port}`;
       } catch (error) {
-        hint.textContent = String(error?.message || error || 'Startup failed');
+        hint.textContent = String(error?.message || error || t('bootstrap.startupFailed'));
         retryBtn.disabled = false;
         pickBinaryBtn.disabled = false;
       }
@@ -123,14 +127,14 @@
       try {
         const picked = await invoke('cmd_pick_omp_binary');
         if (picked) {
-          hint.textContent = `Using omp binary: ${picked}`;
+          hint.textContent = t('bootstrap.usingBinary', { path: picked });
           await retryStartup();
         }
         // picked == null → user cancelled the dialog; do nothing.
       } catch (error) {
         // The picked file was rejected (not a valid omp binary) — say why.
         errorBox.style.display = 'block';
-        errorBox.textContent = String(error?.message || error || 'Invalid omp binary');
+        errorBox.textContent = String(error?.message || error || t('bootstrap.invalidBinary'));
       } finally {
         pickBinaryBtn.disabled = false;
       }

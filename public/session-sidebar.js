@@ -2,6 +2,8 @@
  * Session Sidebar - Lists sessions grouped by project, handles switching
  */
 
+import { onLanguageChanged, t } from "./i18n.js";
+
 /**
  * Read a JSON array from localStorage without letting bad input break the
  * sidebar (and therefore the whole app). Corrupt JSON, non-array values, or
@@ -56,6 +58,14 @@ export class SessionSidebar {
     // brand-new session's just-written .jsonl).
     this.loadSeq = 0;
     this.loadCommitted = 0;
+    // null = no error rendered; true/false = the "OMP runtime down" variant
+    // of the load-error message currently on screen.
+    this.loadErrorState = null;
+
+    // Re-render on language change: every label in this list is built at
+    // render time, so a fresh pass through the existing render path picks
+    // up the new language.
+    this.unsubscribeLanguageChanged = onLanguageChanged(() => this.rerenderOnLanguageChange());
 
     // Close context menu on click anywhere
     document.addEventListener("click", () => {
@@ -198,20 +208,24 @@ export class SessionSidebar {
   }
 
   async confirmArchivedDeletion(count) {
-    const message = `Delete ${count} archived session${count === 1 ? "" : "s"} permanently? This cannot be undone.`;
+    const message =
+      count === 1
+        ? t("dialog.deleteArchivedOne", { count })
+        : t("dialog.deleteArchivedMany", { count });
     return this.showFallbackConfirmDialog(message);
   }
 
   showFallbackConfirmDialog(message) {
+    const dialogTitle = t("dialog.deleteArchivedTitle");
     return new Promise((resolve) => {
       const overlay = document.createElement("div");
       overlay.className = "sidebar-confirm-overlay";
       overlay.innerHTML = `
-        <div class="sidebar-confirm-dialog" role="dialog" aria-modal="true" aria-label="Delete archived sessions">
+        <div class="sidebar-confirm-dialog" role="dialog" aria-modal="true" aria-label="${this.escapeHtml(dialogTitle)}">
           <div class="sidebar-confirm-message">${this.escapeHtml(message)}</div>
           <div class="sidebar-confirm-actions">
-            <button type="button" class="sidebar-confirm-no">Cancel</button>
-            <button type="button" class="sidebar-confirm-yes">Delete</button>
+            <button type="button" class="sidebar-confirm-no">${t("common.cancel")}</button>
+            <button type="button" class="sidebar-confirm-yes">${t("dialog.delete")}</button>
           </div>
         </div>
       `;
@@ -257,6 +271,7 @@ export class SessionSidebar {
         const projects = data.projects || [];
         if (seq < this.loadCommitted) return this.projects;
         this.loadCommitted = seq;
+        this.loadErrorState = null;
         this.projects = projects;
         this.render();
         return this.projects;
@@ -275,14 +290,28 @@ export class SessionSidebar {
       reason.includes("failed to fetch") ||
       reason.includes("networkerror") ||
       reason.includes("load failed");
-    const message = likelyRuntimeDown
-      ? "Failed to load sessions. OMP runtime may be unavailable."
-      : "Failed to load sessions.";
-    this.container.innerHTML = `<div class="session-loading">${message} <button class="retry-link" id="retry-load-sessions">Retry</button></div>`;
+    this.loadErrorState = likelyRuntimeDown;
+    this.renderLoadError(likelyRuntimeDown);
+  }
+
+  renderLoadError(likelyRuntimeDown) {
+    const message = likelyRuntimeDown ? t("session.loadFailedRuntime") : t("session.loadFailed");
+    this.container.innerHTML = `<div class="session-loading">${message} <button class="retry-link" id="retry-load-sessions">${t("session.retry")}</button></div>`;
     const retryBtn = this.container.querySelector("#retry-load-sessions");
     if (retryBtn) {
       retryBtn.addEventListener("click", () => this.loadSessions());
     }
+  }
+
+  rerenderOnLanguageChange() {
+    // Keep the current view: error notice, or the full list (plus any
+    // full-text search results layered on top of it).
+    if (this.loadErrorState !== null) {
+      this.renderLoadError(this.loadErrorState);
+      return;
+    }
+    this.render();
+    if (this._searchResults?.length && this.searchQuery) this.renderSearchResults();
   }
 
   setSearchQuery(query) {
@@ -334,7 +363,7 @@ export class SessionSidebar {
 
     const header = document.createElement("div");
     header.className = "project-header search-results-header";
-    header.innerHTML = `<span>🔍</span> <span>Message matches</span> <span class="project-count">${this._searchResults.length}</span>`;
+    header.innerHTML = `<span>🔍</span> <span>${t("session.messageMatches")}</span> <span class="project-count">${this._searchResults.length}</span>`;
     group.appendChild(header);
 
     const sessionsDiv = document.createElement("div");
@@ -349,7 +378,7 @@ export class SessionSidebar {
         item.classList.add("active");
       }
 
-      const title = result.sessionName || result.firstMessage || "Untitled";
+      const title = result.sessionName || result.firstMessage || t("session.untitled");
       const snippet = result.matches[0]?.snippet || "";
       const matchCount = result.matches.length;
       const time = this.formatTime(result.sessionTimestamp);
@@ -359,7 +388,7 @@ export class SessionSidebar {
           <div class="session-title" title="${this.escapeHtml(title)}">${this.escapeHtml(title)}</div>
         </div>
         <div class="search-snippet">${this.highlightMatch(snippet, this.searchQuery)}</div>
-        <div class="session-meta">${time}${matchCount > 1 ? ` · ${matchCount} matches` : ""}</div>
+        <div class="session-meta">${time}${matchCount > 1 ? ` · ${t("session.matchCount", { count: matchCount })}` : ""}</div>
       `;
 
       // Find the matching project/session to pass to onSessionSelect
@@ -476,7 +505,7 @@ export class SessionSidebar {
     const items = [
       {
         icon: isArchived ? "📤" : "🗄️",
-        label: isArchived ? "Unarchive" : "Archive",
+        label: isArchived ? t("session.unarchive") : t("session.archive"),
         action: () => this.toggleArchived(session.filePath),
       },
     ];
@@ -596,14 +625,16 @@ export class SessionSidebar {
       item.classList.add("streaming");
     }
 
-    const title = session.name || session.firstMessage || "Empty session";
+    const title = session.name || session.firstMessage || t("session.emptySession");
     const time = this.formatTime(session.timestamp);
     const tmuxTag = session.tmux ? '<span class="session-tag tmux-tag">tmux</span>' : "";
     const favIcon = this.isFavourite(session.filePath)
       ? '<span class="session-fav-icon">★</span>'
       : "";
     const isArchived = this.isArchived(session.filePath);
-    const archiveBtnLabel = isArchived ? "Unarchive session" : "Archive session";
+    const archiveBtnLabel = isArchived
+      ? t("session.unarchiveSession")
+      : t("session.archiveSession");
     const archiveBtnIcon = `
       <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
         <rect x="3" y="4" width="18" height="4" rx="1.5"></rect>
@@ -674,7 +705,7 @@ export class SessionSidebar {
       const showMoreButton = document.createElement("button");
       showMoreButton.type = "button";
       showMoreButton.className = "project-sessions-toggle";
-      showMoreButton.textContent = "Show more";
+      showMoreButton.textContent = t("session.showMore");
       showMoreButton.addEventListener("click", (event) => {
         event.stopPropagation();
         this.setProjectVisibleSessionCount(project, visibleCount + this.projectSessionStep);
@@ -687,7 +718,7 @@ export class SessionSidebar {
       const showLessButton = document.createElement("button");
       showLessButton.type = "button";
       showLessButton.className = "project-sessions-toggle project-sessions-toggle-less";
-      showLessButton.textContent = "Show less";
+      showLessButton.textContent = t("session.showLess");
       showLessButton.addEventListener("click", (event) => {
         event.stopPropagation();
         this.setProjectVisibleSessionCount(
@@ -731,7 +762,7 @@ export class SessionSidebar {
 
       const header = document.createElement("div");
       header.className = "project-header favourites-header";
-      header.innerHTML = `<span class="fav-star">★</span> <span>Favourites</span> <span class="project-count">${favSessions.length}</span>`;
+      header.innerHTML = `<span class="fav-star">★</span> <span>${t("session.favourites")}</span> <span class="project-count">${favSessions.length}</span>`;
       favGroup.appendChild(header);
 
       const sessionsDiv = document.createElement("div");
@@ -761,11 +792,13 @@ export class SessionSidebar {
       const pathParts = project.path.split("/").filter(Boolean);
       const shortPath = pathParts.length > 0 ? pathParts[pathParts.length - 1] : project.path;
 
+      const newChatLabel = this.escapeHtml(t("session.newChatIn", { name: shortPath }));
+
       header.innerHTML = `
         <span class="chevron">▼</span>
         <span class="project-name" title="${project.path}">${shortPath}</span>
         <span class="project-count">${visibleSessions.length}</span>
-        <button class="project-new-chat-btn" title="New chat in ${this.escapeHtml(shortPath)}" aria-label="New chat in ${this.escapeHtml(shortPath)}">
+        <button class="project-new-chat-btn" title="${newChatLabel}" aria-label="${newChatLabel}">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         </button>
       `;
@@ -829,11 +862,12 @@ export class SessionSidebar {
 
       const header = document.createElement("div");
       header.className = `project-header archived-header${this.archivedCollapsed ? " collapsed" : ""}`;
+      const deleteAllLabel = this.escapeHtml(t("session.deleteAllArchived"));
       header.innerHTML = `
         <span class="chevron">▼</span>
-        <span>Archived</span>
+        <span>${t("session.archived")}</span>
         <span class="project-count">${archivedSessions.length}</span>
-        <button class="archived-delete-all-btn" title="Delete all archived sessions" aria-label="Delete all archived sessions">
+        <button class="archived-delete-all-btn" title="${deleteAllLabel}" aria-label="${deleteAllLabel}">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="3 6 5 6 21 6"></polyline>
             <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
@@ -874,15 +908,16 @@ export class SessionSidebar {
   }
 
   renderEmptyState() {
+    const openProjectAria = this.escapeHtml(t("session.openProjectAria"));
     this.container.innerHTML = `
       <div class="session-empty-state">
-        <button type="button" class="session-empty-open-project" title="Open project" aria-label="Open project">
+        <button type="button" class="session-empty-open-project" title="${openProjectAria}" aria-label="${openProjectAria}">
           <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"></path>
             <line x1="12" y1="12" x2="12" y2="18"></line>
             <line x1="9" y1="15" x2="15" y2="15"></line>
           </svg>
-          <span>Open Project</span>
+          <span>${t("session.openProject")}</span>
         </button>
       </div>
     `;
@@ -908,10 +943,10 @@ export class SessionSidebar {
       const diffHours = Math.floor(diffMs / 3600000);
       const days = Math.floor(diffMs / 86400000);
 
-      if (diffMins < 1) return "Just now";
-      if (diffMins < 60) return `${diffMins}m ago`;
-      if (diffHours < 24) return `${diffHours}h ago`;
-      if (days === 1) return "Yesterday";
+      if (diffMins < 1) return t("session.justNow");
+      if (diffMins < 60) return t("session.minutesAgo", { count: diffMins });
+      if (diffHours < 24) return t("session.hoursAgo", { count: diffHours });
+      if (days === 1) return t("session.yesterday");
       if (days < 7) return date.toLocaleDateString([], { weekday: "long" });
       return date.toLocaleDateString([], { month: "short", day: "numeric" });
     } catch {

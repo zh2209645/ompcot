@@ -2,6 +2,24 @@
  * Tool Card - Renders and updates tool execution cards (collapsible)
  */
 
+import { t } from "./i18n.js";
+
+// Raw statuses stay as CSS classes (`.tool-status.${status}`); only the
+// visible label is translated. Unknown statuses render as-is.
+function toolStatusLabel(status) {
+  switch (status) {
+    case "complete":
+      return t("status.done");
+    case "error":
+      return t("status.error");
+    case "pending":
+    case "streaming":
+      return t("status.working");
+    default:
+      return status;
+  }
+}
+
 export class ToolCardRenderer {
   constructor(container) {
     this.container = container;
@@ -33,8 +51,8 @@ export class ToolCardRenderer {
           ${argsPreview ? `<span class="tool-args-preview">${this.escapeHtml(argsPreview)}</span>` : ""}
         </div>
         <div class="tool-header-right">
-          <button class="tool-action-btn copy-output-btn" title="Copy output" onclick="event.stopPropagation(); var t=this.closest('.tool-card').querySelector('.tool-output'); if(!t||!t.textContent.trim())return; var s=t.textContent,b=this; (navigator.clipboard?navigator.clipboard.writeText(s):new Promise(function(r){var a=document.createElement('textarea');a.value=s;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);r()})).then(function(){b.classList.add('copied');setTimeout(function(){b.classList.remove('copied')},1500)})"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></button>
-          <div class="tool-status ${status}">${status}</div>
+          <button class="tool-action-btn copy-output-btn" title="${this.escapeHtml(t("tool.copyOutput"))}" onclick="event.stopPropagation(); var t=this.closest('.tool-card').querySelector('.tool-output'); if(!t||!t.textContent.trim())return; var s=t.textContent,b=this; (navigator.clipboard?navigator.clipboard.writeText(s):new Promise(function(r){var a=document.createElement('textarea');a.value=s;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);r()})).then(function(){b.classList.add('copied');setTimeout(function(){b.classList.remove('copied')},1500)})"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></button>
+          <div class="tool-status ${status}">${this.escapeHtml(toolStatusLabel(status))}</div>
         </div>
       </div>
       <div class="tool-card-body${isExpanded ? " expanded" : ""}">
@@ -70,7 +88,7 @@ export class ToolCardRenderer {
     const statusElement = card.querySelector(".tool-status");
     if (statusElement) {
       statusElement.className = `tool-status ${toolExecution.status}`;
-      statusElement.textContent = toolExecution.status;
+      statusElement.textContent = toolStatusLabel(toolExecution.status);
     }
 
     // Auto-expand when streaming
@@ -98,7 +116,7 @@ export class ToolCardRenderer {
     if (statusElement) {
       const status = isError ? "error" : "complete";
       statusElement.className = `tool-status ${status}`;
-      statusElement.textContent = status;
+      statusElement.textContent = toolStatusLabel(status);
     }
 
     // Update output with final result
@@ -161,7 +179,7 @@ export class ToolCardRenderer {
 
     const copyBtn = document.createElement("button");
     copyBtn.className = "tool-action-btn copy-output-btn";
-    copyBtn.title = "Copy output";
+    copyBtn.title = t("tool.copyOutput");
     copyBtn.innerHTML =
       '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
     copyBtn.addEventListener("click", (e) => {
@@ -190,7 +208,7 @@ export class ToolCardRenderer {
 
     const status = document.createElement("div");
     status.className = "tool-status complete";
-    status.textContent = "complete";
+    status.textContent = t("status.done");
     headerRight.appendChild(status);
 
     header.appendChild(headerRight);
@@ -250,7 +268,7 @@ export class ToolCardRenderer {
       const statusEl = card.querySelector(".tool-status");
       if (statusEl) {
         statusEl.className = "tool-status error";
-        statusEl.textContent = "error";
+        statusEl.textContent = t("status.error");
       }
     }
 
