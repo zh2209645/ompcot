@@ -25,6 +25,8 @@ export const CONFIG_PAGES = [
   { id: "files", i18nKey: "settings.pages.files" },
   { id: "shell", i18nKey: "settings.pages.shell" },
   { id: "tools", i18nKey: "settings.pages.tools" },
+  // MCP servers management — static UI (mcp-manager.js), not catalog-backed.
+  { id: "mcp", i18nKey: "settings.pages.mcp", always: true },
   { id: "tasks", i18nKey: "settings.pages.tasks" },
   { id: "advanced", i18nKey: "settings.pages.advanced", always: true },
 ];
@@ -81,6 +83,8 @@ const SEGMENT_TO_PAGE = {
   shell: "shell",
   runtimes: "shell",
   // tools: Available Tools, Todos, Grep & Browser, Computer, GitHub, Output Limits, Execution, Discovery & MCP, Extensions, Developer
+  // (catalog keys under the mcp segment stay on Tools — the MCP servers
+  // *management* page is static UI, not part of the settings catalog.)
   tools: "tools",
   todos: "tools",
   grep: "tools",

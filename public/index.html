@@ -185,6 +185,9 @@
           <button class="icon-btn" id="file-sidebar-toggle" title="Files" aria-label="Toggle file browser" data-i18n-title="header.files" data-i18n-aria-label="header.toggleFiles">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
           </button>
+          <button class="icon-btn hidden" id="agent-hub-toggle" title="Agents" aria-label="Toggle agents panel" aria-expanded="false" aria-controls="agent-hub" data-i18n-title="agents.title" data-i18n-aria-label="agents.toggleAria">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </button>
         </div>
       </div>
 
@@ -281,6 +284,15 @@
       </div>
       <div class="file-sidebar-path" id="file-sidebar-path" title=""></div>
       <div class="file-list" id="file-list"></div>
+    </div>
+
+    <!-- Agent Hub (right sidebar, mirrors the file browser) -->
+    <div class="agent-hub collapsed" id="agent-hub">
+      <div class="agent-hub-header">
+        <span class="agent-hub-title" data-i18n="agents.title">Agents</span>
+        <button class="icon-btn" id="agent-hub-close" title="Close" aria-label="Close agents panel" data-i18n-title="common.close" data-i18n-aria-label="agents.closeAria"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <div class="agent-hub-list" id="agent-hub-list"></div>
     </div>
   </div>
 
@@ -487,6 +499,18 @@
               <div class="agent-settings-loading" data-i18n="settings.loadingAgentSettings">Loading agent settings…</div>
             </div>
           </div>
+
+          <!-- MCP servers management: static page rendered by mcp-manager.js -->
+          <section class="settings-config-page" data-config-page="mcp" hidden>
+            <div class="settings-section">
+              <div class="settings-section-title" data-i18n="settings.pages.mcp">MCP</div>
+              <p class="settings-help" data-i18n-html="mcp.help">
+                MCP servers available to the agent. User-scope servers load for
+                every project; project-scope servers only for this workspace.
+              </p>
+              <div id="mcp-manager-root"></div>
+            </div>
+          </section>
 
           <!-- Advanced: raw config.yml editor (unmapped catalog keys render in
                the shared mount above when this page is active) -->

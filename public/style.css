@@ -5155,6 +5155,435 @@ body.hide-thinking .thinking-block {
 }
 
 /* ═══════════════════════════════════════════════════════
+   Agent Hub — right sidebar (mirrors the file browser)
+   ═══════════════════════════════════════════════════════ */
+
+.agent-hub {
+  width: 260px;
+  min-width: 260px;
+  background: var(--bg-frosted);
+  backdrop-filter: blur(var(--blur-heavy)) saturate(1.5);
+  -webkit-backdrop-filter: blur(var(--blur-heavy)) saturate(1.5);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  transition:
+    margin-right 0.3s var(--ease),
+    opacity 0.3s var(--ease);
+  z-index: 100;
+  position: relative;
+}
+
+.agent-hub.collapsed {
+  margin-right: -260px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.agent-hub-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 12px;
+}
+
+.agent-hub-title {
+  flex: 1;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.agent-hub-list {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 4px 12px;
+}
+
+.agent-hub-list::-webkit-scrollbar {
+  width: 0;
+}
+
+.agent-hub-note {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.agent-hub-group {
+  padding: 10px 10px 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.agent-hub-row {
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  transition: background var(--duration) var(--ease);
+  user-select: none;
+}
+
+.agent-hub-row:hover {
+  background: var(--bg-glass-hover);
+}
+
+/* Finished agents stay legible but recede */
+.agent-hub-row.finished {
+  opacity: 0.55;
+}
+
+.agent-hub-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agent-hub-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-ghost);
+  flex-shrink: 0;
+}
+
+/* Live agents pulse — same convention as the streaming session dot */
+.agent-hub-row.running .agent-hub-dot {
+  background: var(--success);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--success) 50%, transparent);
+  animation: pulse 2s infinite;
+}
+
+.agent-hub-kind {
+  flex-shrink: 0;
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.agent-hub-kind.main {
+  color: var(--accent-text);
+  background: var(--accent-subtle);
+}
+
+.agent-hub-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-hub-row-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  padding-left: 13px;
+  min-width: 0;
+}
+
+.agent-hub-status {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.agent-hub-open {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--bg-glass);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    color var(--duration) var(--ease),
+    background var(--duration) var(--ease),
+    border-color var(--duration) var(--ease);
+}
+
+.agent-hub-open:hover {
+  color: var(--text-primary);
+  background: var(--bg-glass-hover);
+  border-color: var(--border-hover);
+}
+
+/* ═══════════════════════════════════════════════════════
+   MCP servers (Configuration sub-page)
+   ═══════════════════════════════════════════════════════ */
+
+.mcp-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.mcp-banner::before {
+  content: "◐";
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.mcp-error {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  color: var(--error);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mcp-note {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.mcp-toolbar {
+  display: flex;
+  justify-content: flex-start;
+  margin-bottom: 12px;
+}
+
+.mcp-add-btn {
+  font-family: inherit;
+}
+
+.mcp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mcp-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass);
+  padding: 10px 12px;
+  transition:
+    background var(--duration) var(--ease),
+    border-color var(--duration) var(--ease);
+}
+
+.mcp-card:hover {
+  background: var(--bg-glass-hover);
+}
+
+.mcp-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.mcp-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-ghost);
+}
+
+.mcp-dot.connected {
+  background: var(--success);
+}
+
+.mcp-dot.connecting,
+.mcp-dot.reconnecting {
+  background: var(--warning);
+  animation: pulse 2s infinite;
+}
+
+.mcp-dot.failed {
+  background: var(--error);
+}
+
+.mcp-dot.disconnected {
+  background: var(--text-dim);
+}
+
+.mcp-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.mcp-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--bg-glass-strong);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.mcp-badge.mcp-type {
+  color: var(--accent-text);
+  background: var(--accent-subtle);
+}
+
+.mcp-card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 7px;
+  font-size: 10px;
+  color: var(--text-dim);
+  min-width: 0;
+}
+
+.mcp-status-value {
+  color: var(--text-secondary);
+}
+
+.mcp-lock {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.mcp-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.mcp-action-btn {
+  font-family: inherit;
+}
+
+.mcp-card-btn {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.mcp-card-btn.armed {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 40%, transparent);
+  background: color-mix(in srgb, var(--error) 10%, transparent);
+}
+
+/* ── Inline add/edit form ──────────────────────────────── */
+
+.mcp-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass);
+}
+
+.mcp-form-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.mcp-form-error {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  color: var(--error);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mcp-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.mcp-form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mcp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.mcp-field-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.mcp-input {
+  width: 100%;
+  resize: vertical;
+}
+
+.mcp-textarea {
+  min-height: 54px;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 11px;
+}
+
+.mcp-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ═══════════════════════════════════════════════════════
    Responsive
    ═══════════════════════════════════════════════════════ */
 
@@ -5269,7 +5698,9 @@ body.hide-thinking .thinking-block {
     max-width: 140px;
   }
   .file-sidebar,
-  #file-sidebar-toggle {
+  #file-sidebar-toggle,
+  .agent-hub,
+  #agent-hub-toggle {
     display: none !important;
   }
 

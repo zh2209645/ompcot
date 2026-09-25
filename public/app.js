@@ -2,6 +2,7 @@
  * Main App - Ties everything together
  */
 
+import { createAgentHub } from "./agent-hub.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { pageForKey } from "./agent-settings-pages.js";
 import { setupContextViz } from "./app-context-viz.js";
@@ -22,6 +23,7 @@ import {
   t,
 } from "./i18n.js";
 import { setupMessagesInsets } from "./layout-insets.js";
+import { createMcpManager } from "./mcp-manager.js";
 import { MessageRenderer } from "./message-renderer.js";
 import { resolveNewSessionLiveFile } from "./new-session-refresh.js";
 import { createOmpBinarySettings } from "./omp-binary-settings.js";
@@ -446,6 +448,43 @@ document.getElementById("file-sidebar-finder").addEventListener("click", () => {
       console.warn("[App] Failed to reveal path in file manager:", err);
     });
 });
+
+// ═══════════════════════════════════════
+// Agent hub (right dock, mirrors the file browser) — subagent roster from
+// `list_agents`; see agent-hub.js. The toggle starts hidden and is revealed
+// by the first successful fetch that reports a non-empty roster.
+// ═══════════════════════════════════════
+
+// Agent hub → "view transcript": route through the same selection flow the
+// sidebar uses. Prefer the real sidebar entry (keeps project metadata); fall
+// back to a synthesized session for transcripts the list doesn't contain yet.
+function openSessionFromFile(sessionFile) {
+  if (!sessionFile) return;
+  for (const project of Array.isArray(sidebar.projects) ? sidebar.projects : []) {
+    const session = (project.sessions || []).find((s) => s.filePath === sessionFile);
+    if (session) {
+      handleSessionSelect(session, project);
+      return;
+    }
+  }
+  const segments = String(sessionFile).split(/[\\/]/);
+  handleSessionSelect(
+    { filePath: sessionFile, file: segments[segments.length - 1] },
+    { dirName: segments[segments.length - 2] || "", path: getCurrentWorkspacePath() },
+  );
+}
+
+const agentHub = createAgentHub({
+  toggleEl: document.getElementById("agent-hub-toggle"),
+  panelEl: document.getElementById("agent-hub"),
+  listEl: document.getElementById("agent-hub-list"),
+  closeEl: document.getElementById("agent-hub-close"),
+  wsClient,
+  onOpenSession: openSessionFromFile,
+});
+// One eager fetch reveals the header toggle once a roster exists; the panel
+// itself refetches on open, on `agents_changed`, and every 10s while open.
+agentHub.refresh().catch(() => {});
 
 // ═══════════════════════════════════════
 // "Open workspace in app" header control (VS Code / Cursor / Terminal / …)
@@ -3763,6 +3802,14 @@ const agentSettings = createAgentSettings({
 });
 agentSettings.attach(document.getElementById("agent-settings-container"));
 
+// Settings → Configuration → MCP servers page (see mcp-manager.js). The
+// page's loader refetches on every activation — the subnav re-runs it each
+// time the sub-page opens (live list, unlike the one-shot editors).
+const mcpManager = createMcpManager({
+  root: document.getElementById("mcp-manager-root"),
+  wsClient,
+});
+
 // Settings → Configuration sub-pages (see settings-config-subnav.js). Each
 // page's loaders run once, on its first visit; the agent-settings catalog is
 // fetched once and shared across the catalog-backed pages.
@@ -3776,6 +3823,9 @@ configSubnav = createConfigSubnav({
     },
     advanced: () => {
       loadInlineConfigEditor();
+    },
+    mcp: () => {
+      mcpManager.refresh().catch(() => {});
     },
   },
 });

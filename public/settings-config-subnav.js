@@ -3,8 +3,8 @@
 // Owns the pill strip (#settings-config-subnav) and the visibility of the
 // Configuration panel's page regions: the static Providers section (auth keys,
 // protection, models.yml), the shared agent-settings catalog host (one mount
-// whose groups are filtered per sub-page by agent-settings.js), and the static
-// Advanced section (config.yml).
+// whose groups are filtered per sub-page by agent-settings.js), the static MCP
+// servers page (mcp-manager.js), and the static Advanced section (config.yml).
 //
 // Behavior:
 // - The last-active sub-page persists for the window session; `open()` (called
@@ -20,6 +20,14 @@
 
 import { CONFIG_PAGES, isAlwaysPage } from "./agent-settings-pages.js";
 import { onLanguageChanged, t } from "./i18n.js";
+
+// Static pages own their entire markup (no shared agent-settings catalog
+// mount) — the catalog host must stay out of the way while they are active.
+const STATIC_PAGES = new Set(["providers", "mcp"]);
+
+// Pages whose loader is a live list: re-run on every activation (providers /
+// advanced are one-shot editors and load once per window session).
+const RELOAD_ON_OPEN = new Set(["mcp"]);
 
 export function createConfigSubnav({ root, catalog, loaders = {} }) {
   const subnavEl = root?.querySelector("#settings-config-subnav") ?? null;
@@ -52,7 +60,7 @@ export function createConfigSubnav({ root, catalog, loaders = {} }) {
   // known — a loading or failed state must stay readable — and hidden when the
   // page has no catalog entries at all (or on the static Providers page).
   function catalogHostVisibleFor(pageId) {
-    if (pageId === "providers") return false;
+    if (STATIC_PAGES.has(pageId)) return false;
     if (catalogState === "known") return nonEmptyCatalogPages.has(pageId);
     return true;
   }
@@ -89,8 +97,11 @@ export function createConfigSubnav({ root, catalog, loaders = {} }) {
 
   function runStaticLoaders(pageId) {
     const load = loaders[pageId];
-    if (typeof load !== "function" || loadedStaticPages.has(pageId)) return;
-    loadedStaticPages.add(pageId);
+    if (typeof load !== "function") return;
+    if (!RELOAD_ON_OPEN.has(pageId)) {
+      if (loadedStaticPages.has(pageId)) return;
+      loadedStaticPages.add(pageId);
+    }
     try {
       // Fire-and-forget: every loader owns its error UI (retry buttons,
       // inline save-status messages).
@@ -108,8 +119,10 @@ export function createConfigSubnav({ root, catalog, loaders = {} }) {
   }
 
   function ensureLoaded(pageId) {
-    if (pageId === "providers") {
-      runStaticLoaders("providers");
+    if (STATIC_PAGES.has(pageId)) {
+      // Static pages never touch the catalog — visiting them must not pay
+      // for a fetch the catalog-backed pages would otherwise share.
+      runStaticLoaders(pageId);
       return;
     }
     ensureCatalog();

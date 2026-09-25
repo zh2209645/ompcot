@@ -15,14 +15,16 @@ describe("configuration page map", () => {
       "files",
       "shell",
       "tools",
+      "mcp",
       "tasks",
       "advanced",
     ]);
   });
 
-  test("Providers and Advanced are always-present pages", () => {
+  test("Providers, MCP and Advanced are always-present pages", () => {
     expect(CONFIG_PAGES.filter((page) => isAlwaysPage(page.id)).map((page) => page.id)).toEqual([
       "providers",
+      "mcp",
       "advanced",
     ]);
   });
@@ -53,6 +55,13 @@ describe("configuration page map", () => {
   test("maps unprefixed keys by their single segment", () => {
     expect(pageForKey("theme")).toBe("appearance");
     expect(pageForKey("tools")).toBe("tools");
+  });
+
+  test("mcp catalog keys stay on Tools: the MCP management page is static UI", () => {
+    // The MCP servers page is a management surface, not a catalog page —
+    // Discovery & MCP settings keep rendering under Tools.
+    expect(pageForKey("mcp.discovery")).toBe("tools");
+    expect(CONFIG_PAGES.find((page) => page.id === "mcp")).toBeTruthy();
   });
 
   test("falls back to Advanced for unmapped segments so no setting is ever hidden", () => {

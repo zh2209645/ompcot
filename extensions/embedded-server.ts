@@ -35,6 +35,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@oh-my-pi/omp-coding-agent";
 import QRCode from "qrcode";
 import { type WebSocket, WebSocketServer } from "ws";
@@ -582,6 +583,22 @@ type EmbeddedServerGlobal = {
   // new_session / switch_session / fork, and each reload must not add
   // another listener to the process-wide settings singleton.
   settingsChangeSubscribed: boolean;
+  // Idempotence flag for the process-scoped AgentRegistry.onChange
+  // subscription backing the `agents_changed` push event (see startServer).
+  agentsChangeSubscribed: boolean;
+  // Idempotence flag for the one-shot OMCOT_DEBUG_NAMESPACE startup dump.
+  namespaceDebugLogged: boolean;
+  // Process-scoped cache for the dynamically imported MCP management module
+  // (`@oh-my-pi/*-coding-agent/mcp`). The promise memo survives extension
+  // reloads; a resolved `null` (module unreachable) is cached too so repeated
+  // mcp.* RPCs do not re-attempt resolution on every call.
+  mcpModuleCache: { promise: Promise<McpModuleLike | null> | null };
+  // Last MCP connection-status event per server (from the live manager's
+  // addConnectionStatusListener). `getConnectionStatus` cannot express
+  // "failed" / "reconnecting", so we overlay this map on top of it.
+  mcpStatusByServer: Map<string, string>;
+  // Idempotence flag for the process-scoped MCP status listener attach.
+  mcpStatusListenerAttached: boolean;
 };
 
 const EMBEDDED_GLOBAL_KEY = "__ompcotEmbeddedServer__";
@@ -642,9 +659,116 @@ type OmpSettingsStaticLike = {
   SETTINGS_SCHEMA?: Record<string, unknown>;
 };
 
+// ─── Agent roster + MCP surfaces (B1/B2) ──────────────────────────────────────
+//
+// Structural types for the omp runtime's AgentRegistry (root export) and the
+// MCP management module (`@oh-my-pi/pi-coding-agent/mcp` subpath). Like the
+// Settings surface above, every member is optional: a mismatched embedded omp
+// version degrades to `{agents: [], available: false}` / config-file CRUD
+// instead of crashing the extension.
+
+type AgentRefLike = {
+  id?: unknown;
+  displayName?: unknown;
+  kind?: unknown;
+  parentId?: unknown;
+  status?: unknown;
+  sessionFile?: unknown;
+};
+
+type AgentRegistryLike = {
+  list?: () => unknown[];
+  isRunning?: (ref: AgentRefLike) => boolean;
+  onChange?: (listener: (event: unknown) => void) => unknown;
+};
+
+type McpServerConfigLike = {
+  type?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  enabled?: boolean;
+  timeout?: number;
+};
+
+type McpSourceMetaLike = {
+  provider?: string;
+  providerName?: string;
+  path?: string;
+  level?: string;
+};
+
+type McpConfigFileLike = {
+  $schema?: string;
+  mcpServers?: Record<string, McpServerConfigLike>;
+  disabledServers?: string[];
+  enabledServers?: string[];
+};
+
+type McpManagerLike = {
+  getConnectionStatus?: (name: string) => string;
+  getAllServerNames?: () => string[];
+  getTools?: () => Array<{ name?: string; details?: { serverName?: string } }>;
+  connectServers?: (
+    configs: Record<string, McpServerConfigLike>,
+    sources: Record<string, McpSourceMetaLike>,
+    onStatus?: (event: unknown) => void,
+    startupTimeoutMs?: number,
+  ) => Promise<unknown>;
+  disconnectServer?: (name: string) => Promise<void>;
+  reconnectServer?: (name: string, options?: { manual?: boolean }) => Promise<unknown>;
+  addConnectionStatusListener?: (
+    listener: (event: { type?: string; serverName?: string } & Record<string, unknown>) => void,
+  ) => unknown;
+};
+
+type McpModuleLike = {
+  loadAllMCPConfigs?: (
+    cwd: string,
+    options?: Record<string, unknown>,
+  ) => Promise<{
+    configs?: Record<string, McpServerConfigLike>;
+    sources?: Record<string, McpSourceMetaLike>;
+  } | null>;
+  readMCPConfigFile?: (filePath: string) => Promise<McpConfigFileLike>;
+  writeMCPConfigFile?: (filePath: string, config: McpConfigFileLike) => Promise<void>;
+  listMCPServers?: (filePath: string) => Promise<string[]>;
+  addMCPServer?: (filePath: string, name: string, config: McpServerConfigLike) => Promise<void>;
+  updateMCPServer?: (filePath: string, name: string, config: McpServerConfigLike) => Promise<void>;
+  removeMCPServer?: (filePath: string, name: string) => Promise<void>;
+  setMcpServerEnabled?: (options: {
+    userPath: string;
+    projectPath: string;
+    sourcePath?: string;
+    name: string;
+    enabled: boolean;
+  }) => Promise<void>;
+  validateServerName?: (name: string) => string | undefined;
+  validateServerConfig?: (name: string, config: McpServerConfigLike) => string[];
+  MCPManager?: { instance?: () => McpManagerLike | undefined | null };
+};
+
+// Frozen `mcp.list` server row (frontend contract — do not reshape).
+type McpServerRow = {
+  name: string;
+  type: string;
+  command?: string;
+  args?: string[];
+  url?: string;
+  enabled: boolean;
+  source: string;
+  sourcePath: string;
+  writable: boolean;
+  status: "connected" | "connecting" | "reconnecting" | "failed" | "disconnected" | "unknown";
+  toolCount?: number;
+};
+
 type OmpPackageNamespaceLike = {
   Settings?: OmpSettingsStaticLike;
   settings?: OmpSettingsInstanceLike;
+  AgentRegistry?: { global?: () => AgentRegistryLike | null } | null;
 };
 
 type OmpSettingMeta = {
@@ -815,6 +939,11 @@ function getOrCreateGlobalState(): EmbeddedServerGlobal {
       sessionHeaderCache: new Map<string, SessionFileCacheEntry<unknown>>(),
       sessionMetricsCache: new Map<string, SessionFileCacheEntry<unknown>>(),
       settingsChangeSubscribed: false,
+      agentsChangeSubscribed: false,
+      namespaceDebugLogged: false,
+      mcpModuleCache: { promise: null },
+      mcpStatusByServer: new Map<string, string>(),
+      mcpStatusListenerAttached: false,
     } as EmbeddedServerGlobal;
   }
   return g[EMBEDDED_GLOBAL_KEY] as EmbeddedServerGlobal;
@@ -1689,6 +1818,111 @@ export default function (omp: ExtensionAPI) {
           break;
         }
 
+        // ─── Agent roster (B1) ───
+        case "list_agents": {
+          // Registry access is best-effort: never throw, always a success
+          // envelope (with available:false when the surface is missing).
+          sendTo(ws, success("list_agents", listSanitizedAgents()));
+          break;
+        }
+
+        case "get_agent_transcript": {
+          if (typeof command.sessionPath !== "string" || !command.sessionPath) {
+            sendTo(ws, error("get_agent_transcript", "sessionPath is required"));
+            break;
+          }
+          try {
+            const transcript = await readAgentTranscript(command.sessionPath);
+            sendTo(ws, success("get_agent_transcript", transcript));
+          } catch (e: unknown) {
+            sendTo(ws, error("get_agent_transcript", errMessage(e)));
+          }
+          break;
+        }
+
+        // ─── MCP management (B2) ───
+        case "mcp.list": {
+          try {
+            const listing = await listMcpServers();
+            sendTo(ws, success("mcp.list", listing));
+          } catch (e: unknown) {
+            sendTo(ws, error("mcp.list", errMessage(e)));
+          }
+          break;
+        }
+
+        case "mcp.save": {
+          const name = typeof command.name === "string" ? command.name.trim() : "";
+          const scope = command.scope === "project" ? "project" : "user";
+          if (!name) {
+            sendTo(ws, error("mcp.save", "name is required"));
+            break;
+          }
+          try {
+            const written = await saveMcpServer(name, command.config, scope);
+            sendTo(ws, success("mcp.save", written));
+          } catch (e: unknown) {
+            sendTo(ws, error("mcp.save", errMessage(e)));
+          }
+          break;
+        }
+
+        case "mcp.remove": {
+          const name = typeof command.name === "string" ? command.name.trim() : "";
+          const scope = command.scope === "project" ? "project" : "user";
+          if (!name) {
+            sendTo(ws, error("mcp.remove", "name is required"));
+            break;
+          }
+          try {
+            const removed = await removeMcpServerByName(name, scope);
+            sendTo(ws, success("mcp.remove", removed));
+          } catch (e: unknown) {
+            sendTo(ws, error("mcp.remove", errMessage(e)));
+          }
+          break;
+        }
+
+        case "mcp.toggle": {
+          const name = typeof command.name === "string" ? command.name.trim() : "";
+          if (!name) {
+            sendTo(ws, error("mcp.toggle", "name is required"));
+            break;
+          }
+          if (typeof command.enabled !== "boolean") {
+            sendTo(ws, error("mcp.toggle", "enabled must be a boolean"));
+            break;
+          }
+          try {
+            const toggled = await toggleMcpServer(name, command.enabled);
+            sendTo(ws, success("mcp.toggle", toggled));
+          } catch (e: unknown) {
+            sendTo(ws, error("mcp.toggle", errMessage(e)));
+          }
+          break;
+        }
+
+        case "mcp.connect":
+        case "mcp.disconnect":
+        case "mcp.reconnect": {
+          const action = command.type.slice("mcp.".length) as
+            | "connect"
+            | "disconnect"
+            | "reconnect";
+          const name = typeof command.name === "string" ? command.name.trim() : "";
+          if (!name) {
+            sendTo(ws, error(command.type, "name is required"));
+            break;
+          }
+          try {
+            const result = await controlMcpConnection(name, action);
+            sendTo(ws, success(command.type, result));
+          } catch (e: unknown) {
+            sendTo(ws, error(command.type, errMessage(e)));
+          }
+          break;
+        }
+
         default: {
           sendTo(ws, error(command.type, `Unknown command: ${command.type}`));
         }
@@ -1986,6 +2220,712 @@ export default function (omp: ExtensionAPI) {
       }
     }
     await execOmpCli(["config", "set", key, String(value)], OMP_CLI_TIMEOUT_MS);
+  }
+
+  // ═══════════════════════════════════════
+  // Agent roster (B1) + MCP management (B2) — in-process surfaces
+  // ═══════════════════════════════════════
+  //
+  // Both feature groups reach into the omp runtime's own singletons:
+  //  - AgentRegistry: root export on the ExtensionAPI's package namespace
+  //    (`omp.pi.AgentRegistry.global()`), process-scoped.
+  //  - MCP: the `/mcp` subpath of the omp package (not on the root
+  //    namespace). Access layers, first wins per call:
+  //      a. namespace probe (future runtimes may expose it there),
+  //      b. dynamic import inside the omp process (omp's extension loader
+  //         installs a resolver shim that redirects the canonical
+  //         `@oh-my-pi/*` specifiers to the host's own modules),
+  //      c. local user-scope `mcp.json` CRUD (no scope discovery, no live
+  //         status) when both fail.
+  // Every step is feature-detected; failures degrade, never throw.
+
+  const AGENTS_CHANGED_THROTTLE_MS = 500;
+
+  // Computed at call time (never a literal at the import site) so the
+  // esbuild bundle keeps these runtime-resolved: resolution MUST happen
+  // inside the omp process, where the legacy-pi resolver shim lives.
+  const MCP_MODULE_SPECIFIERS = ["@oh-my-pi/pi-coding-agent/mcp", "@oh-my-pi/omp-coding-agent/mcp"];
+
+  function resolveAgentRegistry(): AgentRegistryLike | null {
+    try {
+      const ctor = currentPi()?.AgentRegistry;
+      if (ctor && typeof ctor.global === "function") {
+        const registry = ctor.global();
+        if (registry && typeof registry.list === "function") {
+          return registry;
+        }
+        console.error("[Embedded] AgentRegistry.global() returned no usable registry");
+        return null;
+      }
+      console.error("[Embedded] omp namespace has no AgentRegistry export");
+    } catch (err: unknown) {
+      console.error("[Embedded] AgentRegistry resolution failed:", errMessage(err));
+    }
+    return null;
+  }
+
+  // Frozen sanitize: EXACTLY {id, name, kind, parentId, status, running,
+  // sessionFile}. `advisor` refs are observability-only and excluded; `main`
+  // refs are included (the GUI shows main + subs).
+  function sanitizeAgentRef(
+    ref: AgentRefLike,
+    registry: AgentRegistryLike,
+  ): {
+    id: string;
+    name: string;
+    kind: string;
+    parentId: string | null;
+    status: string;
+    running: boolean;
+    sessionFile: string | null;
+  } | null {
+    if (!ref || typeof ref !== "object") return null;
+    const kind = typeof ref.kind === "string" ? ref.kind : "sub";
+    if (kind === "advisor") return null;
+    const id = typeof ref.id === "string" ? ref.id : "";
+    let running = false;
+    try {
+      running = registry.isRunning ? registry.isRunning(ref) === true : false;
+    } catch {}
+    return {
+      id,
+      name: typeof ref.displayName === "string" && ref.displayName ? ref.displayName : id,
+      kind,
+      parentId: typeof ref.parentId === "string" && ref.parentId ? ref.parentId : null,
+      status: typeof ref.status === "string" ? ref.status : "unknown",
+      running,
+      sessionFile: typeof ref.sessionFile === "string" && ref.sessionFile ? ref.sessionFile : null,
+    };
+  }
+
+  type SanitizedAgent = NonNullable<ReturnType<typeof sanitizeAgentRef>>;
+
+  function listSanitizedAgents(): { agents: SanitizedAgent[]; available: boolean } {
+    const registry = resolveAgentRegistry();
+    if (!registry) return { agents: [], available: false };
+    try {
+      const refs = registry.list?.() ?? [];
+      if (!Array.isArray(refs)) return { agents: [], available: false };
+      const agents: SanitizedAgent[] = [];
+      for (const ref of refs) {
+        const sanitized = sanitizeAgentRef(ref as AgentRefLike, registry);
+        if (sanitized) agents.push(sanitized);
+      }
+      return { agents, available: true };
+    } catch (err: unknown) {
+      console.error("[Embedded] list_agents failed:", errMessage(err));
+      return { agents: [], available: false };
+    }
+  }
+
+  // Transcript serving for subagent session files. Subagent transcripts live
+  // in a nested tree under the sessions root (`<session>.jsonl` → sibling
+  // directory `<session>/…`), which the two-segment `/api/sessions/:dir/:file`
+  // route cannot address — hence this RPC with identical path-safety checks.
+  async function readAgentTranscript(
+    sessionPath: string,
+  ): Promise<{ entries: unknown[]; sessionFile: string }> {
+    const sessionsRoot = path.resolve(SESSIONS_DIR);
+    const filePath = path.resolve(sessionPath);
+    if (filePath === sessionsRoot || !filePath.startsWith(sessionsRoot + path.sep)) {
+      throw new Error("Transcript path must resolve inside the sessions root");
+    }
+    let realSessionsRoot = "";
+    let realFilePath = "";
+    try {
+      realSessionsRoot = fs.realpathSync(sessionsRoot);
+      realFilePath = fs.realpathSync(filePath);
+    } catch {
+      throw new Error("Transcript not found");
+    }
+    if (
+      realFilePath === realSessionsRoot ||
+      !realFilePath.startsWith(realSessionsRoot + path.sep)
+    ) {
+      throw new Error("Transcript path must resolve inside the sessions root");
+    }
+    const content = await fs.promises.readFile(realFilePath, "utf8");
+    const entries: unknown[] = [];
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        entries.push(JSON.parse(line));
+      } catch {
+        /* skip malformed lines, mirroring serveSessionFile */
+      }
+    }
+    return { entries, sessionFile: realFilePath };
+  }
+
+  // Layer (a): does the runtime namespace itself carry the mcp exports?
+  function probeNamespaceForMcpModule(): McpModuleLike | null {
+    const pi = currentPi() as unknown as Record<string, unknown> | null;
+    if (!pi) return null;
+    for (const key of ["mcp", "MCP", "Mcp"]) {
+      const candidate = pi[key];
+      if (
+        candidate &&
+        typeof candidate === "object" &&
+        typeof (candidate as McpModuleLike).loadAllMCPConfigs === "function"
+      ) {
+        return candidate as McpModuleLike;
+      }
+    }
+    if (typeof pi.loadAllMCPConfigs === "function") {
+      return pi as unknown as McpModuleLike;
+    }
+    return null;
+  }
+
+  // Candidate roots for the installed omp package that hosts this process:
+  //   - OMPCOT_OMP_BIN (Rust manager passes the exact binary it spawned)
+  //   - process.argv[1] for shim installs (`bun <pkg>/dist/cli.js` layout)
+  // Compiled `bun build --compile` binaries have no package tree next to
+  // them — those candidates simply fail the src/mcp/index.ts existence
+  // check and resolution falls through to the bare-specifier attempts.
+  function ompMcpSourceCandidates(): string[] {
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+    for (const base of [process.env.OMPCOT_OMP_BIN?.trim(), process.argv[1]]) {
+      if (!base) continue;
+      const pkgRoot = path.resolve(base, "..", "..");
+      if (seen.has(pkgRoot)) continue;
+      seen.add(pkgRoot);
+      candidates.push(path.join(pkgRoot, "src", "mcp", "index.ts"));
+    }
+    return candidates;
+  }
+
+  // Layers (a) → (b) → (b'). Cached per process; `null` (unreachable) is
+  // cached too. Verified against installed omp 18.3.0:
+  //   - the omp namespace does NOT carry the mcp exports (layer a misses),
+  //   - importing the host package's own src/mcp/index.ts via its absolute
+  //     file URL resolves to the SAME module instance omp uses internally
+  //     (shared MCPManager singleton, shared AgentRegistry-adjacent state),
+  //   - bare-specifier dynamic imports from the bundled extension do NOT
+  //     resolve (the extension has no peer install and omp's load-time
+  //     source rewrite only rewrites literal specifiers, which esbuild
+  //     bundling would try to resolve at build time). They are kept as a
+  //     last-ditch attempt for compiled-binary hosts whose virtual module
+  //     registry may serve them.
+  async function resolveMcpModule(): Promise<McpModuleLike | null> {
+    const viaNamespace = probeNamespaceForMcpModule();
+    if (viaNamespace) return viaNamespace;
+
+    if (!globalState.mcpModuleCache.promise) {
+      globalState.mcpModuleCache.promise = (async () => {
+        for (const filePath of ompMcpSourceCandidates()) {
+          if (!fs.existsSync(filePath)) continue;
+          try {
+            const mod =
+              ((await import(pathToFileURL(filePath).href)) as McpModuleLike | null | undefined) ??
+              null;
+            if (mod && typeof mod.loadAllMCPConfigs === "function") {
+              return mod;
+            }
+            console.error(
+              `[Embedded] MCP module candidate "${filePath}" loaded without loadAllMCPConfigs`,
+            );
+          } catch (err: unknown) {
+            console.error(
+              `[Embedded] MCP module import failed for "${filePath}":`,
+              errMessage(err),
+            );
+          }
+        }
+        for (const specifier of MCP_MODULE_SPECIFIERS) {
+          try {
+            const mod = ((await import(specifier)) as McpModuleLike | null | undefined) ?? null;
+            if (mod && typeof mod.loadAllMCPConfigs === "function") {
+              return mod;
+            }
+            console.error(
+              `[Embedded] MCP module candidate "${specifier}" resolved without loadAllMCPConfigs`,
+            );
+          } catch {
+            /* bare-specifier resolution needs the host's shim — expected to miss */
+          }
+        }
+        console.error(
+          "[Embedded] MCP module unreachable: namespace probe and dynamic import both failed — serving user-scope mcp.json CRUD only",
+        );
+        return null;
+      })();
+    }
+    return await globalState.mcpModuleCache.promise;
+  }
+
+  // The live, session-owned manager (installed via MCPManager.setInstance by
+  // the omp runtime when the top-level session was created). We never
+  // fabricate one: a synthetic manager's connections would be invisible to
+  // the session and could double-spawn stdio servers.
+  function findLiveMcpManager(mod: McpModuleLike): McpManagerLike | null {
+    try {
+      const manager = mod.MCPManager?.instance?.();
+      if (manager && typeof manager.getConnectionStatus === "function") {
+        return manager;
+      }
+    } catch (err: unknown) {
+      console.error("[Embedded] MCPManager.instance() probe failed:", errMessage(err));
+    }
+    return null;
+  }
+
+  // Record "failed" / "reconnecting" transitions the synchronous
+  // getConnectionStatus() cannot express. Attached once per process.
+  async function attachMcpStatusListener(mod: McpModuleLike): Promise<void> {
+    if (globalState.mcpStatusListenerAttached) return;
+    const manager = findLiveMcpManager(mod);
+    if (!manager || typeof manager.addConnectionStatusListener !== "function") return;
+    try {
+      const unsubscribe = manager.addConnectionStatusListener((event) => {
+        const name = event?.serverName;
+        const type = event?.type;
+        if (typeof name !== "string" || typeof type !== "string") return;
+        if (type === "failed" || type === "reconnecting") {
+          globalState.mcpStatusByServer.set(name, type);
+        } else if (type === "connected") {
+          globalState.mcpStatusByServer.delete(name);
+        }
+      });
+      if (typeof unsubscribe === "function") {
+        globalState.mcpStatusListenerAttached = true;
+      }
+    } catch (err: unknown) {
+      console.error("[Embedded] MCP status listener attach failed:", errMessage(err));
+    }
+  }
+
+  function mcpServerStatus(manager: McpManagerLike | null, name: string): McpServerRow["status"] {
+    if (!manager) return "unknown";
+    let raw = "";
+    try {
+      raw = manager.getConnectionStatus?.(name) ?? "";
+    } catch {
+      return "unknown";
+    }
+    if (raw === "connected") return "connected";
+    if (raw === "connecting") return "connecting";
+    const last = globalState.mcpStatusByServer.get(name);
+    if (last === "failed") return "failed";
+    if (last === "reconnecting") return "reconnecting";
+    return "disconnected";
+  }
+
+  function mcpServerToolCount(manager: McpManagerLike | null, name: string): number | undefined {
+    if (!manager || typeof manager.getTools !== "function") return undefined;
+    try {
+      let count = 0;
+      for (const tool of manager.getTools() ?? []) {
+        if (tool?.details?.serverName === name) count++;
+      }
+      return count;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // The workspace root this server instance serves. omp is spawned with
+  // cwd = workspace; the session entry's cwd is preferred when known
+  // (same precedence as the /api/git-branch route).
+  function currentWorkspaceCwd(): string {
+    const ctx = globalState.getLatestCtx?.() ?? latestCtx;
+    return resolveGitBranchCwd({
+      foregroundPort: null,
+      fallbackCwd: process.cwd(),
+      instances: getRunningInstances(),
+      latestCtx: ctx ?? null,
+    });
+  }
+
+  // User-scope MCP config: <agentRoot>/mcp.json (matches the runtime's
+  // getMCPConfigPath("user")). Project-scope: <cwd>/.omp/mcp.json (the
+  // native project config the runtime's writer targets).
+  function mcpUserConfigPath(): string {
+    return path.join(OMP_AGENT_ROOT, "mcp.json");
+  }
+
+  function mcpProjectConfigPath(cwd: string): string {
+    return path.join(cwd, ".omp", "mcp.json");
+  }
+
+  // Only omp-owned config formats are safe to mutate: `native` (~/.omp and
+  // .omp/mcp.json) and `mcp-json` (standalone project mcp.json/.mcp.json).
+  // Tool-owned sources (claude.json, codex, cursor, …) are read-only; their
+  // enable/disable goes through the user-level override lists instead.
+  function isWritableMcpSource(source: McpSourceMetaLike | null | undefined): boolean {
+    return (
+      !!source &&
+      typeof source.provider === "string" &&
+      (source.provider === "native" || source.provider === "mcp-json")
+    );
+  }
+
+  function buildMcpServerRow(
+    name: string,
+    config: McpServerConfigLike | undefined,
+    options: {
+      enabled: boolean;
+      source: string;
+      sourcePath: string;
+      writable: boolean;
+      manager: McpManagerLike | null;
+    },
+  ): McpServerRow {
+    const cfg = config ?? {};
+    const type = cfg.type === "http" || cfg.type === "sse" ? cfg.type : "stdio";
+    const row: McpServerRow = {
+      name,
+      type,
+      enabled: options.enabled,
+      source: options.source,
+      sourcePath: options.sourcePath,
+      writable: options.writable,
+      status: mcpServerStatus(options.manager, name),
+    };
+    if (type === "stdio") {
+      if (typeof cfg.command === "string") row.command = cfg.command;
+      if (Array.isArray(cfg.args)) row.args = cfg.args;
+    } else if (typeof cfg.url === "string") {
+      row.url = cfg.url;
+    }
+    const toolCount = mcpServerToolCount(options.manager, name);
+    if (typeof toolCount === "number") row.toolCount = toolCount;
+    return row;
+  }
+
+  // Layer (c): direct JSON file access, used only when the omp MCP module is
+  // unreachable. User scope only — no scope discovery is reimplemented.
+  function readLocalMcpConfigFile(filePath: string): McpConfigFileLike {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as McpConfigFileLike;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeLocalMcpConfigFile(filePath: string, config: McpConfigFileLike): void {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(config, null, 2), "utf8");
+  }
+
+  async function listMcpServers(): Promise<{
+    servers: McpServerRow[];
+    capabilities: { liveStatus: boolean; connect: boolean };
+  }> {
+    const mod = await resolveMcpModule();
+    const manager = mod ? findLiveMcpManager(mod) : null;
+    if (mod) await attachMcpStatusListener(mod);
+
+    const rows = new Map<string, McpServerRow>();
+    const cwd = currentWorkspaceCwd();
+    const userPath = mcpUserConfigPath();
+    const projectPath = mcpProjectConfigPath(cwd);
+
+    // 1. The loader's effective view: every visible (enabled) server across
+    //    ALL sources, with proper SourceMeta and env expansion.
+    if (mod?.loadAllMCPConfigs) {
+      try {
+        const loaded = await mod.loadAllMCPConfigs(cwd);
+        const configs = loaded?.configs ?? {};
+        const sources = loaded?.sources ?? {};
+        for (const [name, config] of Object.entries(configs)) {
+          const source = sources[name];
+          let sourceLabel = (source && (source.providerName || source.provider)) || "discovered";
+          if (source && (source.level === "user" || source.level === "project")) {
+            sourceLabel = `${sourceLabel} (${source.level})`;
+          }
+          rows.set(
+            name,
+            buildMcpServerRow(name, config, {
+              // Survivors of the loader are effectively enabled (suppressed
+              // entries are excluded from its result entirely).
+              enabled: true,
+              source: sourceLabel,
+              sourcePath: source && typeof source.path === "string" ? source.path : "",
+              writable: isWritableMcpSource(source),
+              manager,
+            }),
+          );
+        }
+      } catch (err: unknown) {
+        console.error("[Embedded] mcp.list: loadAllMCPConfigs failed:", errMessage(err));
+      }
+    }
+
+    // 2. Rows the loader suppressed (disabled entries in omp-owned files)
+    //    still belong in the list — the GUI needs them to re-enable. Mirrors
+    //    omp's own `/mcp list`: config files + disabledServers union.
+    if (mod?.readMCPConfigFile) {
+      let userFile: McpConfigFileLike | null = null;
+      try {
+        userFile = await mod.readMCPConfigFile(userPath);
+      } catch {}
+      const deniedSet = new Set(
+        Array.isArray(userFile?.disabledServers) ? userFile.disabledServers : [],
+      );
+      const fileScopes = [
+        { filePath: userPath, label: "OMP (user)" },
+        { filePath: projectPath, label: "OMP (project)" },
+        { filePath: path.join(cwd, "mcp.json"), label: "MCP Config (project)" },
+        { filePath: path.join(cwd, ".mcp.json"), label: "MCP Config (project)" },
+      ];
+      for (const scopeInfo of fileScopes) {
+        let file: McpConfigFileLike | null = null;
+        try {
+          file = await mod.readMCPConfigFile(scopeInfo.filePath);
+        } catch {
+          continue;
+        }
+        for (const [name, config] of Object.entries(file?.mcpServers ?? {})) {
+          if (rows.has(name)) continue;
+          rows.set(
+            name,
+            buildMcpServerRow(name, config, {
+              enabled: !deniedSet.has(name) && config?.enabled !== false,
+              source: scopeInfo.label,
+              sourcePath: scopeInfo.filePath,
+              writable: true,
+              manager,
+            }),
+          );
+        }
+      }
+      // 3. Denylist-only names (foreign/plugin sources disabled via the
+      //    override list): show a minimal row so they can be re-enabled.
+      for (const name of deniedSet) {
+        if (rows.has(name)) continue;
+        rows.set(name, {
+          name,
+          type: "stdio",
+          enabled: false,
+          source: "user",
+          sourcePath: userPath,
+          writable: true,
+          status: mcpServerStatus(manager, name),
+        });
+      }
+    }
+
+    // Layer (c): no module at all — serve user-scope file rows only.
+    if (!mod) {
+      const file = readLocalMcpConfigFile(userPath);
+      for (const [name, config] of Object.entries(file.mcpServers ?? {})) {
+        rows.set(
+          name,
+          buildMcpServerRow(name, config, {
+            enabled: config?.enabled !== false,
+            source: "user",
+            sourcePath: userPath,
+            writable: true,
+            manager: null,
+          }),
+        );
+      }
+    }
+
+    return {
+      servers: [...rows.values()].sort((a, b) => a.name.localeCompare(b.name)),
+      capabilities: { liveStatus: manager !== null, connect: manager !== null },
+    };
+  }
+
+  function requireMcpConfigInput(input: unknown): McpServerConfigLike {
+    // Pass through the documented config shape untouched (type, command,
+    // args, env, url, headers, enabled, timeout); the runtime validators do
+    // the real checking. Rejects non-object junk up front.
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new Error("config must be an object");
+    }
+    return input as McpServerConfigLike;
+  }
+
+  async function saveMcpServer(
+    name: string,
+    configInput: unknown,
+    scope: "user" | "project",
+  ): Promise<{ name: string; scope: string; path: string; created: boolean }> {
+    const config = requireMcpConfigInput(configInput);
+    const cwd = currentWorkspaceCwd();
+    const filePath = scope === "user" ? mcpUserConfigPath() : mcpProjectConfigPath(cwd);
+    const mod = await resolveMcpModule();
+
+    if (mod?.validateServerName) {
+      const nameError = mod.validateServerName(name);
+      if (nameError) throw new Error(nameError);
+    }
+    if (mod?.validateServerConfig) {
+      const errors = mod.validateServerConfig(name, config);
+      if (Array.isArray(errors) && errors.length > 0) {
+        throw new Error(`Invalid server config: ${errors.join("; ")}`);
+      }
+    }
+
+    if (mod?.addMCPServer && mod.updateMCPServer) {
+      let existing = false;
+      if (mod.listMCPServers) {
+        existing = (await mod.listMCPServers(filePath)).includes(name);
+      } else if (mod.readMCPConfigFile) {
+        existing = (await mod.readMCPConfigFile(filePath)).mcpServers?.[name] !== undefined;
+      }
+      if (existing) {
+        await mod.updateMCPServer(filePath, name, config);
+      } else {
+        await mod.addMCPServer(filePath, name, config);
+      }
+      return { name, scope, path: filePath, created: !existing };
+    }
+
+    // Layer (c): local user-scope CRUD only.
+    if (scope !== "user") {
+      throw new Error(
+        "Project-scope MCP saves require the omp MCP module, which is unavailable in this build",
+      );
+    }
+    const file = readLocalMcpConfigFile(filePath);
+    const created = file.mcpServers?.[name] === undefined;
+    writeLocalMcpConfigFile(filePath, {
+      ...file,
+      mcpServers: { ...(file.mcpServers ?? {}), [name]: config },
+    });
+    return { name, scope, path: filePath, created };
+  }
+
+  async function removeMcpServerByName(
+    name: string,
+    scope: "user" | "project",
+  ): Promise<{ name: string; scope: string; path: string }> {
+    const cwd = currentWorkspaceCwd();
+    const filePath = scope === "user" ? mcpUserConfigPath() : mcpProjectConfigPath(cwd);
+    const mod = await resolveMcpModule();
+
+    if (mod?.removeMCPServer) {
+      await mod.removeMCPServer(filePath, name);
+      return { name, scope, path: filePath };
+    }
+
+    if (scope !== "user") {
+      throw new Error(
+        "Project-scope MCP removal requires the omp MCP module, which is unavailable in this build",
+      );
+    }
+    const file = readLocalMcpConfigFile(filePath);
+    if (!file.mcpServers?.[name]) {
+      throw new Error(`Server "${name}" not found in ${filePath}`);
+    }
+    const { [name]: _removed, ...remaining } = file.mcpServers;
+    writeLocalMcpConfigFile(filePath, { ...file, mcpServers: remaining });
+    return { name, scope, path: filePath };
+  }
+
+  async function toggleMcpServer(
+    name: string,
+    enabled: boolean,
+  ): Promise<{ name: string; enabled: boolean; sourcePath: string | null }> {
+    const cwd = currentWorkspaceCwd();
+    const userPath = mcpUserConfigPath();
+    const projectPath = mcpProjectConfigPath(cwd);
+    const mod = await resolveMcpModule();
+
+    if (mod?.setMcpServerEnabled) {
+      // setMcpServerEnabled mutates omp-owned source files directly and uses
+      // the user-level override lists for non-writable sources. It needs the
+      // sourcePath ONLY for formats the runtime owns (native / mcp-json).
+      let sourcePath: string | undefined;
+      try {
+        const loaded = await mod.loadAllMCPConfigs?.(cwd);
+        const source = loaded?.sources?.[name];
+        if (isWritableMcpSource(source) && typeof source?.path === "string") {
+          sourcePath = source.path;
+        }
+      } catch {}
+      if (!sourcePath && mod.readMCPConfigFile) {
+        // Disabled rows are invisible to the loader — scan the omp-owned
+        // files directly (project scope wins, mirroring write precedence).
+        for (const candidate of [
+          projectPath,
+          path.join(cwd, "mcp.json"),
+          path.join(cwd, ".mcp.json"),
+          userPath,
+        ]) {
+          try {
+            const file = await mod.readMCPConfigFile(candidate);
+            if (file?.mcpServers?.[name] !== undefined) {
+              sourcePath = candidate;
+              break;
+            }
+          } catch {}
+        }
+      }
+      await mod.setMcpServerEnabled({ userPath, projectPath, sourcePath, name, enabled });
+      return { name, enabled, sourcePath: sourcePath ?? null };
+    }
+
+    // Layer (c): user-scope file only.
+    const file = readLocalMcpConfigFile(userPath);
+    if (file.mcpServers?.[name] !== undefined) {
+      writeLocalMcpConfigFile(userPath, {
+        ...file,
+        mcpServers: { ...file.mcpServers, [name]: { ...file.mcpServers[name], enabled } },
+      });
+      return { name, enabled, sourcePath: userPath };
+    }
+    const current = new Set(file.disabledServers ?? []);
+    if (enabled) {
+      current.delete(name);
+    } else {
+      current.add(name);
+    }
+    const disabledServers = [...current].sort();
+    writeLocalMcpConfigFile(userPath, {
+      ...file,
+      disabledServers: disabledServers.length > 0 ? disabledServers : undefined,
+    });
+    return { name, enabled, sourcePath: userPath };
+  }
+
+  async function controlMcpConnection(
+    name: string,
+    action: "connect" | "disconnect" | "reconnect",
+  ): Promise<{ name: string; action: string; status: McpServerRow["status"] }> {
+    const mod = await resolveMcpModule();
+    const manager = mod ? findLiveMcpManager(mod) : null;
+    if (!mod || !manager) {
+      throw new Error("MCP connection control unavailable in this build");
+    }
+    await attachMcpStatusListener(mod);
+
+    if (action === "disconnect") {
+      if (typeof manager.disconnectServer !== "function") {
+        throw new Error("MCP connection control unavailable in this build");
+      }
+      await manager.disconnectServer(name);
+    } else if (action === "reconnect") {
+      if (typeof manager.reconnectServer !== "function") {
+        throw new Error("MCP connection control unavailable in this build");
+      }
+      await manager.reconnectServer(name, { manual: true });
+    } else {
+      if (
+        typeof manager.connectServers !== "function" ||
+        typeof mod.loadAllMCPConfigs !== "function"
+      ) {
+        throw new Error("MCP connection control unavailable in this build");
+      }
+      const cwd = currentWorkspaceCwd();
+      const result = await mod.loadAllMCPConfigs(cwd);
+      const config = result?.configs?.[name];
+      if (!config) {
+        throw new Error(`MCP server "${name}" not found or disabled`);
+      }
+      const sources = result?.sources ?? {};
+      await manager.connectServers(
+        { [name]: config },
+        sources[name] ? { [name]: sources[name] } : {},
+      );
+    }
+    return { name, action, status: mcpServerStatus(manager, name) };
   }
 
   // ═══════════════════════════════════════
@@ -3425,6 +4365,46 @@ export default function (omp: ExtensionAPI) {
         }
       } catch {
         globalState.settingsChangeSubscribed = false;
+      }
+    }
+
+    // One-shot namespace dump for debugging runtime-surface access (which
+    // exports the embedded omp actually exposes on `omp.pi`). Opt-in only.
+    if (process.env.OMCOT_DEBUG_NAMESPACE === "1" && !globalState.namespaceDebugLogged) {
+      globalState.namespaceDebugLogged = true;
+      const pi = currentPi() as unknown as Record<string, unknown> | null;
+      const keys = pi ? Object.keys(pi).sort() : [];
+      console.error(`[Embedded] omp namespace keys (${keys.length}): ${keys.join(", ")}`);
+    }
+
+    // Subscribe ONCE per process to the AgentRegistry change feed and push
+    // throttled `agents_changed` events so connected WebViews live-refresh
+    // the roster. Trailing-throttled: at most one event per 500ms; bursts
+    // coalesce into a single trailing emit. Best-effort — when the registry
+    // is unreachable there is simply no subscription (list_agents reports
+    // available:false too).
+    if (!globalState.agentsChangeSubscribed) {
+      const registry = resolveAgentRegistry();
+      if (registry && typeof registry.onChange === "function") {
+        try {
+          let pendingEmit: NodeJS.Timeout | null = null;
+          const unsubscribe = registry.onChange(() => {
+            if (pendingEmit) return;
+            pendingEmit = setTimeout(() => {
+              pendingEmit = null;
+              broadcast({ type: "event", event: { type: "agents_changed" } });
+            }, AGENTS_CHANGED_THROTTLE_MS);
+          });
+          if (typeof unsubscribe === "function") {
+            globalState.agentsChangeSubscribed = true;
+          }
+        } catch (err: unknown) {
+          console.error("[Embedded] AgentRegistry.onChange subscription failed:", errMessage(err));
+        }
+      } else {
+        console.error(
+          "[Embedded] agents_changed: registry unreachable or has no onChange — no subscription",
+        );
       }
     }
 
