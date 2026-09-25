@@ -1797,6 +1797,61 @@ body {
   gap: 18px;
 }
 
+/* ═══════════════════════════════════════
+   Settings → Configuration: sub-page pill strip + page regions.
+   The strip mirrors the settings nav's pill idiom (rounded, glass) and
+   scrolls horizontally when the page set overflows on narrow widths.
+   ═══════════════════════════════════════ */
+
+.settings-subnav {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  margin-bottom: 16px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.settings-subnav::-webkit-scrollbar {
+  display: none;
+}
+
+.settings-subnav-item {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-glass);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+  padding: 7px 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration) var(--ease),
+    color var(--duration) var(--ease),
+    border-color var(--duration) var(--ease);
+}
+
+.settings-subnav-item:hover {
+  background: var(--bg-glass-hover);
+  color: var(--text-primary);
+}
+
+.settings-subnav-item.active {
+  background: var(--accent-subtle);
+  border-color: var(--border);
+  color: var(--accent-text);
+}
+
+.settings-config-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
 .settings-section-title {
   font-size: 10px;
   color: var(--text-dim);
@@ -2735,6 +2790,15 @@ body {
     min-height: 34px;
     padding: 6px 10px;
     font-size: 12px;
+  }
+
+  .settings-subnav-item {
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+
+  .settings-subnav {
+    margin-bottom: 12px;
   }
 
   .settings-nav-title {

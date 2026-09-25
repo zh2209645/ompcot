@@ -419,81 +419,90 @@
 
       <div class="settings-tab" data-settings-panel="configuration">
         <div class="settings-header"><h3 data-i18n="settings.configuration">Configuration</h3></div>
-        <div class="settings-body">
-          <div class="settings-section">
-            <div class="settings-section-title" data-i18n="settings.authentication">Authentication</div>
-            <p class="settings-help" data-i18n-html="settings.authHelp">
-              Keys are stored locally in <code>~/.omp/agent/auth.json</code> (chmod 600).
-              Ompcot launched from Finder does not read shell environment
-              variables, so set keys here for them to stick across launches.
-            </p>
-            <div class="settings-api-keys" id="settings-api-keys">
-              <div class="settings-api-keys-loading" data-i18n="settings.loadingProviders">Loading providers…</div>
+        <!-- Sub-page pill strip, built by settings-config-subnav.js -->
+        <div class="settings-subnav" id="settings-config-subnav" role="tablist" aria-label="Configuration sections" data-i18n-aria-label="settings.pages.label"></div>
+        <div class="settings-config-body">
+          <!-- Providers: authentication + protection + models.yml -->
+          <section class="settings-config-page" data-config-page="providers">
+            <div class="settings-section">
+              <div class="settings-section-title" data-i18n="settings.authentication">Authentication</div>
+              <p class="settings-help" data-i18n-html="settings.authHelp">
+                Keys are stored locally in <code>~/.omp/agent/auth.json</code> (chmod 600).
+                Ompcot launched from Finder does not read shell environment
+                variables, so set keys here for them to stick across launches.
+              </p>
+              <div class="settings-api-keys" id="settings-api-keys">
+                <div class="settings-api-keys-loading" data-i18n="settings.loadingProviders">Loading providers…</div>
+              </div>
             </div>
-          </div>
-          <div class="settings-section" id="settings-auth-section" style="display:none">
-            <div class="settings-section-title" data-i18n="settings.protection">Protection</div>
-            <div class="settings-row">
-              <span class="settings-label" data-i18n="settings.requireLogin">Require login</span>
-              <button class="settings-toggle" id="toggle-auth"></button>
+            <div class="settings-section" id="settings-auth-section" style="display:none">
+              <div class="settings-section-title" data-i18n="settings.protection">Protection</div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="settings.requireLogin">Require login</span>
+                <button class="settings-toggle" id="toggle-auth"></button>
+              </div>
             </div>
-          </div>
+            <div class="settings-section">
+              <div class="settings-section-title" data-i18n="settings.llmProviders">LLM providers</div>
+              <p class="settings-help" data-i18n-html="settings.llmProvidersHelp">
+                Edit <code>~/.omp/agent/models.yml</code> to add custom providers
+                (Ollama, vLLM, LM Studio, OpenAI-compatible proxies, OpenRouter
+                routing overrides, etc). The file is YAML — JSON works too, since
+                JSON is valid YAML. See the
+                <a href="#" id="models-config-docs-link">models.yml docs</a>
+                for the full schema. Changes are picked up immediately — no
+                restart needed.
+              </p>
+              <div class="settings-config-meta">
+                <span class="settings-label" data-i18n="settings.providersFile">Providers file</span>
+                <span class="settings-static-value" id="inline-models-path"></span>
+              </div>
+              <textarea class="config-editor-textarea settings-config-textarea" id="inline-models-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" placeholder="providers:&#10;  ollama:&#10;    baseUrl: http://localhost:11434/v1&#10;    …"></textarea>
+              <div class="settings-config-actions">
+                <div class="config-editor-error settings-save-status hidden" id="inline-models-error"></div>
+                <div class="settings-config-button-group">
+                  <button class="settings-value-btn" id="inline-models-insert-example" data-i18n="settings.insertExample">Insert example</button>
+                  <button class="btn-primary" id="inline-models-save" data-i18n="common.save">Save</button>
+                </div>
+              </div>
+            </div>
+          </section>
 
-          <div class="settings-section">
-            <div class="settings-section-title" data-i18n="settings.agentSettings">Agent settings</div>
+          <!-- Catalog-backed sub-pages (Appearance, Model, …) share one mount;
+               settings-config-subnav.js + agent-settings.js filter it per page. -->
+          <div class="agent-settings-host" id="agent-settings-host" hidden>
             <p class="settings-help" data-i18n-html="settings.agentSettingsHelp">
               Common agent options, editable in place. Changes save
               automatically and are picked up by the running agent. Secret
-              keys are managed under Authentication above.
+              keys are managed on the Providers page.
             </p>
             <div class="agent-settings" id="agent-settings-container">
               <div class="agent-settings-loading" data-i18n="settings.loadingAgentSettings">Loading agent settings…</div>
             </div>
           </div>
 
-          <div class="settings-section">
-            <div class="settings-section-title" data-i18n="settings.agentConfigFile">Agent config (~/.omp/agent/config.yml)</div>
-            <p class="settings-help" data-i18n-html="settings.agentConfigHelp">
-              Advanced: edit <code>~/.omp/agent/config.yml</code> directly as
-              YAML/JSON. Prefer the form above for known keys.
-            </p>
-            <div class="settings-config-meta">
-              <span class="settings-label" data-i18n="settings.agentConfigLabel">Agent config file</span>
-              <span class="settings-static-value" id="inline-config-path"></span>
-            </div>
-            <textarea class="config-editor-textarea settings-config-textarea" id="inline-config-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
-            <div class="settings-config-actions">
-              <div class="config-editor-error settings-save-status hidden" id="inline-config-error"></div>
-              <div class="settings-config-button-group">
-                <button class="btn-primary" id="inline-config-save" data-i18n="common.save">Save</button>
+          <!-- Advanced: raw config.yml editor (unmapped catalog keys render in
+               the shared mount above when this page is active) -->
+          <section class="settings-config-page" data-config-page="advanced" hidden>
+            <div class="settings-section">
+              <div class="settings-section-title" data-i18n="settings.agentConfigFile">Agent config (~/.omp/agent/config.yml)</div>
+              <p class="settings-help" data-i18n-html="settings.agentConfigHelp">
+                Advanced: edit <code>~/.omp/agent/config.yml</code> directly as
+                YAML/JSON. Prefer the categorized sub-pages for known keys.
+              </p>
+              <div class="settings-config-meta">
+                <span class="settings-label" data-i18n="settings.agentConfigLabel">Agent config file</span>
+                <span class="settings-static-value" id="inline-config-path"></span>
+              </div>
+              <textarea class="config-editor-textarea settings-config-textarea" id="inline-config-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+              <div class="settings-config-actions">
+                <div class="config-editor-error settings-save-status hidden" id="inline-config-error"></div>
+                <div class="settings-config-button-group">
+                  <button class="btn-primary" id="inline-config-save" data-i18n="common.save">Save</button>
+                </div>
               </div>
             </div>
-          </div>
-
-          <div class="settings-section">
-            <div class="settings-section-title" data-i18n="settings.llmProviders">LLM providers</div>
-            <p class="settings-help" data-i18n-html="settings.llmProvidersHelp">
-              Edit <code>~/.omp/agent/models.yml</code> to add custom providers
-              (Ollama, vLLM, LM Studio, OpenAI-compatible proxies, OpenRouter
-              routing overrides, etc). The file is YAML — JSON works too, since
-              JSON is valid YAML. See the
-              <a href="#" id="models-config-docs-link">models.yml docs</a>
-              for the full schema. Changes are picked up immediately — no
-              restart needed.
-            </p>
-            <div class="settings-config-meta">
-              <span class="settings-label" data-i18n="settings.providersFile">Providers file</span>
-              <span class="settings-static-value" id="inline-models-path"></span>
-            </div>
-            <textarea class="config-editor-textarea settings-config-textarea" id="inline-models-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" placeholder="providers:&#10;  ollama:&#10;    baseUrl: http://localhost:11434/v1&#10;    …"></textarea>
-            <div class="settings-config-actions">
-              <div class="config-editor-error settings-save-status hidden" id="inline-models-error"></div>
-              <div class="settings-config-button-group">
-                <button class="settings-value-btn" id="inline-models-insert-example" data-i18n="settings.insertExample">Insert example</button>
-                <button class="btn-primary" id="inline-models-save" data-i18n="common.save">Save</button>
-              </div>
-            </div>
-          </div>
+          </section>
         </div>
       </div>
     </section>

@@ -158,17 +158,29 @@ export const zhCN = {
   "settings.requireLogin": "需要登录",
   "settings.agentSettings": "智能体设置",
   "settings.agentSettingsHelp":
-    "常用智能体选项，可直接就地编辑。更改会自动保存，并会被运行中的智能体立即采用。密钥请在上方“认证”中管理。",
+    "常用智能体选项，可直接就地编辑。更改会自动保存，并会被运行中的智能体立即采用。密钥请在“提供商”页面管理。",
   "settings.loadingAgentSettings": "正在加载智能体设置…",
   "settings.agentConfigFile": "智能体配置 (~/.omp/agent/config.yml)",
   "settings.agentConfigHelp":
-    "高级：直接以 YAML/JSON 编辑 <code>~/.omp/agent/config.yml</code>。已知配置项建议优先使用上方表单。",
+    "高级：直接以 YAML/JSON 编辑 <code>~/.omp/agent/config.yml</code>。已知配置项建议优先使用分类子页面。",
   "settings.agentConfigLabel": "智能体配置文件",
   "settings.llmProviders": "LLM 提供商",
   "settings.llmProvidersHelp":
     '编辑 <code>~/.omp/agent/models.yml</code> 以添加自定义提供商（Ollama、vLLM、LM Studio、OpenAI 兼容代理、OpenRouter 路由覆盖等）。该文件为 YAML — JSON 也可以，因为 JSON 是合法的 YAML。完整 schema 见 <a href="#">models.yml 文档</a>。更改会立即生效，无需重启。',
   "settings.providersFile": "提供商文件",
   "settings.insertExample": "插入示例",
+  "settings.pages.label": "配置分区",
+  "settings.pages.providers": "提供商",
+  "settings.pages.appearance": "外观",
+  "settings.pages.model": "模型",
+  "settings.pages.interaction": "交互",
+  "settings.pages.context": "上下文",
+  "settings.pages.memory": "记忆",
+  "settings.pages.files": "文件",
+  "settings.pages.shell": "终端",
+  "settings.pages.tools": "工具",
+  "settings.pages.tasks": "任务",
+  "settings.pages.advanced": "高级",
 
   // ── command palette ──
   "palette.commands": "命令",

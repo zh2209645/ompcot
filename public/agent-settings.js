@@ -5,8 +5,16 @@
 // others. `settings_changed` frames pushed over the WebSocket keep idle
 // fields in sync with changes made elsewhere (CLI, another window). Redacted
 // keys (secrets) are never rendered — authentication lives in the API-keys
-// UI above, and raw file editing remains available in the config.yml /
-// models.yml editors below.
+// UI on the Providers page, and raw file editing remains available in the
+// config.yml / models.yml editors.
+//
+// Sub-pages: pass `getPageId` (key → page id, see agent-settings-pages.js) to
+// split the catalog across the Configuration sub-pages. In that mode each
+// group section is tagged with `data-page` (groups are bucketed per page, so
+// an unprefixed "general" group can span pages), `setActivePage` shows only
+// the active page's groups, and `onPageSetChanged` reports the non-empty page
+// set after each load (or null when the load fails, meaning "unknown").
+// Without `getPageId` the module renders exactly as before: one flat list.
 
 import {
   clearSettingsSaveMessage,
@@ -37,13 +45,20 @@ function showSavingStatus(messageEl) {
   messageEl.classList.remove("hidden");
 }
 
-export function createAgentSettings({ fetchJson, wsSubscribe }) {
+export function createAgentSettings({
+  fetchJson,
+  wsSubscribe,
+  getPageId = null,
+  onPageSetChanged = null,
+}) {
   let container = null;
   let captionEl = null;
   let filterEl = null;
   let errorEl = null;
   let groupsEl = null;
   let catalog = null;
+  // Active Configuration sub-page (page mode only): null shows every group.
+  let activePage = null;
   // Monotonic load generation: a late-failing older load (or its render) must
   // not clobber the result of a newer one.
   let loadSeq = 0;
@@ -106,6 +121,8 @@ export function createAgentSettings({ fetchJson, wsSubscribe }) {
       renderCatalog();
     } catch (err) {
       if (seq !== loadSeq) return;
+      // Page mode: a failed load means the page set is unknown, not empty.
+      if (getPageId) onPageSetChanged?.(null);
       renderLoadError(err);
     }
   }
@@ -158,22 +175,31 @@ export function createAgentSettings({ fetchJson, wsSubscribe }) {
     const entries = catalog.settings.filter(
       (entry) => entry && !entry.redacted && typeof entry.key === "string",
     );
-    const groups = new Map();
+    // Page mode buckets by (page, group) so an unprefixed "general" group can
+    // spread across pages; without a mapping every entry shares one bucket
+    // keyed by group alone, matching the historical flat rendering.
+    const buckets = new Map();
+    const pages = new Set();
     for (const entry of entries) {
       const group = groupOf(entry.key);
-      if (!groups.has(group)) groups.set(group, []);
-      groups.get(group).push(entry);
+      const page = getPageId ? getPageId(entry.key) : null;
+      if (page) pages.add(page);
+      const bucketKey = page === null ? group : `${page}\u0000${group}`;
+      if (!buckets.has(bucketKey)) buckets.set(bucketKey, { group, page, entries: [] });
+      buckets.get(bucketKey).entries.push(entry);
     }
-    for (const [group, groupEntries] of groups) {
-      groupsEl.appendChild(buildGroupSection(group, groupEntries));
+    for (const { group, page, entries: bucketEntries } of buckets.values()) {
+      groupsEl.appendChild(buildGroupSection(group, bucketEntries, page));
     }
     applyFilter();
+    if (getPageId) onPageSetChanged?.([...pages]);
   }
 
-  function buildGroupSection(group, entries) {
+  function buildGroupSection(group, entries, page = null) {
     const section = document.createElement("div");
     section.className = "settings-section agent-settings-group";
     section.dataset.group = group;
+    if (page) section.dataset.page = page;
     const title = document.createElement("div");
     title.className = "settings-section-title";
     title.textContent = group;
@@ -366,17 +392,31 @@ export function createAgentSettings({ fetchJson, wsSubscribe }) {
     if (!groupsEl) return;
     const query = filterEl ? filterEl.value.trim().toLowerCase() : "";
     for (const section of groupsEl.querySelectorAll(".agent-settings-group")) {
+      // Page mode: groups belonging to another sub-page stay hidden regardless
+      // of the filter query.
+      const pageMismatch = Boolean(
+        activePage && section.dataset.page && section.dataset.page !== activePage,
+      );
       let visible = 0;
       for (const row of section.querySelectorAll(".agent-setting-row")) {
         const key = row.dataset.agentSettingKey || "";
         const description = row.querySelector(".settings-label-sub")?.textContent || "";
         const matches =
-          !query || key.toLowerCase().includes(query) || description.toLowerCase().includes(query);
+          !pageMismatch &&
+          (!query ||
+            key.toLowerCase().includes(query) ||
+            description.toLowerCase().includes(query));
         row.classList.toggle("hidden", !matches);
         if (matches) visible += 1;
       }
       section.classList.toggle("hidden", visible === 0);
     }
+  }
+
+  /** Page mode: show only the given sub-page's groups (null shows every group). */
+  function setActivePage(pageId) {
+    activePage = getPageId ? pageId : null;
+    applyFilter();
   }
 
   function destroy() {
@@ -392,7 +432,8 @@ export function createAgentSettings({ fetchJson, wsSubscribe }) {
     errorEl = null;
     groupsEl = null;
     catalog = null;
+    activePage = null;
   }
 
-  return { attach, load, destroy };
+  return { attach, load, destroy, setActivePage };
 }

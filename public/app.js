@@ -3,6 +3,7 @@
  */
 
 import { createAgentSettings } from "./agent-settings.js";
+import { pageForKey } from "./agent-settings-pages.js";
 import { setupContextViz } from "./app-context-viz.js";
 import { setupSettingsEditors } from "./app-settings-editors.js";
 import { setupSettingsToggles } from "./app-settings-toggles.js";
@@ -27,6 +28,7 @@ import { getOnboardingState } from "./onboarding-state.js";
 import { renderPackageInstallFailure } from "./package-install-status.js";
 import { findPortForSession, getWorkspacePathForPort } from "./session-routing.js";
 import { SessionSidebar } from "./session-sidebar.js";
+import { createConfigSubnav } from "./settings-config-subnav.js";
 import {
   clearSettingsSaveMessage,
   setSettingsSaveButtonSaving,
@@ -1625,7 +1627,11 @@ function currentOnboardingState() {
 }
 
 function openConfigurationSettings() {
-  return openSettings().then(() => selectSettingsTab("configuration"));
+  return openSettings().then(() => {
+    selectSettingsTab("configuration");
+    // API-key onboarding lands on Providers, not the last-active sub-page.
+    configSubnav?.open("providers");
+  });
 }
 
 function updateOnboardingUI() {
@@ -2995,6 +3001,9 @@ let piVersionInflight = null;
 let loadInlineConfigEditor = async () => {};
 let loadInlineModelsEditor = async () => {};
 let loadApiKeysPanel = async () => {};
+// Settings → Configuration sub-page controller (created after the loaders and
+// the agent-settings catalog below; see settings-config-subnav.js).
+let configSubnav = null;
 
 function selectSettingsTab(tabKey = "general") {
   const targetTabKey = tabKey === "auth" ? "configuration" : tabKey;
@@ -3005,10 +3014,8 @@ function selectSettingsTab(tabKey = "general") {
     tab.classList.toggle("active", tab.dataset.settingsPanel === targetTabKey);
   });
   if (targetTabKey === "configuration") {
-    loadApiKeysPanel();
-    agentSettings.load();
-    loadInlineConfigEditor();
-    loadInlineModelsEditor();
+    // Restores the last-active sub-page and lazily loads only what it needs.
+    configSubnav?.open();
   }
   if (targetTabKey === "extensions") {
     loadBrowsePackages();
@@ -3680,7 +3687,12 @@ setupSettingsToggles({
 }));
 
 // Settings → Configuration → Agent settings form (see agent-settings.js).
+// The catalog is split across the Configuration sub-pages via pageForKey;
+// rendered page sets are forwarded to the sub-page nav created just below
+// (the closure resolves at call time, after boot).
 const agentSettings = createAgentSettings({
+  getPageId: pageForKey,
+  onPageSetChanged: (pageIds) => configSubnav?.onCatalogPageSet(pageIds),
   fetchJson: async (url, options = {}) => {
     const resp = await fetch(url, {
       method: options.method || "GET",
@@ -3697,6 +3709,23 @@ const agentSettings = createAgentSettings({
   },
 });
 agentSettings.attach(document.getElementById("agent-settings-container"));
+
+// Settings → Configuration sub-pages (see settings-config-subnav.js). Each
+// page's loaders run once, on its first visit; the agent-settings catalog is
+// fetched once and shared across the catalog-backed pages.
+configSubnav = createConfigSubnav({
+  root: document.querySelector('[data-settings-panel="configuration"]'),
+  catalog: agentSettings,
+  loaders: {
+    providers: () => {
+      loadApiKeysPanel();
+      loadInlineModelsEditor();
+    },
+    advanced: () => {
+      loadInlineConfigEditor();
+    },
+  },
+});
 
 // Restore saved theme
 const savedTheme = getCurrentTheme();

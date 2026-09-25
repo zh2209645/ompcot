@@ -164,17 +164,29 @@ export const en = {
   "settings.requireLogin": "Require login",
   "settings.agentSettings": "Agent settings",
   "settings.agentSettingsHelp":
-    "Common agent options, editable in place. Changes save automatically and are picked up by the running agent. Secret keys are managed under Authentication above.",
+    "Common agent options, editable in place. Changes save automatically and are picked up by the running agent. Secret keys are managed on the Providers page.",
   "settings.loadingAgentSettings": "Loading agent settings…",
   "settings.agentConfigFile": "Agent config (~/.omp/agent/config.yml)",
   "settings.agentConfigHelp":
-    "Advanced: edit <code>~/.omp/agent/config.yml</code> directly as YAML/JSON. Prefer the form above for known keys.",
+    "Advanced: edit <code>~/.omp/agent/config.yml</code> directly as YAML/JSON. Prefer the categorized sub-pages for known keys.",
   "settings.agentConfigLabel": "Agent config file",
   "settings.llmProviders": "LLM providers",
   "settings.llmProvidersHelp":
     'Edit <code>~/.omp/agent/models.yml</code> to add custom providers (Ollama, vLLM, LM Studio, OpenAI-compatible proxies, OpenRouter routing overrides, etc). The file is YAML — JSON works too, since JSON is valid YAML. See the <a href="#">models.yml docs</a> for the full schema. Changes are picked up immediately — no restart needed.',
   "settings.providersFile": "Providers file",
   "settings.insertExample": "Insert example",
+  "settings.pages.label": "Configuration sections",
+  "settings.pages.providers": "Providers",
+  "settings.pages.appearance": "Appearance",
+  "settings.pages.model": "Model",
+  "settings.pages.interaction": "Interaction",
+  "settings.pages.context": "Context",
+  "settings.pages.memory": "Memory",
+  "settings.pages.files": "Files",
+  "settings.pages.shell": "Shell",
+  "settings.pages.tools": "Tools",
+  "settings.pages.tasks": "Tasks",
+  "settings.pages.advanced": "Advanced",
 
   // ── command palette ──
   "palette.commands": "Commands",

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createAgentSettings } from "./agent-settings.js";
+import { pageForKey } from "./agent-settings-pages.js";
 
 function makeCatalog() {
   return {
@@ -428,5 +429,127 @@ describe("createAgentSettings teardown", () => {
 
     // Late frame after destroy is a no-op, not a crash.
     pushFrame({ type: "settings_changed", path: "model.name", value: "opus" });
+  });
+});
+
+describe("createAgentSettings page mode", () => {
+  function setupPaged({
+    catalog = makeCatalog(),
+    fetchJson = defaultFetchJson(catalog),
+    onPageSetChanged,
+  } = {}) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const settings = createAgentSettings({
+      fetchJson,
+      wsSubscribe: () => () => {},
+      getPageId: pageForKey,
+      onPageSetChanged,
+    });
+    settings.attach(container);
+    return { settings, container, fetchJson };
+  }
+
+  test("tags each group with its sub-page and reports the non-empty page set", async () => {
+    const onPageSetChanged = vi.fn();
+    const { settings, container } = setupPaged({ onPageSetChanged });
+    await settings.load();
+
+    // model.*, tools.*, theme (unprefixed → appearance), permissions.* (advanced)
+    expect(onPageSetChanged).toHaveBeenCalledWith(["model", "tools", "appearance", "advanced"]);
+
+    const modelGroup = container.querySelector('.agent-settings-group[data-group="model"]');
+    expect(modelGroup.dataset.page).toBe("model");
+    expect(modelGroup.contains(rowOf(container, "model.temperature"))).toBe(true);
+
+    // The unprefixed `theme` key groups under "general" but maps to appearance.
+    const generalGroups = container.querySelectorAll('.agent-settings-group[data-group="general"]');
+    expect(generalGroups).toHaveLength(1);
+    expect(generalGroups[0].dataset.page).toBe("appearance");
+    expect(generalGroups[0].contains(rowOf(container, "theme"))).toBe(true);
+
+    const permissionsGroup = container.querySelector(
+      '.agent-settings-group[data-group="permissions"]',
+    );
+    expect(permissionsGroup.dataset.page).toBe("advanced");
+  });
+
+  test("setActivePage shows only that page's groups", async () => {
+    const { settings, container } = setupPaged();
+    await settings.load();
+
+    settings.setActivePage("model");
+    expect(
+      rowOf(container, "model.temperature")
+        .closest(".agent-settings-group")
+        .classList.contains("hidden"),
+    ).toBe(false);
+    expect(
+      container
+        .querySelector('.agent-settings-group[data-group="tools"]')
+        .classList.contains("hidden"),
+    ).toBe(true);
+    expect(
+      container
+        .querySelector('.agent-settings-group[data-group="general"]')
+        .classList.contains("hidden"),
+    ).toBe(true);
+
+    settings.setActivePage(null);
+    expect(
+      container
+        .querySelector('.agent-settings-group[data-group="tools"]')
+        .classList.contains("hidden"),
+    ).toBe(false);
+  });
+
+  test("page filtering composes with the filter query", async () => {
+    const { settings, container } = setupPaged();
+    await settings.load();
+
+    const filter = container.querySelector(".agent-settings-filter");
+    filter.value = "bash"; // tools.* key
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+
+    settings.setActivePage("model");
+    expect(
+      container
+        .querySelector('.agent-settings-group[data-group="tools"]')
+        .classList.contains("hidden"),
+    ).toBe(true);
+
+    settings.setActivePage("tools");
+    expect(
+      container
+        .querySelector('.agent-settings-group[data-group="tools"]')
+        .classList.contains("hidden"),
+    ).toBe(false);
+    expect(rowOf(container, "tools.bash.enabled").classList.contains("hidden")).toBe(false);
+  });
+
+  test("reports a null page set when the load fails", async () => {
+    const onPageSetChanged = vi.fn();
+    const fetchJson = vi.fn(async () => {
+      throw new Error("socket hang up");
+    });
+    const { settings } = setupPaged({ fetchJson, onPageSetChanged });
+    await settings.load();
+
+    expect(onPageSetChanged).toHaveBeenCalledWith(null);
+  });
+
+  test("page mode off (default) renders the flat list with no page tags", async () => {
+    const { settings, container } = setup();
+    await settings.load();
+
+    expect(container.querySelector('.agent-settings-group[data-group="model"]').dataset.page).toBe(
+      undefined,
+    );
+    expect(settings.setActivePage("model")).toBeUndefined(); // harmless no-op
+    expect(
+      container
+        .querySelector('.agent-settings-group[data-group="tools"]')
+        .classList.contains("hidden"),
+    ).toBe(false);
   });
 });
