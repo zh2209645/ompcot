@@ -203,6 +203,7 @@
 
   --user-bubble: #2a96d6;
   --user-bubble-text: white;
+  --user-bubble-border: none;
 
   --tool-accent: #007aff;
   --tool-accent-text: #007aff;
@@ -250,6 +251,7 @@
 
   --user-bubble: #b06a48;
   --user-bubble-text: white;
+  --user-bubble-border: none;
 
   --tool-accent: #5c2860;
   --tool-accent-text: #6b3570;
@@ -297,6 +299,7 @@
 
   --user-bubble: #6a7d5a;
   --user-bubble-text: white;
+  --user-bubble-border: none;
 
   --tool-accent: #4a3860;
   --tool-accent-text: #5c4870;
@@ -316,4 +319,434 @@
   --shadow-inset: none;
 
   --success: #2a8a52;
+}
+
+/* ═══ VS Code schemes — canonical editor palettes as first-class themes ═══ */
+
+/* ─── VS Code Dark+ ─── */
+:root[data-theme="vscode-dark-plus"] {
+  color-scheme: dark;
+
+  --bg-solid: #1e1e1e;
+  --header-bg: rgba(30, 30, 30, 1);
+  --sidebar-bg-mobile: rgba(37, 37, 38, 0.95);
+  --bg-glass: rgba(255, 255, 255, 0.04);
+  --bg-glass-hover: rgba(255, 255, 255, 0.06);
+  --bg-glass-active: rgba(255, 255, 255, 0.08);
+  --bg-glass-strong: rgba(255, 255, 255, 0.05);
+  --bg-frosted: rgba(30, 30, 30, 0.85);
+
+  --text-primary: rgba(212, 212, 212, 0.9);
+  --text-secondary: rgba(212, 212, 212, 0.55);
+  --text-dim: rgba(212, 212, 212, 0.35);
+  --text-ghost: rgba(212, 212, 212, 0.12);
+
+  --accent: #007acc;
+  --accent-glow: rgba(0, 122, 204, 0.2);
+  --accent-subtle: rgba(0, 122, 204, 0.08);
+  --accent-text: #3794cf;
+
+  --user-bubble: rgba(0, 122, 204, 0.14);
+  --user-bubble-text: var(--text-primary);
+  --user-bubble-border: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.12),
+    rgba(255, 255, 255, 0.02)
+  );
+
+  --tool-accent: #4ec9b0;
+  --tool-accent-text: #5fd0b8;
+  --tool-bg: rgba(78, 201, 176, 0.07);
+
+  --thinking-accent: #c586c0;
+  --thinking-accent-text: #cd96c8;
+  --thinking-bg: rgba(197, 134, 192, 0.08);
+
+  --border: rgba(255, 255, 255, 0.09);
+  --border-hover: rgba(255, 255, 255, 0.13);
+  --border-bright: rgba(255, 255, 255, 0.19);
+
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-inset: none;
+}
+
+/* ─── VS Code Light+ ─── */
+:root[data-theme="vscode-light-plus"] {
+  color-scheme: light;
+
+  --bg-solid: #ffffff;
+  --header-bg: rgba(255, 255, 255, 1);
+  --sidebar-bg-mobile: rgba(243, 243, 243, 0.95);
+  --bg-glass: rgba(0, 0, 0, 0.03);
+  --bg-glass-hover: rgba(0, 0, 0, 0.06);
+  --bg-glass-active: rgba(0, 0, 0, 0.09);
+  --bg-glass-strong: rgba(0, 0, 0, 0.04);
+  --bg-frosted: rgba(255, 255, 255, 0.82);
+
+  --text-primary: rgba(59, 59, 59, 0.92);
+  --text-secondary: rgba(59, 59, 59, 0.55);
+  --text-dim: rgba(59, 59, 59, 0.35);
+  --text-ghost: rgba(59, 59, 59, 0.12);
+
+  --accent: #007acc;
+  --accent-glow: rgba(0, 122, 204, 0.15);
+  --accent-subtle: rgba(0, 122, 204, 0.06);
+  --accent-text: #006ab1;
+  --header-pill-text: rgba(0, 0, 0, 0.55);
+
+  --user-bubble: #007acc;
+  --user-bubble-text: white;
+  --user-bubble-border: none;
+
+  --tool-accent: #267f79;
+  --tool-accent-text: #267f79;
+  --tool-bg: rgba(38, 127, 121, 0.06);
+
+  --thinking-accent: #af00db;
+  --thinking-accent-text: #9a0cc2;
+  --thinking-bg: rgba(175, 0, 219, 0.05);
+
+  --border: rgba(0, 0, 0, 0.1);
+  --border-hover: rgba(0, 0, 0, 0.16);
+  --border-bright: rgba(0, 0, 0, 0.22);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-inset: none;
+}
+
+/* ─── VS Code Monokai ─── */
+:root[data-theme="vscode-monokai"] {
+  color-scheme: dark;
+
+  --bg-solid: #272822;
+  --header-bg: rgba(39, 40, 34, 1);
+  --sidebar-bg-mobile: rgba(31, 32, 28, 0.95);
+  --bg-glass: rgba(255, 255, 255, 0.05);
+  --bg-glass-hover: rgba(255, 255, 255, 0.07);
+  --bg-glass-active: rgba(255, 255, 255, 0.09);
+  --bg-glass-strong: rgba(255, 255, 255, 0.06);
+  --bg-frosted: rgba(39, 40, 34, 0.85);
+
+  --text-primary: rgba(248, 248, 242, 0.92);
+  --text-secondary: rgba(248, 248, 242, 0.6);
+  --text-dim: rgba(248, 248, 242, 0.4);
+  --text-ghost: rgba(248, 248, 242, 0.14);
+
+  --accent: #a6e22e;
+  --accent-glow: rgba(166, 226, 46, 0.18);
+  --accent-subtle: rgba(166, 226, 46, 0.07);
+  --accent-text: #b8ea54;
+
+  --user-bubble: rgba(166, 226, 46, 0.1);
+  --user-bubble-text: var(--text-primary);
+  --user-bubble-border: linear-gradient(135deg, rgba(166, 226, 46, 0.2), rgba(255, 255, 255, 0.03));
+
+  --tool-accent: #f92672;
+  --tool-accent-text: #ff6a9e;
+  --tool-bg: rgba(249, 38, 114, 0.08);
+
+  --thinking-accent: #66d9ef;
+  --thinking-accent-text: #8fe0f0;
+  --thinking-bg: rgba(102, 217, 239, 0.08);
+
+  --border: rgba(255, 255, 255, 0.1);
+  --border-hover: rgba(255, 255, 255, 0.15);
+  --border-bright: rgba(255, 255, 255, 0.21);
+
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-inset: none;
+}
+
+/* ─── VS Code Solarized Dark ─── */
+:root[data-theme="vscode-solarized-dark"] {
+  color-scheme: dark;
+
+  --bg-solid: #002b36;
+  --header-bg: rgba(0, 43, 54, 1);
+  --sidebar-bg-mobile: rgba(7, 54, 66, 0.95);
+  --bg-glass: rgba(255, 255, 255, 0.05);
+  --bg-glass-hover: rgba(255, 255, 255, 0.08);
+  --bg-glass-active: rgba(255, 255, 255, 0.1);
+  --bg-glass-strong: rgba(255, 255, 255, 0.06);
+  --bg-frosted: rgba(0, 43, 54, 0.88);
+
+  --text-primary: rgba(131, 148, 150, 0.95);
+  --text-secondary: rgba(131, 148, 150, 0.68);
+  --text-dim: rgba(131, 148, 150, 0.46);
+  --text-ghost: rgba(131, 148, 150, 0.18);
+
+  --accent: #268bd2;
+  --accent-glow: rgba(38, 139, 210, 0.25);
+  --accent-subtle: rgba(38, 139, 210, 0.1);
+  --accent-text: #4fb0e8;
+
+  --user-bubble: rgba(38, 139, 210, 0.14);
+  --user-bubble-text: var(--text-primary);
+  --user-bubble-border: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.12),
+    rgba(255, 255, 255, 0.02)
+  );
+
+  --tool-accent: #2aa198;
+  --tool-accent-text: #42b8ae;
+  --tool-bg: rgba(42, 161, 152, 0.1);
+
+  --thinking-accent: #b58900;
+  --thinking-accent-text: #d9af3a;
+  --thinking-bg: rgba(181, 137, 0, 0.12);
+
+  --border: rgba(255, 255, 255, 0.12);
+  --border-hover: rgba(255, 255, 255, 0.17);
+  --border-bright: rgba(255, 255, 255, 0.24);
+
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-inset: none;
+}
+
+/* ─── VS Code Solarized Light ─── */
+:root[data-theme="vscode-solarized-light"] {
+  color-scheme: light;
+
+  --bg-solid: #fdf6e3;
+  --header-bg: rgba(253, 246, 227, 1);
+  --sidebar-bg-mobile: rgba(238, 232, 213, 0.95);
+  --bg-glass: rgba(253, 246, 227, 0.6);
+  --bg-glass-hover: rgba(0, 0, 0, 0.06);
+  --bg-glass-active: rgba(0, 0, 0, 0.1);
+  --bg-glass-strong: rgba(253, 246, 227, 0.7);
+  --bg-frosted: rgba(253, 246, 227, 0.82);
+
+  --text-primary: #657b83;
+  --text-secondary: rgba(101, 123, 131, 0.78);
+  --text-dim: rgba(101, 123, 131, 0.55);
+  --text-ghost: rgba(101, 123, 131, 0.2);
+
+  --accent: #268bd2;
+  --accent-glow: rgba(38, 139, 210, 0.15);
+  --accent-subtle: rgba(38, 139, 210, 0.07);
+  --accent-text: #1f70a8;
+  --header-pill-text: rgba(0, 0, 0, 0.65);
+
+  --user-bubble: #268bd2;
+  --user-bubble-text: white;
+  --user-bubble-border: none;
+
+  --tool-accent: #2aa198;
+  --tool-accent-text: #1d857c;
+  --tool-bg: rgba(42, 161, 152, 0.08);
+
+  --thinking-accent: #b58900;
+  --thinking-accent-text: #9a7400;
+  --thinking-bg: rgba(181, 137, 0, 0.08);
+
+  --border: rgba(88, 110, 117, 0.14);
+  --border-hover: rgba(88, 110, 117, 0.2);
+  --border-bright: rgba(88, 110, 117, 0.28);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-inset: none;
+}
+
+/* ─── VS Code One Dark Pro ─── */
+:root[data-theme="vscode-one-dark-pro"] {
+  color-scheme: dark;
+
+  --bg-solid: #282c34;
+  --header-bg: rgba(40, 44, 52, 1);
+  --sidebar-bg-mobile: rgba(33, 37, 43, 0.95);
+  --bg-glass: rgba(255, 255, 255, 0.04);
+  --bg-glass-hover: rgba(255, 255, 255, 0.06);
+  --bg-glass-active: rgba(255, 255, 255, 0.09);
+  --bg-glass-strong: rgba(255, 255, 255, 0.05);
+  --bg-frosted: rgba(40, 44, 52, 0.85);
+
+  --text-primary: rgba(171, 178, 191, 0.95);
+  --text-secondary: rgba(171, 178, 191, 0.6);
+  --text-dim: rgba(171, 178, 191, 0.4);
+  --text-ghost: rgba(171, 178, 191, 0.14);
+
+  --accent: #61afef;
+  --accent-glow: rgba(97, 175, 239, 0.2);
+  --accent-subtle: rgba(97, 175, 239, 0.08);
+  --accent-text: #7cbdf5;
+
+  --user-bubble: rgba(97, 175, 239, 0.1);
+  --user-bubble-text: var(--text-primary);
+  --user-bubble-border: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.11),
+    rgba(255, 255, 255, 0.02)
+  );
+
+  --tool-accent: #98c379;
+  --tool-accent-text: #a3d184;
+  --tool-bg: rgba(152, 195, 121, 0.08);
+
+  --thinking-accent: #c678dd;
+  --thinking-accent-text: #cf8ae3;
+  --thinking-bg: rgba(198, 120, 221, 0.1);
+
+  --border: rgba(255, 255, 255, 0.09);
+  --border-hover: rgba(255, 255, 255, 0.13);
+  --border-bright: rgba(255, 255, 255, 0.19);
+
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-inset: none;
+}
+
+/* ─── VS Code Dracula ─── */
+:root[data-theme="vscode-dracula"] {
+  color-scheme: dark;
+
+  --bg-solid: #282a36;
+  --header-bg: rgba(40, 42, 54, 1);
+  --sidebar-bg-mobile: rgba(34, 36, 47, 0.95);
+  --bg-glass: rgba(255, 255, 255, 0.04);
+  --bg-glass-hover: rgba(255, 255, 255, 0.07);
+  --bg-glass-active: rgba(255, 255, 255, 0.09);
+  --bg-glass-strong: rgba(255, 255, 255, 0.05);
+  --bg-frosted: rgba(40, 42, 54, 0.85);
+
+  --text-primary: rgba(248, 248, 242, 0.92);
+  --text-secondary: rgba(248, 248, 242, 0.6);
+  --text-dim: rgba(248, 248, 242, 0.4);
+  --text-ghost: rgba(248, 248, 242, 0.14);
+
+  --accent: #bd93f9;
+  --accent-glow: rgba(189, 147, 249, 0.2);
+  --accent-subtle: rgba(189, 147, 249, 0.08);
+  --accent-text: #cfa9ff;
+
+  --user-bubble: rgba(189, 147, 249, 0.12);
+  --user-bubble-text: var(--text-primary);
+  --user-bubble-border: linear-gradient(
+    135deg,
+    rgba(255, 121, 198, 0.16),
+    rgba(255, 255, 255, 0.03)
+  );
+
+  --tool-accent: #ff79c6;
+  --tool-accent-text: #ff8fce;
+  --tool-bg: rgba(255, 121, 198, 0.08);
+
+  --thinking-accent: #8be9fd;
+  --thinking-accent-text: #a5eefd;
+  --thinking-bg: rgba(139, 233, 253, 0.08);
+
+  --border: rgba(255, 255, 255, 0.11);
+  --border-hover: rgba(255, 255, 255, 0.16);
+  --border-bright: rgba(255, 255, 255, 0.22);
+
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-inset: none;
+}
+
+/* ─── VS Code GitHub Dark ─── */
+:root[data-theme="vscode-github-dark"] {
+  color-scheme: dark;
+
+  --bg-solid: #0d1117;
+  --header-bg: rgba(13, 17, 23, 1);
+  --sidebar-bg-mobile: rgba(22, 27, 34, 0.95);
+  --bg-glass: rgba(255, 255, 255, 0.04);
+  --bg-glass-hover: rgba(255, 255, 255, 0.06);
+  --bg-glass-active: rgba(255, 255, 255, 0.08);
+  --bg-glass-strong: rgba(255, 255, 255, 0.05);
+  --bg-frosted: rgba(13, 17, 23, 0.9);
+
+  --text-primary: rgba(230, 237, 243, 0.92);
+  --text-secondary: rgba(230, 237, 243, 0.58);
+  --text-dim: rgba(230, 237, 243, 0.38);
+  --text-ghost: rgba(230, 237, 243, 0.13);
+
+  --accent: #2ea043;
+  --accent-glow: rgba(46, 160, 67, 0.25);
+  --accent-subtle: rgba(46, 160, 67, 0.1);
+  --accent-text: #3fb950;
+
+  --user-bubble: rgba(46, 160, 67, 0.12);
+  --user-bubble-text: var(--text-primary);
+  --user-bubble-border: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.12),
+    rgba(255, 255, 255, 0.02)
+  );
+
+  --tool-accent: #58a6ff;
+  --tool-accent-text: #79b8ff;
+  --tool-bg: rgba(88, 166, 255, 0.08);
+
+  --thinking-accent: #bc8cff;
+  --thinking-accent-text: #c9a0ff;
+  --thinking-bg: rgba(188, 140, 255, 0.09);
+
+  --border: rgba(255, 255, 255, 0.11);
+  --border-hover: rgba(255, 255, 255, 0.16);
+  --border-bright: rgba(255, 255, 255, 0.22);
+
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-inset: none;
+}
+
+/* ─── VS Code GitHub Light ─── */
+:root[data-theme="vscode-github-light"] {
+  color-scheme: light;
+
+  --bg-solid: #ffffff;
+  --header-bg: rgba(255, 255, 255, 1);
+  --sidebar-bg-mobile: rgba(246, 248, 250, 0.95);
+  --bg-glass: rgba(0, 0, 0, 0.03);
+  --bg-glass-hover: rgba(0, 0, 0, 0.06);
+  --bg-glass-active: rgba(0, 0, 0, 0.09);
+  --bg-glass-strong: rgba(0, 0, 0, 0.04);
+  --bg-frosted: rgba(255, 255, 255, 0.85);
+
+  --text-primary: rgba(31, 35, 40, 0.92);
+  --text-secondary: rgba(31, 35, 40, 0.55);
+  --text-dim: rgba(31, 35, 40, 0.35);
+  --text-ghost: rgba(31, 35, 40, 0.12);
+
+  --accent: #1f883d;
+  --accent-glow: rgba(31, 136, 61, 0.18);
+  --accent-subtle: rgba(31, 136, 61, 0.07);
+  --accent-text: #1a7f37;
+  --header-pill-text: rgba(0, 0, 0, 0.6);
+
+  --user-bubble: #1f883d;
+  --user-bubble-text: white;
+  --user-bubble-border: none;
+
+  --tool-accent: #0969da;
+  --tool-accent-text: #0969da;
+  --tool-bg: rgba(9, 105, 218, 0.06);
+
+  --thinking-accent: #8250df;
+  --thinking-accent-text: #8250df;
+  --thinking-bg: rgba(130, 80, 223, 0.06);
+
+  --border: rgba(31, 35, 40, 0.13);
+  --border-hover: rgba(31, 35, 40, 0.2);
+  --border-bright: rgba(31, 35, 40, 0.27);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-inset: none;
 }

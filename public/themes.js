@@ -1,5 +1,10 @@
 /**
- * Theme system — four themes: two light, two dark
+ * Theme system — built-in themes + VS Code color schemes
+ *
+ * Every entry needs a matching `:root[data-theme="<id>"]` token block in
+ * `style-theme.css`. `group` ("builtin" | "vscode") controls which labeled
+ * cluster the swatch renders under in Settings → Appearance; entries without
+ * a group are treated as "builtin".
  *
  * Storage note: the active theme is persisted in a cookie (not
  * localStorage). Ompcot spawns one omp process per workspace, each on
@@ -47,6 +52,72 @@ export const themes = {
     name: "Sage",
     dark: false,
     colors: ["#f0f2ec", "#6a7d5a", "#4a3860", "#3a6a7a"],
+    vars: {},
+  },
+
+  // VS Code schemes — canonical editor palettes. Names are product names and
+  // stay in English in every locale.
+  "vscode-dark-plus": {
+    group: "vscode",
+    name: "Dark+",
+    dark: true,
+    colors: ["#1e1e1e", "#007acc", "#4ec9b0", "#c586c0"],
+    vars: {},
+  },
+  "vscode-light-plus": {
+    group: "vscode",
+    name: "Light+",
+    dark: false,
+    colors: ["#ffffff", "#007acc", "#267f79", "#af00db"],
+    vars: {},
+  },
+  "vscode-monokai": {
+    group: "vscode",
+    name: "Monokai",
+    dark: true,
+    colors: ["#272822", "#a6e22e", "#f92672", "#66d9ef"],
+    vars: {},
+  },
+  "vscode-solarized-dark": {
+    group: "vscode",
+    name: "Solarized Dark",
+    dark: true,
+    colors: ["#002b36", "#268bd2", "#2aa198", "#b58900"],
+    vars: {},
+  },
+  "vscode-solarized-light": {
+    group: "vscode",
+    name: "Solarized Light",
+    dark: false,
+    colors: ["#fdf6e3", "#268bd2", "#2aa198", "#b58900"],
+    vars: {},
+  },
+  "vscode-one-dark-pro": {
+    group: "vscode",
+    name: "One Dark Pro",
+    dark: true,
+    colors: ["#282c34", "#61afef", "#98c379", "#c678dd"],
+    vars: {},
+  },
+  "vscode-dracula": {
+    group: "vscode",
+    name: "Dracula",
+    dark: true,
+    colors: ["#282a36", "#bd93f9", "#ff79c6", "#8be9fd"],
+    vars: {},
+  },
+  "vscode-github-dark": {
+    group: "vscode",
+    name: "GitHub Dark",
+    dark: true,
+    colors: ["#0d1117", "#2ea043", "#58a6ff", "#bc8cff"],
+    vars: {},
+  },
+  "vscode-github-light": {
+    group: "vscode",
+    name: "GitHub Light",
+    dark: false,
+    colors: ["#ffffff", "#1f883d", "#0969da", "#8250df"],
     vars: {},
   },
 };

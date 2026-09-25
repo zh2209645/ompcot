@@ -3988,25 +3988,54 @@ wsClient.addEventListener("capabilities", () => {
   void ompBinarySettings.refresh();
 });
 
+// Settings → Appearance renders two labeled clusters: the built-in Ompcot
+// themes and the VS Code color schemes (themes.js `group` field).
+const THEME_GROUPS = [
+  { key: "builtin", titleKey: "settings.themeGroupBuiltin" },
+  { key: "vscode", titleKey: "settings.themeGroupVscode" },
+];
+
 function buildThemeGrid() {
   themeGrid.innerHTML = "";
   const current = getCurrentTheme();
+  const entries = Object.entries(themes);
 
-  for (const [id, theme] of Object.entries(themes)) {
-    const btn = document.createElement("button");
-    btn.className = `theme-swatch${current === id ? " active" : ""}`;
-    const dots = (theme.colors || [])
-      .map((c) => `<span class="swatch-dot" style="background:${c}"></span>`)
-      .join("");
-    btn.innerHTML = `<span class="swatch-colors">${dots}</span>`;
-    btn.addEventListener("click", () => {
-      applyTheme(id);
-      themeGrid.querySelectorAll(".theme-swatch").forEach((s) => {
-        s.classList.remove("active");
+  for (const group of THEME_GROUPS) {
+    const groupEntries = entries.filter(([, theme]) => (theme.group ?? "builtin") === group.key);
+    if (groupEntries.length === 0) continue;
+
+    const groupEl = document.createElement("div");
+    groupEl.className = "theme-group";
+
+    const title = document.createElement("div");
+    title.className = "theme-group-title";
+    title.textContent = t(group.titleKey);
+    groupEl.appendChild(title);
+
+    const grid = document.createElement("div");
+    grid.className = "theme-group-grid";
+
+    for (const [id, theme] of groupEntries) {
+      const btn = document.createElement("button");
+      btn.className = `theme-swatch${current === id ? " active" : ""}`;
+      btn.title = theme.name;
+      const dots = (theme.colors || [])
+        .map((c) => `<span class="swatch-dot" style="background:${c}"></span>`)
+        .join("");
+      btn.innerHTML = `<span class="swatch-colors">${dots}</span><span class="swatch-name"></span>`;
+      btn.querySelector(".swatch-name").textContent = theme.name;
+      btn.addEventListener("click", () => {
+        applyTheme(id);
+        themeGrid.querySelectorAll(".theme-swatch").forEach((s) => {
+          s.classList.remove("active");
+        });
+        btn.classList.add("active");
       });
-      btn.classList.add("active");
-    });
-    themeGrid.appendChild(btn);
+      grid.appendChild(btn);
+    }
+
+    groupEl.appendChild(grid);
+    themeGrid.appendChild(groupEl);
   }
 }
 
@@ -4237,6 +4266,9 @@ onLanguageChanged(() => {
     updateConnectionStatus(lastConnectionStatus);
   }
   updateTokenUsage();
+  // Theme grid headings + swatch names are JS-built; rebuild so a live
+  // language switch while Settings is open doesn't leave stale labels.
+  buildThemeGrid();
   // Queued-strip labels (Queued / idle hint / Steer now) are JS-built.
   renderQueuedMessages();
   const modelSearch = modelDropdownMenu.querySelector(".model-dropdown-search");

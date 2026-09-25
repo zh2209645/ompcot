@@ -2854,7 +2854,7 @@ body {
     flex-wrap: wrap;
   }
 
-  .theme-grid {
+  .theme-group-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -3094,12 +3094,36 @@ body {
   color: var(--text-primary);
 }
 
-/* Theme grid */
+/* Theme grid — two labeled clusters (built-in / VS Code), each a 2-col grid.
+   Capped height keeps 15 swatches from pushing the rest of General below the
+   fold; the container scrolls when it overflows. */
 .theme-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 380px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.theme-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.theme-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.theme-group-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
-  margin-bottom: 0;
 }
 
 .theme-swatch {
@@ -3263,6 +3287,14 @@ body {
   height: 12px;
   border-radius: 50%;
   border: 1px solid var(--border);
+}
+
+.swatch-name {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ═══════════════════════════════════════════════════════

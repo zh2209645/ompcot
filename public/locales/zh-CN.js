@@ -277,6 +277,10 @@ export const zhCN = {
   "mcp.argsPlaceholder": "每行一个参数",
   "mcp.envPlaceholder": "KEY=值（每行一条）",
 
+  // ── 主题分组（设置 → 外观）──
+  "settings.themeGroupBuiltin": "内置主题",
+  "settings.themeGroupVscode": "VS Code 配色",
+
   // ── fork availability (feature-detected from the server reply) ──
   "fork.unavailable": "当前版本不支持分叉",
 

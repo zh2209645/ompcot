@@ -283,6 +283,10 @@ export const en = {
   "mcp.argsPlaceholder": "one argument per line",
   "mcp.envPlaceholder": "KEY=value (one per line)",
 
+  // ── theme groups (Settings → Appearance) ──
+  "settings.themeGroupBuiltin": "Built-in themes",
+  "settings.themeGroupVscode": "VS Code schemes",
+
   // ── fork availability (feature-detected from the server reply) ──
   "fork.unavailable": "Fork unavailable in this build",
 
