@@ -31,16 +31,16 @@ afterEach(() => {
 });
 
 describe("thinkingLevelLabel", () => {
-  test("localizes the known levels and falls back to the raw level", () => {
+  test("labels known levels with their canonical names and falls back to the raw level", () => {
     expect(THINKING_LEVELS).toEqual(["off", "minimal", "low", "medium", "high"]);
-    expect(thinkingLevelLabel("off")).toBe("Off");
-    expect(thinkingLevelLabel("medium")).toBe("Medium");
+    expect(thinkingLevelLabel("off")).toBe("off");
+    expect(thinkingLevelLabel("medium")).toBe("medium");
     expect(thinkingLevelLabel("turbo")).toBe("turbo");
   });
 
   test("labels the extended server levels", () => {
     expect(thinkingLevelLabel("xhigh")).toBe("xhigh");
-    expect(thinkingLevelLabel("max")).toBe("Max");
+    expect(thinkingLevelLabel("max")).toBe("max");
   });
 });
 
@@ -80,7 +80,7 @@ describe("setupThinkingLevelMenu", () => {
     const items = itemsOf(menu);
     expect(items.map((el) => el.dataset.level)).toEqual(["off", "low", "high", "xhigh", "max"]);
     expect(items[3].textContent).toContain("xhigh");
-    expect(items[4].textContent).toContain("Max");
+    expect(items[4].textContent).toContain("max");
     expect(items.find((el) => el.classList.contains("active")).dataset.level).toBe("high");
   });
 
@@ -103,7 +103,7 @@ describe("setupThinkingLevelMenu", () => {
     api.setLevels(["off", "medium", "max"]);
     const items = itemsOf(menu);
     expect(items.map((el) => el.dataset.level)).toEqual(["off", "medium", "max"]);
-    expect(items[2].textContent).toContain("Max");
+    expect(items[2].textContent).toContain("max");
     expect(menu.classList.contains("hidden")).toBe(false);
   });
 
