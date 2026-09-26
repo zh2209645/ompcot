@@ -30,6 +30,7 @@ import {
 import { setupMessagesInsets } from "./layout-insets.js";
 import { createMcpManager } from "./mcp-manager.js";
 import { MessageRenderer } from "./message-renderer.js";
+import { createModelsReasoning } from "./models-reasoning.js";
 import { resolveNewSessionLiveFile } from "./new-session-refresh.js";
 import { createOmpBinarySettings } from "./omp-binary-settings.js";
 import { getOnboardingState } from "./onboarding-state.js";
@@ -4361,6 +4362,13 @@ const mcpManager = createMcpManager({
   wsClient,
 });
 
+// Settings → Configuration → Models & Reasoning page (see models-reasoning.js).
+// Live list like MCP: the loader refetches on every sub-page activation.
+const modelsReasoning = createModelsReasoning({
+  root: document.getElementById("models-reasoning-root"),
+  wsClient,
+});
+
 // Settings → Usage: account usage section above the cost dashboard (B6).
 // Refreshed each time the Usage tab opens (see selectSettingsTab).
 const accountUsage = createAccountUsage({
@@ -4392,6 +4400,9 @@ configSubnav = createConfigSubnav({
     },
     mcp: () => {
       mcpManager.refresh().catch(() => {});
+    },
+    models: () => {
+      modelsReasoning.refresh().catch(() => {});
     },
   },
 });

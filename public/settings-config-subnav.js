@@ -2,9 +2,10 @@
 //
 // Owns the pill strip (#settings-config-subnav) and the visibility of the
 // Configuration panel's page regions: the static Providers section (auth keys,
-// protection, models.yml), the shared agent-settings catalog host (one mount
-// whose groups are filtered per sub-page by agent-settings.js), the static MCP
-// servers page (mcp-manager.js), and the static Advanced section (config.yml).
+// models.yml), the static Models & Reasoning page (models-reasoning.js), the
+// shared agent-settings catalog host (one mount whose groups are filtered per
+// sub-page by agent-settings.js), the static MCP servers page (mcp-manager.js),
+// and the static Advanced section (config.yml).
 //
 // Behavior:
 // - The last-active sub-page persists for the window session; `open()` (called
@@ -23,11 +24,11 @@ import { onLanguageChanged, t } from "./i18n.js";
 
 // Static pages own their entire markup (no shared agent-settings catalog
 // mount) — the catalog host must stay out of the way while they are active.
-const STATIC_PAGES = new Set(["providers", "mcp"]);
+const STATIC_PAGES = new Set(["providers", "models", "mcp"]);
 
 // Pages whose loader is a live list: re-run on every activation (providers /
 // advanced are one-shot editors and load once per window session).
-const RELOAD_ON_OPEN = new Set(["mcp"]);
+const RELOAD_ON_OPEN = new Set(["models", "mcp"]);
 
 export function createConfigSubnav({ root, catalog, loaders = {} }) {
   const subnavEl = root?.querySelector("#settings-config-subnav") ?? null;

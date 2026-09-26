@@ -5,10 +5,11 @@
 // first key segment (the same segment agent-settings.js groups by). The
 // taxonomy mirrors the omp TUI /settings panel (appearance, model, interaction,
 // context, memory, files, shell, tools, tasks), bookended by two
-// Ompcot-specific pages: Providers (authentication + models.yml, both static
-// UI) and Advanced (raw config.yml plus every catalog key the map below does
-// not claim). Unmapped segments always land in Advanced so a setting can never
-// disappear from the UI.
+// Ompcot-specific pages: Providers (authentication + models.yml), Models &
+// Reasoning (roles/thinking/task-agent overrides over dedicated RPCs) — both
+// static UI — and Advanced (raw config.yml plus every catalog key the map
+// below does not claim). Unmapped segments always land in Advanced so a
+// setting can never disappear from the UI.
 //
 // `providers` catalog keys are deliberately NOT mapped to the Providers page:
 // that page is static (API keys + models.yml) so it stays instant to open, and
@@ -17,6 +18,10 @@
 /** Sub-pages in display order. `always: true` pages exist with or without catalog entries. */
 export const CONFIG_PAGES = [
   { id: "providers", i18nKey: "settings.pages.providers", always: true },
+  // Models & Reasoning — model roles, default thinking depth and task-agent
+  // overrides, managed over dedicated RPCs (models-reasoning.js), not the
+  // settings catalog.
+  { id: "models", i18nKey: "models.pageTitle", always: true },
   { id: "appearance", i18nKey: "settings.pages.appearance" },
   { id: "model", i18nKey: "settings.pages.model" },
   { id: "interaction", i18nKey: "settings.pages.interaction" },

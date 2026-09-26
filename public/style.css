@@ -6732,3 +6732,296 @@ html.macos-overlay .settings-content {
   margin-top: 6px;
   line-height: 1.5;
 }
+
+/* ═══════════════════════════════════════════════════════
+   Models & Reasoning (Configuration sub-page)
+   Roles/main render as plain settings rows; task agents are
+   bordered glass cards (mcp-card tokens). Status tones match
+   .settings-static-value[data-tone].
+   ═══════════════════════════════════════════════════════ */
+
+.mr-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.mr-note {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.mr-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  color: var(--error);
+  font-size: 12px;
+}
+
+.mr-retry {
+  font-family: inherit;
+  flex-shrink: 0;
+}
+
+/* One picker/role row — label grows, control + status pack right. */
+.mr-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.mr-row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mr-row-id {
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mr-row-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.mr-select {
+  width: min(250px, 55vw);
+  flex-shrink: 0;
+}
+
+/* Clear-role ✕ — same tokens as the per-setting reset (↺) button. */
+.mr-clear {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+
+.mr-clear:hover {
+  background: var(--bg-glass-hover);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.mr-status {
+  flex-shrink: 0;
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.mr-status[data-tone="ok"] {
+  color: var(--accent-success, #4ade80);
+}
+
+.mr-status[data-tone="error"] {
+  color: var(--accent-danger, #ef4444);
+}
+
+.mr-status.hidden {
+  display: none;
+}
+
+.mr-hint {
+  margin-bottom: 0;
+}
+
+/* Task agent card */
+
+.mr-agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mr-agent {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass);
+  padding: 10px 12px;
+  transition:
+    background var(--duration) var(--ease),
+    border-color var(--duration) var(--ease),
+    opacity var(--duration) var(--ease);
+}
+
+.mr-agent:hover {
+  border-color: var(--border-hover);
+}
+
+.mr-agent-error,
+.mr-agent-disabled {
+  opacity: 0.7;
+}
+
+.mr-agent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mr-agent-head .settings-toggle {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.mr-agent-name {
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.mr-agent-error .mr-agent-name {
+  color: var(--text-dim);
+}
+
+.mr-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--bg-glass-strong);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
+
+.mr-badge-muted {
+  border-style: dashed;
+}
+
+.mr-agent-desc {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mr-agent-parse {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--accent-warning, #f59e0b);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mr-agent-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-top: 8px;
+}
+
+.mr-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 7px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mr-chip-label {
+  color: var(--text-dim);
+  background: var(--bg-glass);
+}
+
+.mr-override {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.mr-override-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.mr-override .mr-select {
+  width: min(190px, 48vw);
+}
+
+.mr-footnote {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+@media (max-width: 920px) {
+  .mr-row {
+    flex-wrap: wrap;
+  }
+
+  .mr-row .mr-select {
+    flex: 1 1 180px;
+    width: auto;
+  }
+
+  .mr-status {
+    max-width: 100%;
+  }
+
+  .mr-agent-desc {
+    white-space: normal;
+  }
+
+  .mr-override {
+    margin-left: 0;
+  }
+}

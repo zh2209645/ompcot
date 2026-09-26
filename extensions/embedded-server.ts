@@ -519,18 +519,23 @@ type ServerHandle = {
 interface RpcCommand {
   type: string;
   id?: string;
+  agent?: string;
   apiKey?: string;
   confirmed?: boolean;
   cancelled?: boolean;
   customInstructions?: string;
+  disabled?: boolean;
   entryId?: string;
   images?: Array<{ data?: string; mimeType?: string }>;
   level?: string;
   message: string;
+  model?: string | null;
   modelId?: string;
   name?: string;
   outputPath?: string;
   provider?: string;
+  role?: string;
+  selector?: string | null;
   sessionPath?: string;
   source?: string;
   streamingBehavior?: string;
@@ -602,6 +607,10 @@ type EmbeddedServerGlobal = {
   agentsChangeSubscribed: boolean;
   // Idempotence flag for the one-shot OMCOT_DEBUG_NAMESPACE startup dump.
   namespaceDebugLogged: boolean;
+  // Process-scoped cache for the dynamically imported model-role metadata
+  // module (`@oh-my-pi/*-coding-agent/config/model-roles`). Same memo
+  // pattern as mcpModuleCache; a resolved `null` is cached too.
+  modelRolesModuleCache: { promise: Promise<ModelRolesModuleLike | null> | null };
   // Process-scoped cache for the dynamically imported MCP management module
   // (`@oh-my-pi/*-coding-agent/mcp`). The promise memo survives extension
   // reloads; a resolved `null` (module unreachable) is cached too so repeated
@@ -754,6 +763,177 @@ function resolveThinkingLevels(model: unknown): string[] {
   if (levels.length === 0) return [];
   levels.sort((a, b) => THINKING_EFFORT_ORDER.indexOf(a) - THINKING_EFFORT_ORDER.indexOf(b));
   return ["off", ...levels];
+}
+
+// ─── Models & Reasoning configuration: static omp knowledge ──────────────────
+//
+// Backing for the `get_model_configuration` / `set_model_role` /
+// `set_default_thinking_level` / `set_task_agent_*` RPCs (the "Models &
+// Reasoning" Configuration page). Verified against omp 18.3.0 sources:
+//
+//   - Role ids: pi-tui `overlays/model-browser.ts` exports
+//     MODEL_ROLE_IDS (15 built-ins, none hidden in MODEL_ROLES):
+//       CHAT_MODEL_ROLE_IDS = [default, smol, slow, vision, plan, commit,
+//                              tiny, memory, task, advisor]
+//       KIND_ROLE_IDS       = [image, web, speech, dictation, judge]
+//     The runtime's canonical enumeration is `getKnownRoleIds(settings)`
+//     (pi-coding-agent `config/model-roles.ts`): built-ins + `cycleOrder` +
+//     `modelRoles` keys + `modelTags` keys. We prefer the runtime function
+//     (namespace probe → dynamic import) and otherwise reproduce that union
+//     locally off the Settings singleton, with this list as the floor.
+//
+//   - `defaultThinkingLevel` schema enum is exactly `[...Effort[], "auto"]`
+//     (settings-schema.d.ts) — pi-catalog `Effort` = minimal/low/medium/high/
+//     xhigh/max. The agent-local selector values "off" and "inherit"
+//     (pi-agent-core ThinkingLevel) are NOT accepted for the persisted
+//     main-session default, so they are excluded from thinkingLevelOptions.
+
+const BUILTIN_MODEL_ROLE_IDS: readonly string[] = [
+  "default",
+  "smol",
+  "slow",
+  "vision",
+  "plan",
+  "commit",
+  "tiny",
+  "memory",
+  "task",
+  "advisor",
+  "image",
+  "web",
+  "speech",
+  "dictation",
+  "judge",
+];
+
+// Display order for the persisted-default picker: "auto" first, then the
+// canonical effort ladder. Runtime schema values that are novel ids keep
+// their schema order after the canonical ones.
+const DEFAULT_THINKING_LEVEL_OPTIONS: readonly string[] = [
+  "auto",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+// Valid values for an agent definition frontmatter `thinkingLevel` (agent-local
+// ConfiguredThinkingLevel: ThinkingLevel | "auto").
+const AGENT_THINKING_LEVEL_VALUES: ReadonlySet<string> = new Set([
+  "auto",
+  "off",
+  "inherit",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+// Tolerant YAML-subset scalar unwrap for agent frontmatter: strips matching
+// quotes, tries JSON for [/{ literals, and passes anything else through
+// verbatim. Never throws.
+function parseYamlishScalar(raw: string): unknown {
+  const t = raw.trim();
+  if (!t) return "";
+  if (t.length >= 2) {
+    if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+      return t.slice(1, -1);
+    }
+  }
+  if (t.startsWith("[") || t.startsWith("{")) {
+    try {
+      return JSON.parse(t);
+    } catch {
+      /* fall through as raw */
+    }
+  }
+  return t;
+}
+
+// `model:` frontmatter accepts string | string[] (AgentDefinition.model is
+// string[]). Accept a bare selector, a JSON-encoded array (the canonical
+// writer emits `model: ["a","b"]`), or a comma-separated list.
+function coerceAgentModelList(raw: unknown): string[] {
+  let value = raw;
+  if (typeof value === "string") value = parseYamlishScalar(value);
+  if (Array.isArray(value)) {
+    return value
+      .filter((v): v is string => typeof v === "string" && !!v.trim())
+      .map((v) => v.trim());
+  }
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
+}
+
+// Parse ONLY the `---`-delimited frontmatter block of a task-agent markdown
+// file. This is a deliberately tolerant subset (flat `key: value` pairs +
+// block-style `- item` lists); omp's real loader (parseFrontmatter +
+// parseAgentFields) is stricter, and files we fail to understand are surfaced
+// with parseError:true instead of thrown. Returns null when no frontmatter
+// block is present at all.
+function parseTolerantAgentFrontmatter(content: string): {
+  name: string | null;
+  description: string;
+  model: string[];
+  thinkingLevel: string | null;
+} | null {
+  if (!content.startsWith("---")) return null;
+  const firstLineEnd = content.indexOf("\n");
+  if (firstLineEnd < 0) return null;
+  const rest = content.slice(firstLineEnd + 1);
+  const closeMatch = /^(---|\.\.\.)[ \t]*$/m.exec(rest);
+  if (!closeMatch || closeMatch.index < 0) return null;
+  const block = rest.slice(0, closeMatch.index);
+
+  const fields = new Map<string, unknown>();
+  const lines = block.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    const colon = line.indexOf(":");
+    if (colon <= 0) continue;
+    const key = line.slice(0, colon).trim();
+    const rawValue = line.slice(colon + 1).trim();
+    if (rawValue) {
+      fields.set(key, parseYamlishScalar(rawValue));
+      continue;
+    }
+    // Block-style list: `key:` followed by indented `- item` lines.
+    const items: string[] = [];
+    let j = i + 1;
+    while (j < lines.length) {
+      const itemMatch = /^[ \t]+-[ \t]+(.*)$/.exec(lines[j]);
+      if (!itemMatch) break;
+      const item = parseYamlishScalar(itemMatch[1] ?? "");
+      if (typeof item === "string" && item.trim()) items.push(item.trim());
+      j++;
+    }
+    if (items.length > 0) {
+      fields.set(key, items);
+      i = j - 1;
+    }
+  }
+
+  const rawName = fields.get("name");
+  const name =
+    typeof rawName === "string" && rawName.trim()
+      ? rawName.trim()
+      : typeof rawName === "number"
+        ? String(rawName)
+        : null;
+  const rawDescription = fields.get("description");
+  const description = typeof rawDescription === "string" ? rawDescription : "";
+  const rawLevel =
+    fields.get("thinkingLevel") ?? fields.get("thinking-level") ?? fields.get("thinking");
+  const thinkingLevel =
+    typeof rawLevel === "string" && AGENT_THINKING_LEVEL_VALUES.has(rawLevel.trim())
+      ? rawLevel.trim()
+      : null;
+  return { name, description, model: coerceAgentModelList(fields.get("model")), thinkingLevel };
 }
 
 // ─── Provider auth status (Settings → API keys panel) ────────────────────────
@@ -909,6 +1089,9 @@ function computeProviderAuthStatus(registry: ModelRegistry, provider: string): P
 type OmpSettingsInstanceLike = {
   get?: (path: string) => unknown;
   set?: (path: string, value: unknown) => unknown;
+  // Runtime-override layer (wins over global/project in the merged view).
+  // Needed for HOST_DEFAULTED paths in RPC mode — see writeTaskAgentSetting.
+  override?: (path: string, value: unknown) => unknown;
   onEffectiveChange?: (listener: (path: string, value: unknown) => void) => () => void;
   reloadFromDisk?: () => unknown;
   getAgentDir?: () => string;
@@ -946,6 +1129,17 @@ type AgentRegistryLike = {
   list?: () => unknown[];
   isRunning?: (ref: AgentRefLike) => boolean;
   onChange?: (listener: (event: unknown) => void) => unknown;
+};
+
+// Structural view of the omp runtime's model-role metadata module
+// (`@oh-my-pi/omp-coding-agent/config/model-roles`, legacy
+// `@oh-my-pi/pi-coding-agent/config/model-roles`). Not exported from the
+// package root, so we reach it via namespace probe + dynamic import — same
+// layering strategy as the MCP module below. Everything optional: a miss
+// degrades to the static BUILTIN_MODEL_ROLE_IDS + settings-key union.
+type ModelRolesModuleLike = {
+  getKnownRoleIds?: (settings: unknown) => string[];
+  MODEL_ROLE_IDS?: unknown;
 };
 
 type McpServerConfigLike = {
@@ -1420,6 +1614,7 @@ function getOrCreateGlobalState(): EmbeddedServerGlobal {
       settingsChangeSubscribed: false,
       agentsChangeSubscribed: false,
       namespaceDebugLogged: false,
+      modelRolesModuleCache: { promise: null },
       mcpModuleCache: { promise: null },
       mcpStatusByServer: new Map<string, string>(),
       mcpStatusListenerAttached: false,
@@ -3179,6 +3374,140 @@ export default function (omp: ExtensionAPI) {
           break;
         }
 
+        // ─── Models & Reasoning configuration ───
+        //
+        // Backs the Configuration → "Models & Reasoning" page. Shapes are
+        // FROZEN (frontend builds against them); see the feature section
+        // above handleCommand for the omp-surface evidence.
+        case "get_model_configuration": {
+          try {
+            const payload = await buildModelConfiguration();
+            sendTo(ws, success("get_model_configuration", payload));
+          } catch (e: unknown) {
+            sendTo(ws, error("get_model_configuration", errMessage(e)));
+          }
+          break;
+        }
+
+        case "set_model_role": {
+          const role = typeof command.role === "string" ? command.role.trim() : "";
+          if (!isValidRoleOrAgentKey(role)) {
+            sendTo(
+              ws,
+              error("set_model_role", "role must be 1-64 chars of letters, digits, '-' or '_'"),
+            );
+            break;
+          }
+          const selector =
+            command.selector === null || command.selector === undefined
+              ? null
+              : typeof command.selector === "string"
+                ? command.selector.trim()
+                : "";
+          if (selector !== null && !isValidModelSelector(selector)) {
+            sendTo(
+              ws,
+              error("set_model_role", "selector must be a non-empty string of at most 200 chars"),
+            );
+            break;
+          }
+          // Unknown-but-reasonable role ids are allowed (runtime roles
+          // evolve); just log so the write is traceable.
+          if (!BUILTIN_MODEL_ROLE_IDS.includes(role)) {
+            console.log(
+              `[Embedded] set_model_role: role "${role}" is not a built-in role id — writing anyway (runtime roles evolve)`,
+            );
+          }
+          try {
+            const result = await setModelRole(role, selector);
+            sendTo(ws, success("set_model_role", result));
+          } catch (e: unknown) {
+            sendTo(ws, error("set_model_role", errMessage(e)));
+          }
+          break;
+        }
+
+        case "set_default_thinking_level": {
+          const level = typeof command.level === "string" ? command.level.trim() : "";
+          const options = resolveDefaultThinkingLevelOptions();
+          if (!level || !options.includes(level)) {
+            sendTo(
+              ws,
+              error("set_default_thinking_level", `level must be one of: ${options.join(", ")}`),
+            );
+            break;
+          }
+          try {
+            const result = await setDefaultThinkingLevel(level);
+            sendTo(ws, success("set_default_thinking_level", result));
+          } catch (e: unknown) {
+            sendTo(ws, error("set_default_thinking_level", errMessage(e)));
+          }
+          break;
+        }
+
+        case "set_task_agent_model_override": {
+          const agent = typeof command.agent === "string" ? command.agent.trim() : "";
+          if (!isValidRoleOrAgentKey(agent)) {
+            sendTo(
+              ws,
+              error(
+                "set_task_agent_model_override",
+                "agent must be 1-64 chars of letters, digits, '-' or '_'",
+              ),
+            );
+            break;
+          }
+          const model =
+            command.model === null || command.model === undefined
+              ? null
+              : typeof command.model === "string"
+                ? command.model.trim()
+                : "";
+          if (model !== null && !isValidModelSelector(model)) {
+            sendTo(
+              ws,
+              error(
+                "set_task_agent_model_override",
+                "model must be a non-empty string of at most 200 chars",
+              ),
+            );
+            break;
+          }
+          try {
+            const result = await setTaskAgentModelOverride(agent, model);
+            sendTo(ws, success("set_task_agent_model_override", result));
+          } catch (e: unknown) {
+            sendTo(ws, error("set_task_agent_model_override", errMessage(e)));
+          }
+          break;
+        }
+
+        case "set_task_agent_disabled": {
+          const agent = typeof command.agent === "string" ? command.agent.trim() : "";
+          if (!isValidRoleOrAgentKey(agent)) {
+            sendTo(
+              ws,
+              error(
+                "set_task_agent_disabled",
+                "agent must be 1-64 chars of letters, digits, '-' or '_'",
+              ),
+            );
+            break;
+          }
+          if (typeof command.disabled !== "boolean") {
+            sendTo(ws, error("set_task_agent_disabled", "disabled must be a boolean"));
+            break;
+          }
+          try {
+            const result = await setTaskAgentDisabled(agent, command.disabled);
+            sendTo(ws, success("set_task_agent_disabled", result));
+          } catch (e: unknown) {
+            sendTo(ws, error("set_task_agent_disabled", errMessage(e)));
+          }
+          break;
+        }
+
         default: {
           sendTo(ws, error(command.type, `Unknown command: ${command.type}`));
         }
@@ -3476,6 +3805,404 @@ export default function (omp: ExtensionAPI) {
       }
     }
     await execOmpCli(["config", "set", key, String(value)], OMP_CLI_TIMEOUT_MS);
+  }
+
+  // ═══════════════════════════════════════
+  // Models & Reasoning configuration — RPC backing
+  // ═══════════════════════════════════════
+  //
+  // Frozen GUI contract (do not reshape): `get_model_configuration`,
+  // `set_model_role`, `set_default_thinking_level`,
+  // `set_task_agent_model_override`, `set_task_agent_disabled`.
+  //
+  // Reads go through the in-process Settings singleton (merged effective
+  // values); writes are read-modify-write of the whole setting value through
+  // instance.set() + flush() — the same persisted-settings path as every
+  // other write in this file. There is deliberately NO CLI fallback for the
+  // structured writes: `omp config set` stringifies values, which would
+  // corrupt records/arrays (`[object Object]`).
+
+  type ModelRoleRow = { id: string; current: string | null };
+
+  type TaskAgentRow = {
+    name: string;
+    source: "user" | "project";
+    path: string;
+    description: string;
+    definitionModel: string[];
+    definitionThinkingLevel: string | null;
+    overrideModel: string | null;
+    disabled: boolean;
+    parseError?: boolean;
+  };
+
+  type ModelConfigurationPayload = {
+    roles: ModelRoleRow[];
+    roleIdsKnownOnly: boolean;
+    defaultThinkingLevel: string | null;
+    thinkingLevelOptions: string[];
+    taskAgents: TaskAgentRow[];
+    available: boolean;
+  };
+
+  // Computed at call time (never a literal at the import site) so esbuild
+  // keeps these runtime-resolved — resolution happens inside the omp process
+  // where the legacy-pi resolver shim lives (same trick as MCP_MODULE_SPECIFIERS).
+  const MODEL_ROLES_MODULE_SPECIFIERS = [
+    "@oh-my-pi/omp-coding-agent/config/model-roles",
+    "@oh-my-pi/pi-coding-agent/config/model-roles",
+  ];
+
+  // Layer (a): does the runtime namespace itself carry the role exports?
+  // (The root package index does not re-export them as of omp 18.3.0, so
+  // this is a future-proofing probe.)
+  function probeNamespaceForModelRolesModule(): ModelRolesModuleLike | null {
+    const pi = currentPi() as unknown as Record<string, unknown> | null;
+    if (!pi) return null;
+    if (typeof pi.getKnownRoleIds === "function") return pi as unknown as ModelRolesModuleLike;
+    return null;
+  }
+
+  // Layers (a) → (b): namespace probe, then dynamic import of the omp-owned
+  // config/model-roles module. Memoized per process; unreachable (`null`) is
+  // cached too so repeated calls don't re-attempt resolution.
+  async function resolveModelRolesModule(): Promise<ModelRolesModuleLike | null> {
+    const viaNamespace = probeNamespaceForModelRolesModule();
+    if (viaNamespace) return viaNamespace;
+
+    if (!globalState.modelRolesModuleCache.promise) {
+      globalState.modelRolesModuleCache.promise = (async () => {
+        for (const specifier of MODEL_ROLES_MODULE_SPECIFIERS) {
+          try {
+            const mod =
+              ((await import(specifier)) as ModelRolesModuleLike | null | undefined) ?? null;
+            if (mod && typeof mod.getKnownRoleIds === "function") {
+              return mod;
+            }
+          } catch {
+            /* host resolver shim needed — expected to miss on some builds */
+          }
+        }
+        console.error(
+          "[Embedded] model-roles module unreachable: falling back to static built-in role ids + settings-key union",
+        );
+        return null;
+      })();
+    }
+    return await globalState.modelRolesModuleCache.promise;
+  }
+
+  function readSettingsValue(instance: OmpSettingsInstanceLike | null, key: string): unknown {
+    if (!instance || typeof instance.get !== "function") return undefined;
+    try {
+      return instance.get(key);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function asPlainRecord(value: unknown): Record<string, unknown> | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    return { ...(value as Record<string, unknown>) };
+  }
+
+  function asStringArray(value: unknown): string[] | null {
+    if (!Array.isArray(value)) return null;
+    return value.filter((v): v is string => typeof v === "string" && !!v.trim());
+  }
+
+  // Structured (record/array) persisted write: in-process Settings only.
+  async function writeStructuredSetting(key: string, value: unknown): Promise<void> {
+    const instance = getSettingsInstance();
+    if (!instance || typeof instance.set !== "function") {
+      throw new Error(
+        "In-process Settings surface is unavailable in this build — cannot persist structured setting",
+      );
+    }
+    instance.set(key, value);
+    if (typeof instance.flush === "function") {
+      await instance.flush();
+    }
+  }
+
+  // Persist + runtime-sync for the task-agent settings. `task.disabledAgents`
+  // and `task.agentModelOverrides` are in omp's HOST_DEFAULTED_SETTING_PATHS
+  // (main.ts): in RPC mode the runtime installs a runtime-override layer
+  // carrying the schema default whenever the path is not otherwise
+  // configured, and that override SHADOWS global-layer writes in
+  // Settings.get(). Persisting via set() alone therefore lands on disk
+  // (config.yml, verified) but reads back as the stale default until process
+  // restart. After persisting we mirror the value into the runtime layer via
+  // override() so the effective view (the live task tool AND
+  // get_model_configuration) matches immediately. On the next process start
+  // omp's guard (`isConfigured`) sees the persisted global value and skips
+  // re-installing the host default, so the layers converge.
+  async function writeTaskAgentSetting(key: string, value: unknown): Promise<void> {
+    await writeStructuredSetting(key, value);
+    const instance = getSettingsInstance();
+    if (instance && typeof instance.override === "function") {
+      try {
+        instance.override(key, value);
+      } catch (err: unknown) {
+        console.error(`[Embedded] runtime-override sync failed for ${key}:`, errMessage(err));
+      }
+    }
+  }
+
+  function isValidRoleOrAgentKey(value: string): boolean {
+    return /^[A-Za-z0-9_-]{1,64}$/.test(value);
+  }
+
+  function isValidModelSelector(value: string): boolean {
+    return value.length > 0 && value.length <= 200 && !/[\r\n]/.test(value);
+  }
+
+  // `defaultThinkingLevel`'s schema-validated options: prefer the runtime
+  // SETTINGS_SCHEMA enum when reachable, normalized to canonical display
+  // order ("auto" first, then the effort ladder, then novel runtime ids in
+  // schema order). "off"/"inherit" are excluded — the schema enum is
+  // [...Effort[], "auto"] and they are not accepted there.
+  function resolveDefaultThinkingLevelOptions(): string[] {
+    try {
+      const entry = currentPi()?.Settings?.SETTINGS_SCHEMA?.defaultThinkingLevel as
+        | { values?: unknown }
+        | undefined;
+      const values = entry?.values;
+      if (Array.isArray(values) && values.length > 0) {
+        const opts = values.filter((v): v is string => typeof v === "string" && !!v.trim());
+        if (opts.length > 0) {
+          const canonical = new Set<string>(DEFAULT_THINKING_LEVEL_OPTIONS);
+          return [
+            ...DEFAULT_THINKING_LEVEL_OPTIONS.filter((o) => opts.includes(o)),
+            ...opts.filter((o) => !canonical.has(o)),
+          ];
+        }
+      }
+    } catch {}
+    return [...DEFAULT_THINKING_LEVEL_OPTIONS];
+  }
+
+  // Enumerate task-agent definition files. omp 18.3 discovers agents from
+  // `<agentRoot>/agents/*.md` (user) and `<cwd>/.omp/agents/*.md` (project)
+  // — markdown with YAML frontmatter (name/description required; model:
+  // string|string[]; thinkingLevel). Project scope wins on name collisions
+  // (mirrors discoverAgents precedence). Never throws on weird files:
+  // unreadable/unparseable entries come back with parseError:true.
+  async function listTaskAgentDefinitions(
+    instance: OmpSettingsInstanceLike | null,
+  ): Promise<TaskAgentRow[]> {
+    const agentRoot = (() => {
+      try {
+        const fromSettings = instance?.getAgentDir?.();
+        if (typeof fromSettings === "string" && fromSettings.trim()) return fromSettings;
+      } catch {}
+      return OMP_AGENT_ROOT;
+    })();
+    const cwd = currentWorkspaceCwd();
+    const scopes: Array<{ dir: string; source: "user" | "project" }> = [
+      { dir: path.join(cwd, ".omp", "agents"), source: "project" },
+      { dir: path.join(agentRoot, "agents"), source: "user" },
+    ];
+
+    const overrides = asPlainRecord(readSettingsValue(instance, "task.agentModelOverrides")) ?? {};
+    const disabledSet = new Set(
+      asStringArray(readSettingsValue(instance, "task.disabledAgents")) ?? [],
+    );
+
+    const rows: TaskAgentRow[] = [];
+    const seenNames = new Set<string>();
+    for (const scope of scopes) {
+      let entries: fs.Dirent[];
+      try {
+        entries = await fs.promises.readdir(scope.dir, { withFileTypes: true });
+      } catch {
+        continue; // scope dir missing — normal
+      }
+      const files = entries
+        .filter((e) => (e.isFile() || e.isSymbolicLink()) && e.name.toLowerCase().endsWith(".md"))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      for (const file of files) {
+        const filePath = path.join(scope.dir, file.name);
+        const fallbackName = file.name.replace(/\.md$/i, "");
+        let row: TaskAgentRow;
+        try {
+          const content = await fs.promises.readFile(filePath, "utf8");
+          const parsed = parseTolerantAgentFrontmatter(content);
+          if (!parsed?.name) {
+            // No frontmatter block / no name → omp's loader would reject it too.
+            row = {
+              name: parsed?.name ?? fallbackName,
+              source: scope.source,
+              path: filePath,
+              description: parsed?.description ?? "",
+              definitionModel: parsed?.model ?? [],
+              definitionThinkingLevel: parsed?.thinkingLevel ?? null,
+              overrideModel: null,
+              disabled: false,
+              parseError: true,
+            };
+          } else {
+            row = {
+              name: parsed.name,
+              source: scope.source,
+              path: filePath,
+              description: parsed.description,
+              definitionModel: parsed.model,
+              definitionThinkingLevel: parsed.thinkingLevel,
+              overrideModel: null,
+              disabled: false,
+            };
+          }
+        } catch (err: unknown) {
+          row = {
+            name: fallbackName,
+            source: scope.source,
+            path: filePath,
+            description: "",
+            definitionModel: [],
+            definitionThinkingLevel: null,
+            overrideModel: null,
+            disabled: false,
+            parseError: true,
+          };
+          console.error(`[Embedded] task agent file unreadable (${filePath}):`, errMessage(err));
+        }
+
+        // Settings merge (keyed by agent NAME — verified in omp's agents-hub).
+        const overrideRaw = overrides[row.name];
+        row.overrideModel =
+          typeof overrideRaw === "string" && overrideRaw.trim()
+            ? overrideRaw
+            : Array.isArray(overrideRaw) &&
+                typeof overrideRaw[0] === "string" &&
+                overrideRaw[0].trim()
+              ? overrideRaw[0]
+              : null;
+        row.disabled = disabledSet.has(row.name);
+
+        if (seenNames.has(row.name)) continue; // project scope wins (processed first)
+        seenNames.add(row.name);
+        rows.push(row);
+      }
+    }
+    return rows.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // Build the full `get_model_configuration` payload. Roles: runtime
+  // enumeration when reachable, else static built-ins, UNIONED with the
+  // configured role-bearing settings keys (exactly what the runtime's
+  // getKnownRoleIds computes) so custom roles never disappear.
+  async function buildModelConfiguration(): Promise<ModelConfigurationPayload> {
+    const instance = getSettingsInstance();
+    const settingsReachable = !!instance && typeof instance.get === "function";
+
+    let runtimeIds: string[] | null = null;
+    const mod = await resolveModelRolesModule();
+    if (mod) {
+      if (typeof mod.getKnownRoleIds === "function" && instance) {
+        try {
+          const out = mod.getKnownRoleIds(instance);
+          if (Array.isArray(out)) {
+            const ids = out.filter((r): r is string => typeof r === "string" && !!r.trim());
+            if (ids.length > 0) runtimeIds = ids;
+          }
+        } catch (err: unknown) {
+          console.error("[Embedded] getKnownRoleIds() probe failed:", errMessage(err));
+        }
+      }
+      if (runtimeIds === null && Array.isArray(mod.MODEL_ROLE_IDS)) {
+        const ids = (mod.MODEL_ROLE_IDS as unknown[]).filter(
+          (r): r is string => typeof r === "string" && !!r.trim(),
+        );
+        if (ids.length > 0) runtimeIds = ids;
+      }
+    }
+
+    const modelRoles = asPlainRecord(readSettingsValue(instance, "modelRoles"));
+    const cycleOrder = asStringArray(readSettingsValue(instance, "cycleOrder"));
+    const modelTags = asPlainRecord(readSettingsValue(instance, "modelTags"));
+
+    const base = runtimeIds && runtimeIds.length > 0 ? runtimeIds : [...BUILTIN_MODEL_ROLE_IDS];
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const id of [
+      ...base,
+      ...Object.keys(modelRoles ?? {}),
+      ...(cycleOrder ?? []),
+      ...Object.keys(modelTags ?? {}),
+    ]) {
+      const trimmed = id.trim();
+      if (!trimmed || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      ids.push(trimmed);
+    }
+    const roles: ModelRoleRow[] = ids.map((id) => {
+      const value = modelRoles?.[id];
+      return { id, current: typeof value === "string" && value.trim() ? value : null };
+    });
+
+    const rawLevel = readSettingsValue(instance, "defaultThinkingLevel");
+    const defaultThinkingLevel = typeof rawLevel === "string" && rawLevel.trim() ? rawLevel : null;
+
+    return {
+      roles,
+      // true = neither runtime role metadata nor Settings were reachable, so
+      // `roles` is only the static built-in list (custom roles may be missing).
+      roleIdsKnownOnly: runtimeIds === null && !settingsReachable,
+      defaultThinkingLevel,
+      thinkingLevelOptions: resolveDefaultThinkingLevelOptions(),
+      taskAgents: await listTaskAgentDefinitions(instance),
+      available: settingsReachable,
+    };
+  }
+
+  // set_model_role: read-modify-write of the whole modelRoles record
+  // (sibling keys preserved verbatim). null selector removes the key.
+  async function setModelRole(role: string, selector: string | null): Promise<{ ok: true }> {
+    const instance = getSettingsInstance();
+    const record = asPlainRecord(readSettingsValue(instance, "modelRoles")) ?? {};
+    if (selector === null) {
+      delete record[role];
+    } else {
+      record[role] = selector;
+    }
+    await writeStructuredSetting("modelRoles", record);
+    return { ok: true };
+  }
+
+  async function setDefaultThinkingLevel(level: string): Promise<{ ok: true }> {
+    await writeStructuredSetting("defaultThinkingLevel", level);
+    return { ok: true };
+  }
+
+  // task.agentModelOverrides values are string | string[]; the GUI writes a
+  // single string. null model removes the agent's key.
+  async function setTaskAgentModelOverride(
+    agent: string,
+    model: string | null,
+  ): Promise<{ ok: true }> {
+    const instance = getSettingsInstance();
+    const overrides = asPlainRecord(readSettingsValue(instance, "task.agentModelOverrides")) ?? {};
+    if (model === null) {
+      delete overrides[agent];
+    } else {
+      overrides[agent] = model;
+    }
+    await writeTaskAgentSetting("task.agentModelOverrides", overrides);
+    return { ok: true };
+  }
+
+  async function setTaskAgentDisabled(agent: string, disabled: boolean): Promise<{ ok: true }> {
+    const instance = getSettingsInstance();
+    const list = asStringArray(readSettingsValue(instance, "task.disabledAgents")) ?? [];
+    const set = new Set(list);
+    if (disabled) {
+      set.add(agent);
+    } else {
+      set.delete(agent);
+    }
+    await writeTaskAgentSetting("task.disabledAgents", [...set]);
+    return { ok: true };
   }
 
   // ═══════════════════════════════════════

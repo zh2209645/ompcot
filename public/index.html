@@ -521,6 +521,15 @@
             </div>
           </section>
 
+          <!-- Models & Reasoning: model roles, default thinking depth and
+               task-agent overrides (static page rendered by models-reasoning.js) -->
+          <section class="settings-config-page" data-config-page="models" hidden>
+            <div class="settings-section">
+              <div class="settings-section-title" data-i18n="models.pageTitle">Models &amp; Reasoning</div>
+              <div id="models-reasoning-root"></div>
+            </div>
+          </section>
+
           <!-- Catalog-backed sub-pages (Appearance, Model, …) share one mount;
                settings-config-subnav.js + agent-settings.js filter it per page. -->
           <div class="agent-settings-host" id="agent-settings-host" hidden>

@@ -7,6 +7,7 @@ describe("configuration page map", () => {
   test("page order follows the omp settings taxonomy, Providers first, Advanced last", () => {
     expect(CONFIG_PAGES.map((page) => page.id)).toEqual([
       "providers",
+      "models",
       "appearance",
       "model",
       "interaction",
@@ -21,12 +22,21 @@ describe("configuration page map", () => {
     ]);
   });
 
-  test("Providers, MCP and Advanced are always-present pages", () => {
+  test("Providers, Models & Reasoning, MCP and Advanced are always-present pages", () => {
     expect(CONFIG_PAGES.filter((page) => isAlwaysPage(page.id)).map((page) => page.id)).toEqual([
       "providers",
+      "models",
       "mcp",
       "advanced",
     ]);
+  });
+
+  test("models is a static management page; model catalog keys stay on the model page", () => {
+    // The Models & Reasoning sub-page manages roles/thinking/task-agent
+    // overrides over dedicated RPCs — the model.* settings catalog keeps
+    // rendering under the separate "Model" page.
+    expect(pageForKey("model.temperature")).toBe("model");
+    expect(CONFIG_PAGES.find((page) => page.id === "models")).toBeTruthy();
   });
 
   test("maps first key segments to their sub-page", () => {

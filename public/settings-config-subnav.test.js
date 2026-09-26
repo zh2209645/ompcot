@@ -31,7 +31,7 @@ describe("settings configuration sub-pages", () => {
       load: vi.fn(async () => {}),
       setActivePage: vi.fn(),
     };
-    const loaders = { providers: vi.fn(), advanced: vi.fn() };
+    const loaders = { providers: vi.fn(), advanced: vi.fn(), models: vi.fn() };
     const subnav = createConfigSubnav({ root, catalog, loaders });
     return { subnav, catalog, loaders };
   }
@@ -53,6 +53,7 @@ describe("settings configuration sub-pages", () => {
 
     expect(pillIds()).toEqual([
       "providers",
+      "models",
       "appearance",
       "model",
       "interaction",
@@ -97,7 +98,7 @@ describe("settings configuration sub-pages", () => {
 
     subnav.onCatalogPageSet(["model", "tools"]);
 
-    expect(pillIds()).toEqual(["providers", "model", "tools", "mcp", "advanced"]);
+    expect(pillIds()).toEqual(["providers", "models", "model", "tools", "mcp", "advanced"]);
     expect(subnav.getPage()).toBe("model"); // still non-empty, no fallback
     expect(host().hidden).toBe(false);
 
@@ -115,7 +116,7 @@ describe("settings configuration sub-pages", () => {
     expect(subnav.getPage()).toBe("providers");
     expect(pillOf("providers").classList.contains("active")).toBe(true);
     expect(sectionOf("providers").hidden).toBe(false);
-    expect(pillIds()).toEqual(["providers", "model", "tools", "mcp", "advanced"]);
+    expect(pillIds()).toEqual(["providers", "models", "model", "tools", "mcp", "advanced"]);
   });
 
   test("Advanced always stays reachable and hides the catalog host when nothing is unmapped", () => {
@@ -132,7 +133,7 @@ describe("settings configuration sub-pages", () => {
     expect(subnav.getPage()).toBe("advanced"); // always-present page never falls back
     expect(sectionOf("advanced").hidden).toBe(false);
     expect(host().hidden).toBe(true); // no unmapped entries → config.yml only
-    expect(pillIds()).toEqual(["providers", "model", "mcp", "advanced"]);
+    expect(pillIds()).toEqual(["providers", "models", "model", "mcp", "advanced"]);
   });
 
   test("a failed catalog load keeps every page reachable instead of hiding them", () => {
@@ -143,9 +144,27 @@ describe("settings configuration sub-pages", () => {
     catalog.load.mockRejectedValueOnce(new Error("boom"));
     subnav.onCatalogPageSet(null);
 
-    expect(pillIds()).toHaveLength(12);
+    expect(pillIds()).toHaveLength(13);
     expect(subnav.getPage()).toBe("model"); // unknown ≠ empty
     expect(host().hidden).toBe(false); // error + retry stays visible
+  });
+
+  test("the static Models & Reasoning page hides the catalog host and refetches on every open", () => {
+    const { subnav, loaders } = setup();
+
+    subnav.open();
+    pillOf("models").click();
+
+    expect(sectionOf("models")).toBeTruthy();
+    expect(sectionOf("models").hidden).toBe(false);
+    expect(host().hidden).toBe(true); // static page — no catalog mount
+    expect(loaders.models).toHaveBeenCalledTimes(1);
+
+    subnav.open("providers");
+    pillOf("models").click();
+
+    // Live list: the loader re-runs on every activation, unlike Providers.
+    expect(loaders.models).toHaveBeenCalledTimes(2);
   });
 
   test("the static MCP page hides the catalog host and refetches on every open", () => {
