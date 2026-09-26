@@ -18,6 +18,7 @@ describe("configuration page map", () => {
       "tools",
       "mcp",
       "tasks",
+      "other",
       "advanced",
     ]);
   });
@@ -29,6 +30,17 @@ describe("configuration page map", () => {
       "mcp",
       "advanced",
     ]);
+  });
+
+  test("Other is a catalog-driven page ordered after Tasks, before Advanced", () => {
+    // The catch-all bucket hides when the catalog has no unmapped keys —
+    // only Advanced is always present at the end of the strip.
+    const other = CONFIG_PAGES.find((page) => page.id === "other");
+    expect(other).toBeTruthy();
+    expect(isAlwaysPage("other")).toBe(false);
+    expect(CONFIG_PAGES.map((page) => page.id).indexOf("other")).toBe(
+      CONFIG_PAGES.map((page) => page.id).indexOf("advanced") - 1,
+    );
   });
 
   test("models is a static management page; model catalog keys stay on the model page", () => {
@@ -74,20 +86,35 @@ describe("configuration page map", () => {
     expect(CONFIG_PAGES.find((page) => page.id === "mcp")).toBeTruthy();
   });
 
-  test("falls back to Advanced for unmapped segments so no setting is ever hidden", () => {
-    expect(pageForKey("quantum.entangle")).toBe("advanced");
-    expect(pageForKey("general")).toBe("advanced");
-    expect(pageForKey("permissions.allow")).toBe("advanced");
+  test("falls back to Other for unmapped segments so no setting is ever hidden", () => {
+    expect(pageForKey("quantum.entangle")).toBe("other");
+    expect(pageForKey("general")).toBe("other");
+    expect(pageForKey("permissions.allow")).toBe("other");
   });
 
-  test("providers catalog keys land in Advanced: the Providers page is static by design", () => {
-    expect(pageForKey("providers.customHeaders")).toBe("advanced");
+  test("providers catalog keys land in Other: the Providers page is static by design", () => {
+    expect(pageForKey("providers.customHeaders")).toBe("other");
+  });
+
+  test("no catalog key ever maps to Advanced — it is only the raw config.yml editor", () => {
+    const samples = [
+      "quantum.entangle",
+      "general",
+      "permissions.allow",
+      "providers.customHeaders",
+      "model.temperature",
+      "theme.preset",
+      "skills.paths",
+    ];
+    for (const key of samples) {
+      expect(pageForKey(key)).not.toBe("advanced");
+    }
   });
 
   test("treats missing values as unmapped", () => {
-    expect(pageForKey(null)).toBe("advanced");
-    expect(pageForKey(undefined)).toBe("advanced");
-    expect(pageForKey("")).toBe("advanced");
+    expect(pageForKey(null)).toBe("other");
+    expect(pageForKey(undefined)).toBe("other");
+    expect(pageForKey("")).toBe("other");
   });
 
   test("every page has a label in both locales", () => {

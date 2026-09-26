@@ -47,6 +47,7 @@ describe("settings configuration sub-pages", () => {
   const sectionOf = (pageId) =>
     document.querySelector(`.settings-config-page[data-config-page="${pageId}"]`);
   const host = () => document.getElementById("agent-settings-host");
+  const otherHelp = () => document.querySelector("[data-other-help]");
 
   test("shows Providers by default with every page as a candidate pill", () => {
     setup();
@@ -64,11 +65,13 @@ describe("settings configuration sub-pages", () => {
       "tools",
       "mcp",
       "tasks",
+      "other",
       "advanced",
     ]);
     expect(pillOf("providers").getAttribute("aria-selected")).toBe("true");
     expect(sectionOf("providers").hidden).toBe(false);
     expect(sectionOf("advanced").hidden).toBe(true);
+    expect(sectionOf("other").hidden).toBe(true);
     // Providers is static content — the catalog host stays out of the way.
     expect(host().hidden).toBe(true);
   });
@@ -94,6 +97,10 @@ describe("settings configuration sub-pages", () => {
     expect(catalog.load).toHaveBeenCalledTimes(1);
     expect(catalog.setActivePage).toHaveBeenCalledWith("model");
     expect(host().hidden).toBe(false); // loading state is visible
+    // The shared mount lives in the Other section but renders the Model page,
+    // so the section shows while the Other-only help line stays hidden.
+    expect(sectionOf("other").hidden).toBe(false);
+    expect(otherHelp().hidden).toBe(true);
     expect(loaders.advanced).not.toHaveBeenCalled();
 
     subnav.onCatalogPageSet(["model", "tools"]);
@@ -104,6 +111,32 @@ describe("settings configuration sub-pages", () => {
 
     pillOf("model").click();
     expect(catalog.load).toHaveBeenCalledTimes(1); // shared single fetch
+  });
+
+  test("Other renders unmapped catalog keys and collapses like any catalog page", () => {
+    const { subnav, catalog } = setup();
+
+    subnav.open();
+    pillOf("other").click();
+
+    expect(catalog.load).toHaveBeenCalledTimes(1);
+    expect(catalog.setActivePage).toHaveBeenCalledWith("other");
+    expect(sectionOf("other").hidden).toBe(false);
+    expect(host().hidden).toBe(false); // loading state is visible
+    expect(otherHelp().hidden).toBe(false); // Other-only help line reads true here
+
+    subnav.onCatalogPageSet(["model", "other"]);
+
+    expect(subnav.getPage()).toBe("other"); // non-empty — no fallback
+    expect(sectionOf("other").hidden).toBe(false);
+    expect(otherHelp().hidden).toBe(false);
+
+    // Nothing unmapped left → the Other pill hides and the page collapses.
+    subnav.onCatalogPageSet(["model"]);
+
+    expect(subnav.getPage()).toBe("providers");
+    expect(sectionOf("other").hidden).toBe(true);
+    expect(pillIds()).toEqual(["providers", "models", "model", "mcp", "advanced"]);
   });
 
   test("collapses to Providers when the active page has zero catalog entries", () => {
@@ -119,21 +152,21 @@ describe("settings configuration sub-pages", () => {
     expect(pillIds()).toEqual(["providers", "models", "model", "tools", "mcp", "advanced"]);
   });
 
-  test("Advanced always stays reachable and hides the catalog host when nothing is unmapped", () => {
+  test("Advanced is static: config.yml only — no catalog fetch, no catalog host", () => {
     const { subnav, catalog, loaders } = setup();
 
     subnav.open();
     pillOf("advanced").click();
 
     expect(loaders.advanced).toHaveBeenCalledTimes(1);
-    expect(catalog.load).toHaveBeenCalledTimes(1); // Advanced also shows catalog groups
+    expect(catalog.load).not.toHaveBeenCalled(); // Advanced owns no catalog keys anymore
 
-    subnav.onCatalogPageSet(["model"]);
+    subnav.onCatalogPageSet(["model", "other"]);
 
     expect(subnav.getPage()).toBe("advanced"); // always-present page never falls back
     expect(sectionOf("advanced").hidden).toBe(false);
-    expect(host().hidden).toBe(true); // no unmapped entries → config.yml only
-    expect(pillIds()).toEqual(["providers", "models", "model", "mcp", "advanced"]);
+    expect(host().hidden).toBe(true); // static page — no catalog mount
+    expect(pillIds()).toEqual(["providers", "models", "model", "mcp", "other", "advanced"]);
   });
 
   test("a failed catalog load keeps every page reachable instead of hiding them", () => {
@@ -144,7 +177,7 @@ describe("settings configuration sub-pages", () => {
     catalog.load.mockRejectedValueOnce(new Error("boom"));
     subnav.onCatalogPageSet(null);
 
-    expect(pillIds()).toHaveLength(13);
+    expect(pillIds()).toHaveLength(14);
     expect(subnav.getPage()).toBe("model"); // unknown ≠ empty
     expect(host().hidden).toBe(false); // error + retry stays visible
   });

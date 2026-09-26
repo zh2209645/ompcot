@@ -3,19 +3,22 @@
 // Owns the pill strip (#settings-config-subnav) and the visibility of the
 // Configuration panel's page regions: the static Providers section (auth keys,
 // models.yml), the static Models & Reasoning page (models-reasoning.js), the
-// shared agent-settings catalog host (one mount whose groups are filtered per
-// sub-page by agent-settings.js), the static MCP servers page (mcp-manager.js),
-// and the static Advanced section (config.yml).
+// shared agent-settings catalog host (one mount, living inside the Other
+// page's section, whose groups are filtered per sub-page by agent-settings.js
+// — it renders every catalog-backed page, not just Other), the static MCP
+// servers page (mcp-manager.js), and the static Advanced section (raw
+// config.yml only — no catalog keys).
 //
 // Behavior:
 // - The last-active sub-page persists for the window session; `open()` (called
 //   every time the Configuration tab is selected) restores it. Default: Providers.
 // - Lazy loading: a page's loaders run once, on its first activation. The
 //   catalog is fetched once on the first catalog-backed page visit and shared;
-//   page pills for known-empty pages are then hidden (Providers and Advanced
-//   are always present). Before the first successful load the catalog-backed
-//   pills all appear as candidates; a failed load keeps them reachable so the
-//   inline error + retry stays accessible.
+//   page pills for known-empty pages are then hidden (Providers, Models &
+//   Reasoning, MCP and Advanced are always present). Before the first
+//   successful load the catalog-backed pills all appear as candidates; a
+//   failed load keeps them reachable so the inline error + retry stays
+//   accessible.
 // - Pill labels come from the i18n dictionaries and re-render on language
 //   change (the strip is JS-built, so data-i18n attributes cannot reach it).
 
@@ -23,8 +26,9 @@ import { CONFIG_PAGES, isAlwaysPage } from "./agent-settings-pages.js";
 import { onLanguageChanged, t } from "./i18n.js";
 
 // Static pages own their entire markup (no shared agent-settings catalog
-// mount) — the catalog host must stay out of the way while they are active.
-const STATIC_PAGES = new Set(["providers", "models", "mcp"]);
+// mount, no catalog fetch). Advanced is static by design: it hosts only the
+// raw config.yml editor — unmapped catalog keys render on the Other page.
+const STATIC_PAGES = new Set(["providers", "models", "mcp", "advanced"]);
 
 // Pages whose loader is a live list: re-run on every activation (providers /
 // advanced are one-shot editors and load once per window session).
@@ -35,6 +39,12 @@ export function createConfigSubnav({ root, catalog, loaders = {} }) {
   const bodyEl = root?.querySelector(".settings-config-body") ?? null;
   const pageSections = bodyEl ? Array.from(bodyEl.querySelectorAll(".settings-config-page")) : [];
   const catalogHost = bodyEl?.querySelector("#agent-settings-host") ?? null;
+  // The shared catalog mount lives inside the Other page's section but is the
+  // render target for every catalog-backed page (appearance … tasks, other),
+  // so that section tracks the mount's visibility rather than the active page.
+  const catalogMountSection = catalogHost?.closest(".settings-config-page") ?? null;
+  // The Other-only help line above the mount reads true nowhere else.
+  const otherHelpEl = catalogMountSection?.querySelector("[data-other-help]") ?? null;
 
   if (!subnavEl || !bodyEl) {
     return { open: () => {}, getPage: () => null, onCatalogPageSet: () => {}, destroy: () => {} };
@@ -59,7 +69,8 @@ export function createConfigSubnav({ root, catalog, loaders = {} }) {
   // The catalog host holds the shared agent-settings mount (plus its help
   // text). It is visible on every catalog-backed page until the catalog is
   // known — a loading or failed state must stay readable — and hidden when the
-  // page has no catalog entries at all (or on the static Providers page).
+  // page has no catalog entries at all (or on a static page, Advanced
+  // included: it owns no catalog keys anymore).
   function catalogHostVisibleFor(pageId) {
     if (STATIC_PAGES.has(pageId)) return false;
     if (catalogState === "known") return nonEmptyCatalogPages.has(pageId);
@@ -94,6 +105,13 @@ export function createConfigSubnav({ root, catalog, loaders = {} }) {
     }
     catalog?.setActivePage?.(activePage);
     if (catalogHost) catalogHost.hidden = !catalogHostVisibleFor(activePage);
+    // The mount's section renders whichever catalog-backed page is active
+    // (not only Other), so it follows the mount; the Other-only help line
+    // inside follows the active page instead.
+    if (catalogMountSection) {
+      catalogMountSection.hidden = catalogHost ? catalogHost.hidden : true;
+      if (otherHelpEl) otherHelpEl.hidden = activePage !== "other";
+    }
   }
 
   function runStaticLoaders(pageId) {
@@ -122,12 +140,12 @@ export function createConfigSubnav({ root, catalog, loaders = {} }) {
   function ensureLoaded(pageId) {
     if (STATIC_PAGES.has(pageId)) {
       // Static pages never touch the catalog — visiting them must not pay
-      // for a fetch the catalog-backed pages would otherwise share.
+      // for a fetch the catalog-backed pages would otherwise share. That
+      // includes Advanced: only its config.yml loader runs there.
       runStaticLoaders(pageId);
       return;
     }
     ensureCatalog();
-    if (pageId === "advanced") runStaticLoaders("advanced");
   }
 
   function activate(pageId) {

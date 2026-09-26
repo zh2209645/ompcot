@@ -329,6 +329,10 @@ export const en = {
   "models.enableAgent": "Enable {name}",
   "models.disableAgent": "Disable {name}",
 
+  // ── Configuration → Other (catalog keys without a category page) ──
+  "settings.pages.other": "Other settings",
+  "settings.otherHelp": "Settings not matched to a category page",
+
   // ── Windows Terminal theme import (Settings → Appearance) ──
   "settings.themeImportTitle": "Import Windows Terminal theme",
   "settings.themeImportImport": "Import",

@@ -321,6 +321,10 @@ export const zhCN = {
   "models.enableAgent": "启用 {name}",
   "models.disableAgent": "禁用 {name}",
 
+  // ── 配置 → 其他（未归入分类页的目录键）──
+  "settings.pages.other": "其他设置",
+  "settings.otherHelp": "未归入分类页的设置项",
+
   // ── Windows Terminal 主题导入（设置 → 外观）──
   "settings.themeImportTitle": "导入 Windows Terminal 主题",
   "settings.themeImportImport": "导入",

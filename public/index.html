@@ -530,18 +530,26 @@
             </div>
           </section>
 
-          <!-- Catalog-backed sub-pages (Appearance, Model, …) share one mount;
-               settings-config-subnav.js + agent-settings.js filter it per page. -->
-          <div class="agent-settings-host" id="agent-settings-host" hidden>
-            <p class="settings-help" data-i18n-html="settings.agentSettingsHelp">
-              Common agent options, editable in place. Changes save
-              automatically and are picked up by the running agent. Secret
-              keys are managed on the Providers page.
+          <!-- Other: catalog keys without a category page. The shared
+               agent-settings mount inside renders the groups of whichever
+               catalog-backed sub-page is active (Appearance, Model, …, Other)
+               — settings-config-subnav.js + agent-settings.js filter it per
+               page. -->
+          <section class="settings-config-page" data-config-page="other" hidden>
+            <p class="settings-help" data-i18n-html="settings.otherHelp" data-other-help>
+              Settings not matched to a category page.
             </p>
-            <div class="agent-settings" id="agent-settings-container">
-              <div class="agent-settings-loading" data-i18n="settings.loadingAgentSettings">Loading agent settings…</div>
+            <div class="agent-settings-host" id="agent-settings-host" hidden>
+              <p class="settings-help" data-i18n-html="settings.agentSettingsHelp">
+                Common agent options, editable in place. Changes save
+                automatically and are picked up by the running agent. Secret
+                keys are managed on the Providers page.
+              </p>
+              <div class="agent-settings" id="agent-settings-container">
+                <div class="agent-settings-loading" data-i18n="settings.loadingAgentSettings">Loading agent settings…</div>
+              </div>
             </div>
-          </div>
+          </section>
 
           <!-- MCP servers management: static page rendered by mcp-manager.js -->
           <section class="settings-config-page" data-config-page="mcp" hidden>
@@ -555,8 +563,8 @@
             </div>
           </section>
 
-          <!-- Advanced: raw config.yml editor (unmapped catalog keys render in
-               the shared mount above when this page is active) -->
+          <!-- Advanced: raw config.yml editor only — no catalog keys render
+               here (unmapped keys live on the Other page above) -->
           <section class="settings-config-page" data-config-page="advanced" hidden>
             <div class="settings-section">
               <div class="settings-section-title" data-i18n="settings.agentConfigFile">Agent config (~/.omp/agent/config.yml)</div>

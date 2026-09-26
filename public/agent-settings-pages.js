@@ -7,9 +7,9 @@
 // context, memory, files, shell, tools, tasks), bookended by two
 // Ompcot-specific pages: Providers (authentication + models.yml), Models &
 // Reasoning (roles/thinking/task-agent overrides over dedicated RPCs) — both
-// static UI — and Advanced (raw config.yml plus every catalog key the map
-// below does not claim). Unmapped segments always land in Advanced so a
-// setting can never disappear from the UI.
+// static UI — plus Other (every catalog key the map below does not claim) and
+// Advanced (raw config.yml only — it owns no catalog keys at all). Unmapped
+// segments always land in Other so a setting can never disappear from the UI.
 //
 // `providers` catalog keys are deliberately NOT mapped to the Providers page:
 // that page is static (API keys + models.yml) so it stays instant to open, and
@@ -33,12 +33,16 @@ export const CONFIG_PAGES = [
   // MCP servers management — static UI (mcp-manager.js), not catalog-backed.
   { id: "mcp", i18nKey: "settings.pages.mcp", always: true },
   { id: "tasks", i18nKey: "settings.pages.tasks" },
+  // Catch-all for catalog keys without a category page — the only place
+  // unmapped segments render. Hidden when the catalog has no such keys.
+  { id: "other", i18nKey: "settings.pages.other" },
+  // Raw config.yml editor only — no catalog keys live on this page.
   { id: "advanced", i18nKey: "settings.pages.advanced", always: true },
 ];
 
 const ALWAYS_PAGE_IDS = new Set(CONFIG_PAGES.filter((page) => page.always).map((page) => page.id));
 
-/** First key segment → sub-page id. Anything absent falls through to "advanced". */
+/** First key segment → sub-page id. Anything absent falls through to "other". */
 const SEGMENT_TO_PAGE = {
   // appearance: Theme, Composer, Status Line, Display, Images
   theme: "appearance",
@@ -114,13 +118,14 @@ const SEGMENT_TO_PAGE = {
 /**
  * Maps a catalog key to its sub-page id by first key segment. Unprefixed keys
  * ("theme") map by their single segment; anything unrecognized — including
- * null/undefined — falls back to "advanced".
+ * null/undefined — falls back to "other" (the Advanced page is only the raw
+ * config.yml editor and never receives catalog keys).
  */
 export function pageForKey(key) {
-  if (typeof key !== "string" || key.length === 0) return "advanced";
+  if (typeof key !== "string" || key.length === 0) return "other";
   const dot = key.indexOf(".");
   const segment = dot > 0 ? key.slice(0, dot) : key;
-  return SEGMENT_TO_PAGE[segment] || "advanced";
+  return SEGMENT_TO_PAGE[segment] || "other";
 }
 
 /** Convenience alias: agent-settings group names are already first key segments. */
