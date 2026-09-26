@@ -1,6 +1,6 @@
 [package]
 name = "ompcot"
-version = "0.7.3"
+version = "0.7.4"
 description = "Omp Agent Desktop - session manager for omp coding agent"
 authors = ["ZephyrQ"]
 edition = "2021"
