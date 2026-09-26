@@ -180,6 +180,15 @@ jobs:
       # --clobber only ever replaces this same job's own fragment on
       # workflow re-runs. shell: bash makes this portable across all
       # runners (on Windows the default would be pwsh).
+      #
+      # v0.7.3 incident constraints: GitHub macOS runners execute this with
+      # the system /bin/bash 3.2 and BSD userland (no newer bash is
+      # preinstalled on macos-* images), so the script must stay inside the
+      # bash-3.2 + BSD/GNU-coreutils intersection:
+      #   - NO mapfile/readarray (bash 4+ builtins; `mapfile: command not
+      #     found` = exit 127 killed BOTH mac jobs in v0.7.3). Array
+      #     building uses while-read loops instead.
+      #   - no GNU-only flags (find -printf, stat -c, xargs -r, sed -z...).
       - name: Upload updater manifest fragment
         if: matrix.updater_platform != ''
         shell: bash
@@ -201,7 +210,10 @@ jobs:
 
           # Signature priority, mirroring tauri-action's updaterJsonPreferNsis
           # semantics: nsis (.exe.sig) beats msi, .app.tar.gz.sig is macOS'
-          # only updater artifact, deb beats rpm for the plain linux-<arch> key.
+          # only updater artifact (a .dmg is never an updater artifact and
+          # the bundler writes no .sig next to it, so the recursive *.sig
+          # discovery below naturally targets the .app.tar.gz + .sig pair),
+          # deb beats rpm for the plain linux-<arch> key.
           sig_priority() {
             case "$1" in
               *.exe.sig | *.app.tar.gz.sig) echo 3 ;;
@@ -221,32 +233,70 @@ jobs:
             esac
           }
 
+          # tauri-action renames the macOS updater artifacts with an arch
+          # suffix when uploading: the on-disk bundle is Ompcot.app.tar.gz
+          # for BOTH mac jobs, but the release assets are
+          # Ompcot_aarch64.app.tar.gz (native arm64 build) and
+          # Ompcot_x64.app.tar.gz (x86_64 cross build). v0.7.3's fragment
+          # step looked up only the on-disk name, so `asset_url` failed on
+          # macOS even though the assets existed. Translate the on-disk
+          # artifact name into this job's expected release asset name; all
+          # other platforms upload under their on-disk names unchanged.
+          release_asset_name() {
+            local name="$1" stem
+            case "$name" in
+              *.app.tar.gz)
+                stem="${name%.app.tar.gz}"
+                case "$RUST_TARGET $UPDATER_PLATFORM" in
+                  *x86_64*) printf '%s_x64.app.tar.gz\n' "$stem" ;;
+                  *aarch64* | *arm64*) printf '%s_aarch64.app.tar.gz\n' "$stem" ;;
+                  *) printf '%s\n' "$name" ;;
+                esac
+                ;;
+              *) printf '%s\n' "$name" ;;
+            esac
+          }
+
           # Browser download URL of an asset tauri-action uploaded moments
-          # ago; retry while the lookup yields nothing or fails, to ride out
-          # release asset-list propagation.
+          # ago; retries while the lookup yields nothing, to ride out
+          # release asset-list propagation. Tries the on-disk name first,
+          # then the tauri-action-renamed macOS variant.
           asset_url() {
-            local name="$1" url
+            local name="$1" renamed url candidate
+            renamed="$(release_asset_name "$name")"
             for _ in 1 2 3; do
-              url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
-                --jq ".assets[] | select(.name == \"$name\") | .browser_download_url" 2>/dev/null || true)"
-              if [ -n "$url" ]; then
-                printf '%s\n' "$url"
-                return 0
-              fi
+              for candidate in "$name" "$renamed"; do
+                url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+                  --jq ".assets | [.[] | select(.name == \"$candidate\") | .browser_download_url] | .[0] // empty" \
+                  2>/dev/null || true)"
+                if [ -n "$url" ]; then
+                  printf '%s\n' "$url"
+                  return 0
+                fi
+              done
               sleep 3
             done
-            echo "::error::release asset '$name' not found on release $TAG" >&2
+            echo "::error::release asset '$name' (also looked for '$renamed') not found on release $TAG" >&2
             return 1
           }
 
-          mapfile -t SIGS < <(find "$TARGET_DIR/release/bundle" -type f -name '*.sig' 2>/dev/null | sort)
+          # Recursive find covers both target/release/bundle/... (host
+          # builds, e.g. macos-latest arm64) and target/<triple>/release/
+          # bundle/... (cross builds, e.g. macos-14 x86_64).
+          SIGS=()
+          while IFS= read -r sig; do
+            SIGS+=("$sig")
+          done < <(find "$TARGET_DIR/release/bundle" -type f -name '*.sig' 2>/dev/null | sort)
           if [ "${#SIGS[@]}" -eq 0 ]; then
             echo "::error::no updater signatures (*.sig) under $TARGET_DIR/release/bundle"
             exit 1
           fi
 
           # Highest priority first; -s keeps alphabetical order on ties.
-          mapfile -t ORDERED < <(
+          ORDERED=()
+          while IFS= read -r sig; do
+            ORDERED+=("$sig")
+          done < <(
             for sig in "${SIGS[@]}"; do
               printf '%s %s\n' "$(sig_priority "$sig")" "$sig"
             done | sort -rn -s -k1,1 | cut -d' ' -f2-
@@ -254,27 +304,35 @@ jobs:
 
           VERSION="$(jq -r '.version' src-tauri/tauri.conf.json)"
 
-          # Platforms for this fragment: the plain "<os>-<arch>" key from the
-          # highest-priority signature plus "<os>-<arch>-<bundle>" variant
-          # keys for every signature -- the same key set tauri-action's
-          # includeUpdaterJson used to emit, so the manifest shape is
-          # unchanged.
-          PLATFORMS="$(
-            for i in "${!ORDERED[@]}"; do
-              sig="${ORDERED[$i]}"
-              artifact="$(basename "$sig" .sig)"
-              entry="$(jq -cn --arg signature "$(cat "$sig")" --arg url "$(asset_url "$artifact")" \
-                '{signature: $signature, url: $url}')"
-              keys=("$UPDATER_PLATFORM")
-              bundle="$(bundle_of "$sig")"
-              [ -n "$bundle" ] && keys+=("$UPDATER_PLATFORM-$bundle")
-              for key in "${keys[@]}"; do
-                if [ "$key" != "$UPDATER_PLATFORM" ] || [ "$i" -eq 0 ]; then
-                  jq -cn --arg key "$key" --argjson entry "$entry" '{($key): $entry}'
-                fi
-              done
-            done | jq -cs 'add // {}'
-          )"
+          # Platforms for this fragment: the plain "<os>-<arch>" key from
+          # the highest-priority signature plus "<os>-<arch>-<bundle>"
+          # variant keys for every signature -- the same key set
+          # tauri-action's includeUpdaterJson used to emit, so the
+          # manifest shape is unchanged. This runs in the top-level shell
+          # (NOT inside a command substitution) so that `set -e` makes a
+          # failed asset lookup fail the whole step instead of silently
+          # emitting a fragment with an empty url (command substitutions
+          # do not inherit errexit).
+          PLATFORMS="{}"
+          first=1
+          for sig in "${ORDERED[@]}"; do
+            artifact="$(basename "$sig" .sig)"
+            url="$(asset_url "$artifact")"
+            entry="$(jq -cn --arg signature "$(cat "$sig")" --arg url "$url" \
+              '{signature: $signature, url: $url}')"
+            keys=("$UPDATER_PLATFORM")
+            bundle="$(bundle_of "$sig")"
+            if [ -n "$bundle" ]; then
+              keys+=("$UPDATER_PLATFORM-$bundle")
+            fi
+            for key in "${keys[@]}"; do
+              if [ "$key" != "$UPDATER_PLATFORM" ] || [ "$first" -eq 1 ]; then
+                PLATFORMS="$(jq -cn --arg key "$key" --argjson entry "$entry" --argjson base "$PLATFORMS" \
+                  '$base + {($key): $entry}')"
+              fi
+            done
+            first=0
+          done
 
           FRAGMENT="latest.$UPDATER_PLATFORM.json"
           jq -cn --arg version "$VERSION" --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -294,18 +352,41 @@ jobs:
   # publish itself is still an optimistic read-merge-publish loop with
   # jittered retries and a convergence check, to survive races with manual
   # manifest repairs or workflow re-runs.
+  #
+  # v0.7.3 incident follow-up: this job must run after the matrix EVEN WHEN
+  # SOME MATRIX JOBS FAILED. The previous strict gate
+  # (`needs.build-and-release.result == 'success'`) skipped the manifest on
+  # any platform failure, so the already-created release became Latest with
+  # NO latest.json and `releases/latest/download/latest.json` 404'd for
+  # every existing client. The outcome is now selected inside the job:
+  #   - all matrix jobs green      -> normal full publish (as before)
+  #   - any failure, >=1 fragment  -> still publish a manifest from the
+  #                                  fragments that DID upload, warn about
+  #                                  the missing platforms, and fail the
+  #                                  run in a FINAL step that runs AFTER
+  #                                  the publish -- the run ends red but
+  #                                  the endpoint is never left broken
+  #   - any failure, 0 fragments   -> nothing to publish: fail loudly; the
+  #                                  updater endpoint keeps serving the
+  #                                  previously published manifest
   publish-updater-manifest:
     needs: build-and-release
-    # Publish a complete manifest only when the whole matrix is green. If a
-    # build job failed we deliberately leave latest.json untouched (clients
-    # keep the previous release's manifest) and the run stays red.
-    if: ${{ !cancelled() && needs.build-and-release.result == 'success' }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
+    env:
+      # Mirror of the build-and-release matrix `updater_platform` values,
+      # used to report which platforms are missing from a partial publish.
+      # Keep in sync when editing the matrix above.
+      EXPECTED_UPDATER_PLATFORMS: >-
+        darwin-aarch64 darwin-x86_64 linux-x86_64 linux-aarch64
+        windows-x86_64 windows-aarch64
     steps:
       - name: Merge fragments and publish latest.json (single writer, race-safe)
+        id: publish
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MATRIX_RESULT: ${{ needs.build-and-release.result }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -340,6 +421,36 @@ jobs:
             printf '%s.%s' "$((RANDOM % 5 + 3))" "$((RANDOM % 10))"
           }
 
+          # Updater platforms that currently have a fragment on the release.
+          found_platforms() {
+            local name p out=""
+            for name in $(fragment_names); do
+              p="${name#latest.}"
+              out="$out ${p%.json}"
+            done
+            printf '%s' "${out# }"
+          }
+
+          # EXPECTED_UPDATER_PLATFORMS minus the platforms found in "$1".
+          missing_platforms() {
+            local found=" $1 " p missing=""
+            for p in $EXPECTED_UPDATER_PLATFORMS; do
+              case "$found" in
+                *" $p "*) ;;
+                *) missing="$missing $p" ;;
+              esac
+            done
+            printf '%s' "${missing# }"
+          }
+
+          # Step outputs are best-effort so the script stays runnable
+          # outside Actions (simulation harness) without GITHUB_OUTPUT.
+          set_output() {
+            if [ -n "${GITHUB_OUTPUT:-}" ]; then
+              printf '%s\n' "$1" >> "$GITHUB_OUTPUT"
+            fi
+          }
+
           # Read-merge-publish with optimistic concurrency: every attempt
           # re-fetches the live manifest AND all fragments from the release
           # (never reusing a stale local copy), publishes with a single
@@ -347,13 +458,15 @@ jobs:
           # also tolerates a missing asset -- no separate DELETE that can
           # 404 mid-race), then converges by re-reading the live manifest.
           # Fails only if some fragment's platform entries are still absent
-          # after 5 attempts.
+          # after 5 attempts. Fragments are downloaded into a dedicated
+          # subdirectory so the merge/convergence globs can never pick up
+          # this job's own live.json/fresh.json/latest.json bookkeeping.
           publish_updater_manifest() {
             local workdir="$1"
             local attempt name version="" fv ok f
             for attempt in 1 2 3 4 5; do
               rm -rf "$workdir"
-              mkdir -p "$workdir"
+              mkdir -p "$workdir/fragments"
 
               # Fresh read of every input on every attempt.
               if ! fetch_live_manifest > "$workdir/live.json"; then
@@ -363,7 +476,7 @@ jobs:
               fi
               for name in $(fragment_names); do
                 if ! gh api -H 'Accept: application/octet-stream' "$(asset_url "$name")" \
-                    > "$workdir/$name"; then
+                    > "$workdir/fragments/$name"; then
                   echo "::warning::attempt $attempt: cannot download fragment $name, retrying"
                   sleep "$(jitter)"
                   continue 2
@@ -371,7 +484,7 @@ jobs:
               done
 
               # All fragments must describe the same app version.
-              for f in "$workdir"/latest.*.json; do
+              for f in "$workdir"/fragments/latest.*.json; do
                 fv="$(jq -r '.version' "$f")"
                 if [ -z "$version" ]; then
                   version="$fv"
@@ -394,7 +507,7 @@ jobs:
                   notes: $notes,
                   pub_date: $pub_date,
                   platforms: ((.[0].platforms // {}) + (.[1:] | map(.platforms) | add // {}))
-                }' "$workdir/live.json" "$workdir"/latest.*.json > "$workdir/latest.json"
+                }' "$workdir/live.json" "$workdir"/fragments/latest.*.json > "$workdir/latest.json"
 
               if ! gh release upload "$TAG" "$workdir/latest.json" --clobber; then
                 echo "::warning::attempt $attempt: latest.json upload conflicted or failed, retrying with a fresh read"
@@ -412,7 +525,7 @@ jobs:
                 continue
               fi
               ok=1
-              for f in "$workdir"/latest.*.json; do
+              for f in "$workdir"/fragments/latest.*.json; do
                 jq -e --slurpfile live "$workdir/fresh.json" '
                   .platforms as $want
                   | [ ($want | keys[]) as $k
@@ -439,8 +552,54 @@ jobs:
             return 1
           }
 
-          # Run when executed directly; tests can source this script and
-          # drive publish_updater_manifest() against a mocked `gh`.
-          if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-            publish_updater_manifest "$(mktemp -d)"
+          FOUND="$(found_platforms)"
+
+          # Zero fragments: nothing to merge, so nothing is published and
+          # the job fails -- loudly so when the matrix already failed, since
+          # the release page is missing its updater manifest entirely.
+          if [ -z "$FOUND" ]; then
+            echo "::error::no latest.<platform>.json fragments found on release $TAG (matrix result: '$MATRIX_RESULT')"
+            if [ "$MATRIX_RESULT" != "success" ]; then
+              echo "::error::nothing to merge, NOT publishing. The updater endpoint (releases/latest/download/latest.json) keeps serving the previously published manifest: existing clients keep working but will not be offered $TAG."
+            fi
+            exit 1
           fi
+
+          publish_updater_manifest "$(mktemp -d)"
+
+          # latest.json is published and converged; decide how the run ends.
+          MISSING="$(missing_platforms "$FOUND")"
+          if [ "$MATRIX_RESULT" != "success" ]; then
+            # Partial publish: the endpoint is valid but incomplete. The
+            # run must still end red; that failure is deferred to the final
+            # step below so it can never preempt or mask the publish.
+            echo "::warning::PARTIAL updater manifest published for $TAG (matrix result: '$MATRIX_RESULT'); platforms included: $FOUND"
+            if [ -n "$MISSING" ]; then
+              echo "::warning::updater platforms MISSING from latest.json: $MISSING"
+            fi
+            set_output "partial=true"
+            set_output "missing=$MISSING"
+          elif [ -n "$MISSING" ]; then
+            echo "::warning::all matrix jobs succeeded but no fragment was uploaded for: $MISSING"
+          fi
+
+      # v0.7.3 incident follow-up: runs only AFTER a PARTIAL manifest was
+      # successfully published. The manifest is already live, so failing
+      # HERE (instead of inside the publish step) keeps
+      # releases/latest/download/latest.json valid for every existing client
+      # while the run is still marked red -- the exact inversion of the
+      # v0.7.3 outcome (Latest release with no latest.json at all).
+      - name: Mark run failed after partial manifest publish
+        if: steps.publish.outputs.partial == 'true'
+        shell: bash
+        env:
+          MISSING: ${{ steps.publish.outputs.missing }}
+        run: |
+          echo "::error::build matrix for $GITHUB_REF_NAME did not fully succeed"
+          if [ -n "${MISSING:-}" ]; then
+            echo "::error::latest.json was published WITHOUT updater entries for: $MISSING"
+          else
+            echo "::error::latest.json was published from every available fragment, but a matrix job still failed"
+          fi
+          echo "::error::clients on the missing platforms keep their current version until the failed matrix jobs are re-run"
+          exit 1
