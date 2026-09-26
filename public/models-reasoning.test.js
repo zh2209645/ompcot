@@ -4,18 +4,31 @@ import { JSDOM } from "jsdom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { setLanguage } from "./i18n.js";
 import {
+  CANONICAL_MODEL_EFFORTS,
+  composeModelSelector,
   createModelsReasoning,
   isModelSelectorAvailable,
   normalizeModelSelector,
+  parseModelSelector,
   UNAVAILABLE_RETRY_MS,
 } from "./models-reasoning.js";
 
 const html = readFileSync(join(process.cwd(), "public/index.html"), "utf8");
 
 const MODELS = [
-  { id: "claude-opus-4-20250514", provider: "anthropic", contextWindow: 200000 },
-  { id: "claude-sonnet-4-20250514", provider: "anthropic", contextWindow: 200000 },
-  { id: "gpt-5", provider: "openai", contextWindow: 128000 },
+  {
+    id: "claude-opus-4-20250514",
+    provider: "anthropic",
+    contextWindow: 200000,
+    thinking: { efforts: ["low", "high"] },
+  },
+  {
+    id: "claude-sonnet-4-20250514",
+    provider: "anthropic",
+    contextWindow: 200000,
+    thinking: { efforts: ["minimal", "low"] },
+  },
+  { id: "gpt-5", provider: "openai", contextWindow: 128000 }, // no thinking → canonical efforts
 ];
 
 const CONFIG = {
@@ -133,6 +146,86 @@ describe("normalizeModelSelector", () => {
   });
 });
 
+describe("parseModelSelector", () => {
+  const roles = new Map([
+    ["smol", "zai/glm-5.3:high"],
+    ["via-role", "@smol"],
+    ["unset", null],
+    ["loop-a", "@loop-b"],
+    ["loop-b", "@loop-a"],
+  ]);
+
+  test("splits a qualified selector into baseId + lowercased effort", () => {
+    expect(parseModelSelector("zai/glm-5.3:high")).toEqual({
+      baseId: "zai/glm-5.3",
+      effort: "high",
+    });
+    expect(parseModelSelector("zai/glm-5.3:MAX")).toEqual({ baseId: "zai/glm-5.3", effort: "max" });
+    expect(parseModelSelector("openai-codex/gpt-5.6-sol:xhigh")).toEqual({
+      baseId: "openai-codex/gpt-5.6-sol",
+      effort: "xhigh",
+    });
+  });
+
+  test("bare selectors and non-effort suffixes carry no effort", () => {
+    expect(parseModelSelector("gpt-5")).toEqual({ baseId: "gpt-5", effort: "" });
+    expect(parseModelSelector("  gpt-5  ")).toEqual({ baseId: "gpt-5", effort: "" });
+    expect(parseModelSelector("gpt-5:blue")).toEqual({ baseId: "gpt-5:blue", effort: "" });
+    expect(parseModelSelector(":high")).toEqual({ baseId: ":high", effort: "" });
+    // Only ONE trailing suffix is split off.
+    expect(parseModelSelector("gpt-5:high:xhigh")).toEqual({
+      baseId: "gpt-5:high",
+      effort: "xhigh",
+    });
+    expect(parseModelSelector(null)).toEqual({ baseId: "", effort: "" });
+    expect(parseModelSelector("")).toEqual({ baseId: "", effort: "" });
+  });
+
+  test("@role refs resolve their base but never adopt an effort pin", () => {
+    // Resolvable ref: baseId resolves through the table, effort stays "" —
+    // the ref delegates depth to its target.
+    expect(parseModelSelector("@smol", roles)).toEqual({ baseId: "zai/glm-5.3", effort: "" });
+    expect(parseModelSelector("@via-role", roles)).toEqual({ baseId: "zai/glm-5.3", effort: "" });
+    // A suffix on the ref itself is still not this row's pin.
+    expect(parseModelSelector("@smol:low", roles)).toEqual({ baseId: "zai/glm-5.3", effort: "" });
+    // Unresolved / cyclic refs keep the raw ref as baseId.
+    expect(parseModelSelector("@unset", roles)).toEqual({ baseId: "@unset", effort: "" });
+    expect(parseModelSelector("@missing", roles)).toEqual({ baseId: "@missing", effort: "" });
+    expect(parseModelSelector("@loop-a", roles)).toEqual({ baseId: "@loop-a", effort: "" });
+  });
+});
+
+describe("composeModelSelector", () => {
+  test("composes provider-qualified base + optional effort suffix", () => {
+    expect(composeModelSelector("zai/glm-5.3", "max")).toBe("zai/glm-5.3:max");
+    expect(composeModelSelector("openai-codex/gpt-5.6-sol", "xhigh")).toBe(
+      "openai-codex/gpt-5.6-sol:xhigh",
+    );
+    expect(composeModelSelector("zai/glm-5.3", "")).toBe("zai/glm-5.3");
+    expect(composeModelSelector("zai/glm-5.3", null)).toBe("zai/glm-5.3");
+    // Effort word is lowercased; unknown words are dropped defensively.
+    expect(composeModelSelector("zai/glm-5.3", "MAX")).toBe("zai/glm-5.3:max");
+    expect(composeModelSelector("zai/glm-5.3", "blue")).toBe("zai/glm-5.3");
+  });
+
+  test("empty base composes to empty (callers map that to a clear)", () => {
+    expect(composeModelSelector("", "high")).toBe("");
+    expect(composeModelSelector(null, "high")).toBe("");
+  });
+
+  test("round-trips with parseModelSelector", () => {
+    for (const [base, effort] of [
+      ["zai/glm-5.3", "max"],
+      ["openai-codex/gpt-5.6-sol", "xhigh"],
+      ["gpt-5", ""],
+      ["gpt-5", "low"],
+    ]) {
+      const selector = composeModelSelector(base, effort);
+      expect(parseModelSelector(selector)).toEqual({ baseId: base, effort });
+    }
+  });
+});
+
 describe("isModelSelectorAvailable", () => {
   const roles = new Map([
     ["smol", "zai/glm-5.3:high"],
@@ -228,16 +321,29 @@ describe("models & reasoning page", () => {
 
   const $ = (sel) => document.querySelector(`#models-reasoning-root ${sel}`);
   const $$ = (sel) => Array.from(document.querySelectorAll(`#models-reasoning-root ${sel}`));
+  /** Effort select of a row (the model select is the row's first select). */
+  const effortSelect = (rowKey) => $(`[data-mr-row="${rowKey}"] .mr-effort-select`);
+  const effortOptions = (rowKey) =>
+    Array.from(effortSelect(rowKey).options).map((o) => o.textContent);
 
   test("renders main session, roles and task agents from the configuration contract", async () => {
     const ctx = setup();
     await loadPage(ctx);
 
-    // Main session: default model + thinking depth, hint line.
-    expect($('[data-mr-row="default-model"] select').value).toBe("claude-opus-4-20250514");
+    // Main session: default model + thinking depth, hint lines. The stored
+    // bare id `claude-opus-4-20250514` decomposes onto the provider-qualified
+    // option; the effort select starts at 默认 (no stored suffix).
+    expect($('[data-mr-row="default-model"] select').value).toBe(
+      "anthropic/claude-opus-4-20250514",
+    );
+    expect(effortSelect("default-model").value).toBe("");
+    expect(effortOptions("default-model")).toEqual(["Default", "low", "high"]);
     expect($('[data-mr-row="default-thinking"] select').value).toBe("high");
     expect($('[data-mr-row="default-thinking"] select').textContent).toContain("Auto");
-    expect($(".mr-hint").textContent).toContain("composer depth menu");
+    expect($$(".mr-hint").map((el) => el.textContent)).toEqual([
+      "Applies to new sessions; the effort suffix pins this role's depth",
+      "Applies to new sessions; use the composer depth menu for the current session",
+    ]);
 
     // Roles: one row per entry; advisor gets its hint; unknown selector flagged.
     const roleRows = $$("[data-mr-row^='role:']");
@@ -258,7 +364,7 @@ describe("models & reasoning page", () => {
     const explorer = $('[data-mr-row="agent:explorer"]');
     expect(explorer.querySelector(".mr-agent-name").textContent).toBe("explorer");
     expect(explorer.querySelector(".mr-badge").textContent).toBe("user");
-    expect(explorer.querySelector(".mr-override select").value).toBe("gpt-5");
+    expect(explorer.querySelector(".mr-override select").value).toBe("openai/gpt-5");
     expect(explorer.querySelector(".settings-toggle").classList.contains("on")).toBe(true);
     expect(explorer.textContent).toContain("from definition file");
     expect(explorer.textContent).toContain("claude-sonnet-4-20250514");
@@ -292,7 +398,12 @@ describe("models & reasoning page", () => {
         ],
       },
       models: [
-        { id: "glm-5.3", provider: "zai", contextWindow: 128000 },
+        {
+          id: "glm-5.3",
+          provider: "zai",
+          contextWindow: 128000,
+          thinking: { efforts: ["low", "high", "max"] },
+        },
         { id: "gpt-5", provider: "openai", contextWindow: 128000 },
       ],
     });
@@ -300,28 +411,38 @@ describe("models & reasoning page", () => {
     const optionTexts = (rowKey) =>
       Array.from($(`[data-mr-row="${rowKey}"] select`).options).map((o) => o.textContent);
 
-    // Effort suffix: raw selector stays selected and visible, unflagged.
-    expect($('[data-mr-row="default-model"] select').value).toBe("zai/glm-5.3:high");
+    // Effort suffix decomposes: model select shows the provider-qualified
+    // option, effort select carries the stored suffix, nothing is flagged.
+    expect($('[data-mr-row="default-model"] select').value).toBe("zai/glm-5.3");
+    expect(effortSelect("default-model").value).toBe("high");
     expect(
       optionTexts("default-model").some((text) => text.includes("not in available list")),
     ).toBe(false);
 
-    // @smol resolves to gpt-5 → unflagged extra option.
+    // @smol resolves to gpt-5 → unflagged extra option; effort stays 默认
+    // and read-only (the ref delegates depth to its target).
     expect($('[data-mr-row="role:plan"] select').value).toBe("@smol");
+    expect(effortSelect("role:plan").value).toBe("");
+    expect(effortSelect("role:plan").disabled).toBe(true);
     expect(optionTexts("role:plan").some((text) => text.includes("not in available list"))).toBe(
       false,
     );
 
-    // Unresolved role ref and genuinely-absent id stay flagged.
+    // Unresolved role ref and genuinely-absent id stay flagged, effort 默认.
     expect(optionTexts("role:vision").some((text) => text.includes("not in available list"))).toBe(
       true,
     );
+    expect(effortSelect("role:vision").disabled).toBe(true);
     expect(optionTexts("role:advisor").some((text) => text.includes("not in available list"))).toBe(
       true,
     );
+    expect(effortSelect("role:advisor").disabled).toBe(true);
+    expect(effortSelect("role:advisor").value).toBe("");
 
-    // Task-agent override in bare form still matches the available id → unflagged.
-    expect($('[data-mr-row="agent:explorer"] .mr-override select').value).toBe("glm-5.3:low");
+    // Task-agent override in bare form still matches the qualified option →
+    // unflagged, effort surfaced.
+    expect($('[data-mr-row="agent:explorer"] .mr-override select').value).toBe("zai/glm-5.3");
+    expect($('[data-mr-row="agent:explorer"] .mr-effort-select').value).toBe("low");
     expect(
       Array.from($('[data-mr-row="agent:explorer"] .mr-override select').options).some((o) =>
         o.textContent.includes("not in available list"),
@@ -329,19 +450,41 @@ describe("models & reasoning page", () => {
     ).toBe(false);
   });
 
+  test("effort select offers per-model efforts when present, canonical otherwise", async () => {
+    const ctx = setup();
+    await loadPage(ctx, {
+      config: {
+        ...CONFIG,
+        roles: [
+          // Opus declares efforts [low, high]; a stored out-of-ladder effort
+          // stays visible as an extra option instead of vanishing.
+          { id: "default", current: "anthropic/claude-opus-4-20250514:minimal" },
+          { id: "advisor", current: "openai/gpt-5" },
+        ],
+      },
+    });
+
+    expect(effortSelect("default-model").value).toBe("minimal");
+    expect(effortOptions("default-model")).toEqual(["Default", "low", "high", "minimal"]);
+
+    // gpt-5 exposes no thinking.efforts → canonical ladder applies.
+    expect(effortSelect("role:advisor").value).toBe("");
+    expect(effortOptions("role:advisor")).toEqual(["Default", ...CANONICAL_MODEL_EFFORTS]);
+  });
+
   test("default model and thinking depth save via RPC, then refetch", async () => {
     const ctx = setup();
     await loadPage(ctx);
 
     const modelSelect = $('[data-mr-row="default-model"] select');
-    modelSelect.value = "gpt-5";
+    modelSelect.value = "openai/gpt-5";
     modelSelect.dispatchEvent(change(dom));
     await tick();
 
     expect(ctx.ws.lastCommand()).toEqual({
       type: "set_model_role",
       role: "default",
-      selector: "gpt-5",
+      selector: "openai/gpt-5",
     });
     expect($('[data-mr-status="default-model"]').textContent).toBe("Saving…");
 
@@ -351,9 +494,10 @@ describe("models & reasoning page", () => {
       roles: [{ id: "default", current: "gpt-5" }, CONFIG.roles[1]],
     });
 
-    // The refetch re-rendered the page; the new value stuck and the status
+    // The refetch re-rendered the page; the new value stuck (bare stored id
+    // decomposes back onto the provider-qualified option) and the status
     // survived the rebuild.
-    expect($('[data-mr-row="default-model"] select').value).toBe("gpt-5");
+    expect($('[data-mr-row="default-model"] select').value).toBe("openai/gpt-5");
     expect($('[data-mr-status="default-model"]').textContent).toBe("Saved");
 
     const thinkingSelect = $('[data-mr-row="default-thinking"] select');
@@ -366,19 +510,250 @@ describe("models & reasoning page", () => {
     await respondRefetch(ctx);
   });
 
+  test("assignments save as composed provider/id:effort selectors", async () => {
+    const ctx = setup();
+    await loadPage(ctx);
+
+    // Default model + effort → set_model_role with the composed selector.
+    const modelSelect = $('[data-mr-row="default-model"] select');
+    modelSelect.value = "anthropic/claude-opus-4-20250514";
+    modelSelect.dispatchEvent(change(dom));
+    await tick();
+    ctx.ws.respondTo("set_model_role", { ok: true });
+    await respondRefetch(ctx, {
+      ...CONFIG,
+      roles: [{ id: "default", current: "anthropic/claude-opus-4-20250514" }, CONFIG.roles[1]],
+    });
+
+    const effort = effortSelect("default-model");
+    effort.value = "high";
+    effort.dispatchEvent(change(dom));
+    await tick();
+
+    expect(ctx.ws.lastCommand()).toEqual({
+      type: "set_model_role",
+      role: "default",
+      selector: "anthropic/claude-opus-4-20250514:high",
+    });
+    ctx.ws.respondTo("set_model_role", { ok: true });
+    await respondRefetch(ctx, {
+      ...CONFIG,
+      roles: [{ id: "default", current: "anthropic/claude-opus-4-20250514:high" }, CONFIG.roles[1]],
+    });
+    expect(effortSelect("default-model").value).toBe("high");
+
+    // Role row → same composition for its own role id.
+    const advisorModel = $('[data-mr-row="role:advisor"] select');
+    advisorModel.value = "openai/gpt-5";
+    advisorModel.dispatchEvent(change(dom));
+    await tick();
+    ctx.ws.respondTo("set_model_role", { ok: true });
+    await respondRefetch(ctx, {
+      ...CONFIG,
+      roles: [
+        { id: "default", current: "anthropic/claude-opus-4-20250514:high" },
+        { id: "advisor", current: "openai/gpt-5" },
+      ],
+    });
+
+    const advisorEffort = effortSelect("role:advisor");
+    advisorEffort.value = "xhigh";
+    advisorEffort.dispatchEvent(change(dom));
+    await tick();
+
+    expect(ctx.ws.lastCommand()).toEqual({
+      type: "set_model_role",
+      role: "advisor",
+      selector: "openai/gpt-5:xhigh",
+    });
+    ctx.ws.respondTo("set_model_role", { ok: true });
+    await respondRefetch(ctx, {
+      ...CONFIG,
+      roles: [
+        { id: "default", current: "anthropic/claude-opus-4-20250514:high" },
+        { id: "advisor", current: "openai/gpt-5:xhigh" },
+      ],
+    });
+    expect(effortSelect("role:advisor").value).toBe("xhigh");
+
+    // Task-agent override → set_task_agent_model_override with the composed model.
+    const overrideModel = $('[data-mr-row="agent:explorer"] .mr-override select');
+    overrideModel.value = "anthropic/claude-sonnet-4-20250514";
+    overrideModel.dispatchEvent(change(dom));
+    await tick();
+    ctx.ws.respondTo("set_task_agent_model_override", { ok: true });
+    await respondRefetch(ctx, {
+      ...CONFIG,
+      roles: [
+        { id: "default", current: "anthropic/claude-opus-4-20250514:high" },
+        { id: "advisor", current: "openai/gpt-5:xhigh" },
+      ],
+      taskAgents: [
+        {
+          ...CONFIG.taskAgents[0],
+          overrideModel: "anthropic/claude-sonnet-4-20250514",
+        },
+      ],
+    });
+
+    const overrideEffort = $('[data-mr-row="agent:explorer"] .mr-effort-select');
+    overrideEffort.value = "low";
+    overrideEffort.dispatchEvent(change(dom));
+    await tick();
+
+    expect(ctx.ws.lastCommand()).toEqual({
+      type: "set_task_agent_model_override",
+      agent: "explorer",
+      model: "anthropic/claude-sonnet-4-20250514:low",
+    });
+    ctx.ws.respondTo("set_task_agent_model_override", { ok: true });
+    await respondRefetch(ctx, {
+      ...CONFIG,
+      roles: [
+        { id: "default", current: "anthropic/claude-opus-4-20250514:high" },
+        { id: "advisor", current: "openai/gpt-5:xhigh" },
+      ],
+      taskAgents: [
+        {
+          ...CONFIG.taskAgents[0],
+          overrideModel: "anthropic/claude-sonnet-4-20250514:low",
+        },
+      ],
+    });
+    expect($('[data-mr-row="agent:explorer"] .mr-effort-select').value).toBe("low");
+  });
+
+  test("changing only the effort re-sends the composed selector", async () => {
+    const zaiModels = [
+      {
+        id: "glm-5.3",
+        provider: "zai",
+        contextWindow: 128000,
+        thinking: { efforts: ["low", "high", "max"] },
+      },
+    ];
+    const ctx = setup();
+    await loadPage(ctx, {
+      config: {
+        ...CONFIG,
+        roles: [{ id: "default", current: "zai/glm-5.3:high" }, CONFIG.roles[1]],
+      },
+      models: zaiModels,
+    });
+
+    // Loaded selector decomposes into model + effort selects…
+    expect($('[data-mr-row="default-model"] select').value).toBe("zai/glm-5.3");
+    expect(effortSelect("default-model").value).toBe("high");
+
+    // …and bumping just the effort re-sends the full composed selector.
+    const effort = effortSelect("default-model");
+    effort.value = "max";
+    effort.dispatchEvent(change(dom));
+    await tick();
+
+    expect(ctx.ws.lastCommand()).toEqual({
+      type: "set_model_role",
+      role: "default",
+      selector: "zai/glm-5.3:max",
+    });
+    ctx.ws.respondTo("set_model_role", { ok: true });
+    await respondRefetch(
+      ctx,
+      {
+        ...CONFIG,
+        roles: [{ id: "default", current: "zai/glm-5.3:max" }, CONFIG.roles[1]],
+      },
+      zaiModels,
+    );
+    expect(effortSelect("default-model").value).toBe("max");
+
+    // Back to 默认 sends the bare qualified id (no suffix).
+    const backToDefault = effortSelect("default-model");
+    backToDefault.value = "";
+    backToDefault.dispatchEvent(change(dom));
+    await tick();
+
+    expect(ctx.ws.lastCommand()).toEqual({
+      type: "set_model_role",
+      role: "default",
+      selector: "zai/glm-5.3",
+    });
+    ctx.ws.respondTo("set_model_role", { ok: true });
+    await respondRefetch(
+      ctx,
+      {
+        ...CONFIG,
+        roles: [{ id: "default", current: "zai/glm-5.3" }, CONFIG.roles[1]],
+      },
+      zaiModels,
+    );
+    expect(effortSelect("default-model").value).toBe("");
+  });
+
+  test("switching models clamps an effort the new model does not support", async () => {
+    const ctx = setup();
+    await loadPage(ctx, {
+      config: {
+        ...CONFIG,
+        roles: [{ id: "default", current: "anthropic/claude-opus-4-20250514:high" }],
+      },
+    });
+    // Opus ladder is [low, high]; sonnet's is [minimal, low] — "high" is
+    // invalid there, so the switch composes WITHOUT a suffix.
+    const modelSelect = $('[data-mr-row="default-model"] select');
+    modelSelect.value = "anthropic/claude-sonnet-4-20250514";
+    modelSelect.dispatchEvent(change(dom));
+    await tick();
+
+    expect(ctx.ws.lastCommand()).toEqual({
+      type: "set_model_role",
+      role: "default",
+      selector: "anthropic/claude-sonnet-4-20250514",
+    });
+    expect(effortSelect("default-model").value).toBe("");
+    ctx.ws.respondTo("set_model_role", { ok: true });
+    await respondRefetch(ctx, {
+      ...CONFIG,
+      roles: [{ id: "default", current: "anthropic/claude-sonnet-4-20250514" }],
+    });
+    expect(effortOptions("default-model")).toEqual(["Default", "minimal", "low"]);
+
+    // Keeping a valid effort across the switch preserves it in the compose.
+    const backToOpus = $('[data-mr-row="default-model"] select');
+    const effort = effortSelect("default-model");
+    effort.value = "low";
+    effort.dispatchEvent(change(dom));
+    await tick();
+    ctx.ws.respondTo("set_model_role", { ok: true });
+    await respondRefetch(ctx, {
+      ...CONFIG,
+      roles: [{ id: "default", current: "anthropic/claude-sonnet-4-20250514:low" }],
+    });
+
+    backToOpus.value = "anthropic/claude-opus-4-20250514";
+    backToOpus.dispatchEvent(change(dom));
+    await tick();
+
+    expect(ctx.ws.lastCommand()).toEqual({
+      type: "set_model_role",
+      role: "default",
+      selector: "anthropic/claude-opus-4-20250514:low",
+    });
+  });
+
   test("role rows set and clear; server errors surface verbatim", async () => {
     const ctx = setup();
     await loadPage(ctx);
 
     const advisorSelect = $('[data-mr-row="role:advisor"] select');
-    advisorSelect.value = "gpt-5";
+    advisorSelect.value = "openai/gpt-5";
     advisorSelect.dispatchEvent(change(dom));
     await tick();
 
     expect(ctx.ws.lastCommand()).toEqual({
       type: "set_model_role",
       role: "advisor",
-      selector: "gpt-5",
+      selector: "openai/gpt-5",
     });
     ctx.ws.respondTo("set_model_role", { ok: true });
     await respondRefetch(ctx);
@@ -485,7 +860,9 @@ describe("models & reasoning page", () => {
 
     // The note is replaced by the regular content path…
     expect($(".mr-note")).toBeNull();
-    expect($('[data-mr-row="default-model"] select').value).toBe("claude-opus-4-20250514");
+    expect($('[data-mr-row="default-model"] select').value).toBe(
+      "anthropic/claude-opus-4-20250514",
+    );
 
     // …and no further retries fire once content is up.
     await vi.advanceTimersByTimeAsync(UNAVAILABLE_RETRY_MS * 4);

@@ -6806,6 +6806,11 @@ html.macos-overlay .settings-content {
   flex-shrink: 0;
 }
 
+/* Effort half of the model+effort pair — narrower than the model select. */
+.mr-effort-select {
+  width: min(120px, 30vw);
+}
+
 /* Clear-role ✕ — same tokens as the per-setting reset (↺) button. */
 .mr-clear {
   flex-shrink: 0;

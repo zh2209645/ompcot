@@ -328,6 +328,9 @@ export const en = {
   "models.noTaskAgents": "No task agents",
   "models.enableAgent": "Enable {name}",
   "models.disableAgent": "Disable {name}",
+  "models.effortDefault": "Default",
+  "models.effortAria": "Reasoning effort",
+  "models.defaultModelHint": "Applies to new sessions; the effort suffix pins this role's depth",
 
   // ── Configuration → Other (catalog keys without a category page) ──
   "settings.pages.other": "Other settings",

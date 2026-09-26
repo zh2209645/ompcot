@@ -320,6 +320,9 @@ export const zhCN = {
   "models.noTaskAgents": "无任务 Agent",
   "models.enableAgent": "启用 {name}",
   "models.disableAgent": "禁用 {name}",
+  "models.effortDefault": "默认",
+  "models.effortAria": "推理档位",
+  "models.defaultModelHint": "适用于新会话；档位后缀固定此角色的推理深度",
 
   // ── 配置 → 其他（未归入分类页的目录键）──
   "settings.pages.other": "其他设置",

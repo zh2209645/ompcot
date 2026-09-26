@@ -7,7 +7,13 @@
 // adjusted from the composer depth menu), and per-task-agent model overrides
 // plus enable/disable (set_task_agent_model_override / set_task_agent_disabled).
 // Picker options come from the same get_available_models RPC the header model
-// dropdown uses.
+// dropdown uses. Entries carry `{ id, provider, thinking: { efforts } }` —
+// the model select offers PROVIDER-QUALIFIED ids (`provider/id`, omp's
+// canonical selector form; bare id when no provider is known) and each row
+// pairs it with an effort select so assignments compose/decompose the full
+// `provider/model-id:effort` selector (e.g. `zai/glm-5.3:max`). Per-model
+// `thinking.efforts` drive the effort options; the canonical
+// minimal…max list is the fallback when a model exposes none.
 //
 // Behavior contracts (mirrors mcp-manager.js):
 // - Every mutation fires immediately on control change, shows per-row
@@ -20,6 +26,13 @@
 //   (provider-prefixed + effort suffix), `@smol` (role reference), aliases,
 //   and bare ids — so the flag check compares after normalization
 //   (normalizeModelSelector / isModelSelectorAvailable below).
+// - Every assignment control is a model+effort PAIR. Loading decomposes the
+//   stored selector (parseModelSelector): the model select shows the
+//   provider-qualified option (or the flagged extra), the effort select shows
+//   the stored `:effort` (默认 when none/unknown). Saving composes
+//   `provider/id` + optional `:effort` (composeModelSelector); changing ONLY
+//   the effort re-sends the composed selector; clearing the model still
+//   clears (null).
 // - `available: false` degrades to an unavailable note AND schedules a
 //   bounded silent retry (the embedded server can still be initializing on
 //   the first page load — the note is not a dead end); a failed fetch keeps
@@ -62,15 +75,20 @@ export const MODEL_SELECTOR_EFFORTS = new Set([
   "inherit",
 ]);
 
-// Strip ONE trailing `:effort` suffix. Only strips when the remaining
+// Effort options offered when the selected model exposes no per-model
+// `thinking.efforts` (or none is known for it). Canonical omp effort ladder.
+export const CANONICAL_MODEL_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+// Split ONE trailing `:effort` suffix. Only splits when the remaining
 // prefix is non-empty (":high" stays) and the suffix is a known effort word
-// ("gpt-5:blue" stays — that may be a real id).
-function stripTrailingEffort(value) {
+// ("gpt-5:blue" stays — that may be a real id). Returns the base and the
+// lowercased effort word ("" when nothing was stripped).
+function splitTrailingEffort(value) {
   const idx = value.lastIndexOf(":");
-  if (idx <= 0) return value;
+  if (idx <= 0) return { base: value, effort: "" };
   const suffix = value.slice(idx + 1).toLowerCase();
-  if (!MODEL_SELECTOR_EFFORTS.has(suffix)) return value;
-  return value.slice(0, idx);
+  if (!MODEL_SELECTOR_EFFORTS.has(suffix)) return { base: value, effort: "" };
+  return { base: value.slice(0, idx), effort: suffix };
 }
 
 function lookupRoleCurrent(rolesById, roleId) {
@@ -84,31 +102,69 @@ function lookupRoleCurrent(rolesById, roleId) {
 }
 
 /**
- * Reduce a stored model selector to the base id used for list matching:
- * trim → strip a trailing `:effort` suffix → resolve `@role` references
- * through the current roles table (one level per spec, with a cycle guard;
- * the resolved value gets its effort suffix stripped again). An unresolved
- * role reference (the role itself is unset/unknown) returns the raw ref —
- * it cannot match any model id, so it stays flagged, which is correct.
+ * Decompose a stored model selector into `{ baseId, effort }`:
+ * trim → strip a trailing `:effort` suffix (lowercased effort word) →
+ * resolve `@role` references through the current roles table (one level per
+ * spec, with a cycle guard; the resolved value gets its effort suffix
+ * stripped again — a role ref renders with 默认 effort, the target's own
+ * pin is not this row's). An unresolved role reference (the role itself is
+ * unset/unknown) returns the raw ref as baseId — it cannot match any model
+ * id, so it stays flagged, which is correct.
  *
  * @param {string|null|undefined} selector stored selector value
  * @param {Map<string, string|null>|Record<string, string>|null} rolesById
  *   role id → the role's current selector (Map or plain object)
- * @returns {string} normalized base id ("" for empty input)
+ * @returns {{baseId: string, effort: string}} "" / "" for empty input
  */
-export function normalizeModelSelector(selector, rolesById = null) {
+export function parseModelSelector(selector, rolesById = null) {
   let value = String(selector ?? "").trim();
-  if (!value) return "";
-  value = stripTrailingEffort(value);
+  if (!value) return { baseId: "", effort: "" };
+  const split = splitTrailingEffort(value);
+  value = split.base;
+  let effort = split.effort;
   const seen = new Set();
   while (value.startsWith("@")) {
     if (seen.has(value)) break; // @a → @b → @a cycle: stop, stays flagged
     seen.add(value);
     const current = lookupRoleCurrent(rolesById, value.slice(1));
-    if (typeof current !== "string" || !current.trim()) return value;
-    value = stripTrailingEffort(current.trim());
+    if (typeof current !== "string" || !current.trim()) break;
+    const resolved = splitTrailingEffort(current.trim());
+    value = resolved.base;
+    effort = ""; // the ref delegates depth to its target — not this row's pin
   }
-  return value;
+  return { baseId: value, effort };
+}
+
+/**
+ * Reduce a stored model selector to the base id used for list matching —
+ * the base-only wrapper over parseModelSelector (kept as the historical
+ * export used by the availability check and existing callers).
+ *
+ * @param {string|null|undefined} selector stored selector value
+ * @param {Map<string, string|null>|Record<string, string>|null} rolesById
+ * @returns {string} normalized base id ("" for empty input)
+ */
+export function normalizeModelSelector(selector, rolesById = null) {
+  return parseModelSelector(selector, rolesById).baseId;
+}
+
+/**
+ * Compose the canonical omp selector form: `provider/model-id` + optional
+ * `:effort` suffix. Empty base → "" (callers map that to a null/clear);
+ * an effort word outside MODEL_SELECTOR_EFFORTS is dropped defensively.
+ *
+ * @param {string} baseId provider-qualified (or bare) model id
+ * @param {string|null|undefined} effort effort word ("" → no suffix)
+ * @returns {string} composed selector
+ */
+export function composeModelSelector(baseId, effort) {
+  const base = String(baseId ?? "").trim();
+  if (!base) return "";
+  const suffix = String(effort ?? "")
+    .trim()
+    .toLowerCase();
+  if (!suffix || !MODEL_SELECTOR_EFFORTS.has(suffix)) return base;
+  return `${base}:${suffix}`;
 }
 
 function lastSegmentLower(id) {
@@ -117,17 +173,63 @@ function lastSegmentLower(id) {
   return idx >= 0 ? lower.slice(idx + 1) : null;
 }
 
+// The select-option value for an available-models entry: `provider/id`
+// (omp's canonical selector form) when a provider is known and the id is
+// not already provider-prefixed; the id itself otherwise.
+function modelOptionValue(model) {
+  const id = typeof model?.id === "string" ? model.id.trim() : "";
+  if (!id) return null;
+  const provider = typeof model?.provider === "string" ? model.provider.trim() : "";
+  if (provider && !id.includes("/")) return `${provider}/${id}`;
+  return id;
+}
+
+// Per-model effort ladder from `thinking.efforts`; null when the entry
+// exposes none (→ callers fall back to CANONICAL_MODEL_EFFORTS).
+function modelOptionEfforts(model) {
+  const efforts = model?.thinking?.efforts;
+  if (!Array.isArray(efforts)) return null;
+  const words = efforts.filter(
+    (e) => typeof e === "string" && MODEL_SELECTOR_EFFORTS.has(e.toLowerCase()),
+  );
+  return words.length > 0 ? words.map((e) => e.toLowerCase()) : null;
+}
+
+/**
+ * Find the select-option value a normalized base id corresponds to, or null.
+ * get_available_models entries look like `{ id, provider, contextWindow }`
+ * where `id` may be bare (`gpt-5`) or provider-prefixed
+ * (`openrouter/anthropic/claude-sonnet-4`); option values are
+ * `provider/id` when a provider is known. Matching:
+ *   - exact value (case-insensitive),
+ *   - cross bare↔prefixed last-segment: selector `zai/glm-5.3` vs value
+ *     `glm-5.3`, and the reverse.
+ * Both-prefixed values must match exactly (no last-segment guess —
+ * different providers can share a model name).
+ *
+ * @param {string} baseId normalized base id
+ * @param {Array<{value: string}>} options built option list
+ * @returns {string|null} matched option value
+ */
+function findModelOptionValue(baseId, options) {
+  if (!baseId) return null;
+  const baseLower = baseId.toLowerCase();
+  const baseLast = lastSegmentLower(baseId);
+  for (const option of options) {
+    if (option.value.toLowerCase() === baseLower) return option.value;
+  }
+  for (const option of options) {
+    const optionLower = option.value.toLowerCase();
+    const optionLast = lastSegmentLower(option.value);
+    if (baseLast && !optionLast && baseLast === optionLower) return option.value;
+    if (optionLast && !baseLast && baseLower === optionLast) return option.value;
+  }
+  return null;
+}
+
 /**
  * Is the stored selector's normalized base id genuinely present in the
- * available-models list? get_available_models entries look like
- * `{ id, provider, contextWindow }` where `id` may be bare (`gpt-5`) or
- * provider-prefixed (`zai/glm-5.3`) depending on the provider, so we match
- *   - exact id (case-insensitive),
- *   - `${provider}/${id}` when the entry carries a provider,
- *   - cross bare↔prefixed last-segment: selector `zai/glm-5.3` vs id
- *     `glm-5.3`, and the reverse.
- * Both-prefixed ids must match exactly (no last-segment guess — different
- * providers can share a model name).
+ * available-models list? (see findModelOptionValue for the matching rules)
  *
  * @param {string} selector stored selector value
  * @param {Array<{id: string, provider?: string}>} models available list
@@ -136,20 +238,15 @@ function lastSegmentLower(id) {
 export function isModelSelectorAvailable(selector, models, rolesById = null) {
   const base = normalizeModelSelector(selector, rolesById);
   if (!base) return true; // nothing stored → nothing to flag
-  const baseLower = base.toLowerCase();
-  const baseLast = lastSegmentLower(base);
+  const options = [];
+  const seen = new Set();
   for (const model of Array.isArray(models) ? models : []) {
-    const id = typeof model?.id === "string" ? model.id : "";
-    if (!id) continue;
-    const idLower = id.toLowerCase();
-    if (baseLower === idLower) return true;
-    const provider = typeof model?.provider === "string" ? model.provider.toLowerCase() : "";
-    if (provider && baseLower === `${provider}/${idLower}`) return true;
-    const idLast = lastSegmentLower(id);
-    if (baseLast && !idLast && baseLast === idLower) return true;
-    if (idLast && !baseLast && baseLower === idLast) return true;
+    const value = modelOptionValue(model);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    options.push({ value });
   }
-  return false;
+  return findModelOptionValue(base, options) !== null;
 }
 
 function cssEscape(value) {
@@ -210,6 +307,33 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
       map.set(role.id, typeof role.current === "string" ? role.current : null);
     }
     return map;
+  }
+
+  // Provider-qualified option list projected from the available models,
+  // cached per models-array identity (rebuilt on every refresh that changed
+  // the list). Duplicate values (same provider/id) collapse; a later entry
+  // with efforts can upgrade an earlier effort-less duplicate.
+  let modelOptionsCache = null;
+  function modelOptions() {
+    if (!modelOptionsCache || modelOptionsCache.models !== models) {
+      const byValue = new Map();
+      for (const model of models) {
+        const value = modelOptionValue(model);
+        if (!value) continue;
+        const existing = byValue.get(value);
+        if (!existing) {
+          byValue.set(value, { value, efforts: modelOptionEfforts(model) });
+        } else if (!existing.efforts) {
+          existing.efforts = modelOptionEfforts(model);
+        }
+      }
+      modelOptionsCache = { models, options: Array.from(byValue.values()) };
+    }
+    return modelOptionsCache.options;
+  }
+
+  function findModelOption(value) {
+    return modelOptions().find((option) => option.value === value) ?? null;
   }
 
   // ── Row statuses (painted into whatever render() last built) ────────────
@@ -329,14 +453,19 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
 
   /**
    * Model picker as a plain select. Options: optional empty option (Not set /
-   * No override), then every available model, then — when the stored
-   * selector is not literally among them — the stored value as an extra
-   * option so a stale/custom selector stays visible instead of being
-   * silently dropped. The extra option is flagged (⚠ not in available list)
-   * only when the selector's NORMALIZED base id is genuinely absent
-   * (effort suffix / `@role` ref / provider-prefix variants render clean).
+   * No override), then every available model as a PROVIDER-QUALIFIED id
+   * (`provider/id`, omp's canonical selector form; bare id when no provider
+   * is known). When the value to show is not among them (a `@role` reference
+   * or a stale/custom base id), it is appended as an extra option so the
+   * stored selection stays visible instead of being silently dropped; the
+   * extra option is flagged (⚠ not in available list) only when the
+   * selector's NORMALIZED base id is genuinely absent (effort suffix /
+   * `@role` ref / provider-prefix variants render clean).
+   *
+   * `value` is the DECOMPOSED display value (see buildModelPair): either a
+   * matched option value, or the extra text to append.
    */
-  function buildModelSelect({ value, emptyKey, ariaLabel, onChange }) {
+  function buildModelSelect({ value, emptyKey, ariaLabel, extraFlagged = null, onChange }) {
     const select = document.createElement("select");
     select.className = "settings-select mr-select";
     if (ariaLabel) select.setAttribute("aria-label", ariaLabel);
@@ -349,29 +478,148 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
     }
 
     const known = new Set();
-    for (const model of models) {
-      const id = typeof model?.id === "string" ? model.id : "";
-      if (!id || known.has(id)) continue;
-      known.add(id);
-      const option = document.createElement("option");
-      option.value = id;
-      option.textContent = id;
-      select.appendChild(option);
+    for (const option of modelOptions()) {
+      if (known.has(option.value)) continue;
+      known.add(option.value);
+      const el = document.createElement("option");
+      el.value = option.value;
+      el.textContent = option.value;
+      select.appendChild(el);
     }
 
     const current = typeof value === "string" ? value : "";
     if (current && !known.has(current)) {
       const extra = document.createElement("option");
       extra.value = current;
-      extra.textContent = isModelSelectorAvailable(current, models, rolesById())
-        ? current
-        : `⚠ ${current} (${t("models.notInList")})`;
+      extra.textContent =
+        extraFlagged === true ? `⚠ ${current} (${t("models.notInList")})` : current;
       select.appendChild(extra);
     }
 
     select.value = current;
     select.addEventListener("change", () => onChange(select.value));
     return select;
+  }
+
+  // ── Model + effort pair (the assignment control) ────────────────────────
+  //
+  // Every assignment (default model, each role row, task-agent override) is
+  // a PAIR: model select (provider-qualified options) + effort select
+  // (默认 = no suffix, else the model's `thinking.efforts`, else the
+  // canonical ladder). Loading decomposes the stored selector; saving
+  // composes `provider/id` + optional `:effort`. The effort select is
+  // disabled while no known model is selected (empty / `@role` / unknown
+  // extra) — those render effort as 默认 and cannot be re-pinned from here.
+
+  // Decompose a stored selector into the pair's render state:
+  // modelValue = option value to select (or extra text), effort = stored
+  // effort word, extraFlagged = null (no extra) / boolean (extra flag).
+  function decomposeForPair(selector) {
+    const raw = String(selector ?? "").trim();
+    if (!raw) return { modelValue: "", effort: "", extraFlagged: null };
+    if (raw.startsWith("@")) {
+      // Role references display as-is (resolved for the flag check only).
+      return {
+        modelValue: raw,
+        effort: "",
+        extraFlagged: !isModelSelectorAvailable(raw, models, rolesById()),
+      };
+    }
+    const { baseId, effort } = parseModelSelector(raw, rolesById());
+    const match = findModelOptionValue(baseId, modelOptions());
+    if (match) return { modelValue: match, effort, extraFlagged: null };
+    return {
+      modelValue: baseId,
+      effort: "",
+      extraFlagged: !isModelSelectorAvailable(raw, models, rolesById()),
+    };
+  }
+
+  function rebuildEffortOptions(select, efforts, selected) {
+    // Keep the leading 默认 option; replace the effort options behind it.
+    while (select.options.length > 1) select.remove(select.options.length - 1);
+    for (const effort of efforts) {
+      const option = document.createElement("option");
+      option.value = effort;
+      option.textContent = thinkingLevelLabel(effort);
+      select.appendChild(option);
+    }
+    // A stored effort outside the model's ladder stays visible (and
+    // selectable) as an extra option instead of silently vanishing.
+    if (selected && !efforts.includes(selected)) {
+      const option = document.createElement("option");
+      option.value = selected;
+      option.textContent = thinkingLevelLabel(selected);
+      select.appendChild(option);
+    }
+    select.value = selected;
+  }
+
+  /**
+   * Build the [model select, effort select] pair for one assignment.
+   *
+   * @param {object} params
+   * @param {string|null|undefined} params.selector stored selector
+   * @param {string} params.emptyKey locale key for the empty model option
+   * @param {string} params.modelAria aria-label for the model select
+   * @param {string} params.effortAria aria-label for the effort select
+   * @param {(selector: string|null) => void} params.onSelector
+   *   receives the COMPOSED selector on every commit (null = cleared)
+   * @returns {HTMLSelectElement[]} [modelSelect, effortSelect]
+   */
+  function buildModelPair({ selector, emptyKey, modelAria, effortAria, onSelector }) {
+    const state = decomposeForPair(selector);
+    let currentEffort = state.effort;
+
+    const modelSelect = buildModelSelect({
+      value: state.modelValue,
+      emptyKey,
+      ariaLabel: modelAria,
+      extraFlagged: state.extraFlagged,
+      onChange: onModelChange,
+    });
+
+    const effortSelect = document.createElement("select");
+    effortSelect.className = "settings-select mr-select mr-effort-select";
+    if (effortAria) effortSelect.setAttribute("aria-label", effortAria);
+    const defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = t("models.effortDefault");
+    effortSelect.appendChild(defaultOption);
+
+    function knownEfforts(modelValue) {
+      const known = modelValue ? findModelOption(modelValue) : null;
+      return known ? (known.efforts ?? CANONICAL_MODEL_EFFORTS) : null;
+    }
+
+    function send() {
+      const base = modelSelect.value;
+      onSelector(base ? composeModelSelector(base, currentEffort) : null);
+    }
+
+    function onModelChange(value) {
+      // Re-scope the effort options to the newly selected model, clamping a
+      // now-invalid stored effort back to 默认 (no suffix).
+      const efforts = knownEfforts(value);
+      const keep = currentEffort && efforts?.includes(currentEffort) ? currentEffort : "";
+      rebuildEffortOptions(effortSelect, efforts ?? [], keep);
+      effortSelect.disabled = !efforts;
+      currentEffort = keep;
+      send();
+    }
+
+    effortSelect.addEventListener("change", () => {
+      currentEffort = effortSelect.value;
+      send();
+    });
+
+    // Initial paint: a stale stored effort stays selected as an extra
+    // option; no/unknown model → disabled effort select at 默认.
+    const efforts = knownEfforts(state.modelValue);
+    rebuildEffortOptions(effortSelect, efforts ?? [], state.effort);
+    effortSelect.disabled = !efforts;
+
+    return [modelSelect, effortSelect];
   }
 
   function buildThinkingSelect({ value, ariaLabel, onChange }) {
@@ -420,22 +668,22 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
     const modelLabel = document.createElement("span");
     modelLabel.className = "settings-label";
     modelLabel.textContent = t("models.defaultModel");
-    modelRow.append(
-      modelLabel,
-      buildModelSelect({
-        value: defaultRole?.current ?? "",
-        emptyKey: "models.notSet",
-        ariaLabel: t("models.defaultModel"),
-        onChange: (value) => {
-          void mutate(
-            { type: "set_model_role", role: "default", selector: value || null },
-            "default-model",
-          );
-        },
-      }),
-      statusEl("default-model"),
-    );
+    const pair = buildModelPair({
+      selector: defaultRole?.current ?? "",
+      emptyKey: "models.notSet",
+      modelAria: t("models.defaultModel"),
+      effortAria: `${t("models.defaultModel")} — ${t("models.effortAria")}`,
+      onSelector: (selector) => {
+        void mutate({ type: "set_model_role", role: "default", selector }, "default-model");
+      },
+    });
+    modelRow.append(modelLabel, ...pair, statusEl("default-model"));
     section.appendChild(modelRow);
+
+    const modelHint = document.createElement("p");
+    modelHint.className = "settings-help mr-hint";
+    modelHint.textContent = t("models.defaultModelHint");
+    section.appendChild(modelHint);
 
     const thinkingRow = document.createElement("div");
     thinkingRow.className = "mr-row";
@@ -484,16 +732,17 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
       label.appendChild(hint);
     }
 
-    const select = buildModelSelect({
-      value: role.current ?? "",
+    const pair = buildModelPair({
+      selector: role.current ?? "",
       emptyKey: "models.notSet",
-      ariaLabel: `${t("models.modelRoles")}: ${role.id}`,
-      onChange: (value) => {
-        void mutate({ type: "set_model_role", role: role.id, selector: value || null }, rowKey);
+      modelAria: `${t("models.modelRoles")}: ${role.id}`,
+      effortAria: `${t("models.modelRoles")}: ${role.id} — ${t("models.effortAria")}`,
+      onSelector: (selector) => {
+        void mutate({ type: "set_model_role", role: role.id, selector }, rowKey);
       },
     });
 
-    row.append(label, select);
+    row.append(label, ...pair);
 
     if (role.current) {
       const clear = document.createElement("button");
@@ -617,15 +866,13 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
     overrideLabel.textContent = t("models.overrideModel");
     override.append(
       overrideLabel,
-      buildModelSelect({
-        value: agent.overrideModel ?? "",
+      ...buildModelPair({
+        selector: agent.overrideModel ?? "",
         emptyKey: "models.noOverride",
-        ariaLabel: `${agent.name}: ${t("models.overrideModel")}`,
-        onChange: (value) => {
-          void mutate(
-            { type: "set_task_agent_model_override", agent: agent.name, model: value || null },
-            rowKey,
-          );
+        modelAria: `${agent.name}: ${t("models.overrideModel")}`,
+        effortAria: `${agent.name}: ${t("models.overrideModel")} — ${t("models.effortAria")}`,
+        onSelector: (model) => {
+          void mutate({ type: "set_task_agent_model_override", agent: agent.name, model }, rowKey);
         },
       }),
     );
