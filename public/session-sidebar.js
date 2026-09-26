@@ -877,7 +877,10 @@ export class SessionSidebar {
       const visibleSessions = project.sessions.filter(
         (session) => !this.isArchived(session.filePath),
       );
-      if (visibleSessions.length === 0) continue;
+      // The server pins the CURRENT workspace as a project even before it
+      // has any persisted session (fresh "Open Folder" target) — otherwise
+      // the folder the user just opened would be invisible on the left.
+      if (visibleSessions.length === 0 && !project.currentWorkspace) continue;
 
       const group = document.createElement("div");
       group.className = "project-group";
@@ -928,6 +931,13 @@ export class SessionSidebar {
 
       for (const session of visibleProjectSessions) {
         sessionsDiv.appendChild(this.buildSessionItem(session, project));
+      }
+
+      if (visibleSessions.length === 0) {
+        const hint = document.createElement("div");
+        hint.className = "session-empty-workspace-hint";
+        hint.textContent = t("session.noSessionsYet");
+        sessionsDiv.appendChild(hint);
       }
 
       if (!this.searchQuery) {

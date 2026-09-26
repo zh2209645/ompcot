@@ -528,6 +528,7 @@ export const en = {
   "session.archived": "Archived",
   "session.deleteAllArchived": "Delete all archived sessions",
   "session.openProject": "Open Project",
+  "session.noSessionsYet": "No sessions yet — start a new chat",
   "session.openProjectAria": "Open project",
   "session.justNow": "Just now",
   "session.minutesAgo": "{count}m ago",

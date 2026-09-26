@@ -3026,6 +3026,18 @@ function handleMirrorSync(data) {
     return;
   }
 
+  // Same-process child-agent defense: subagent/advisor transcripts live in
+  // a nested tree under the sessions root and are never legitimate targets
+  // of the live-session snapshot (they render read-only through
+  // get_agent_transcript instead). The embedded server already refuses to
+  // broadcast a child session's snapshot, but any future producer (older
+  // extension build, direct /mirror_sync_request against a child ctx) must
+  // not be able to hijack the view into the subagent either.
+  if (data.sessionFile && isNestedAgentTranscriptPath(data.sessionFile)) {
+    logSessionRoute("mirrorSync:ignored-child-agent", { sessionFile: data.sessionFile });
+    return;
+  }
+
   console.log("[Mirror] Received state snapshot:", data.entries?.length, "entries");
   isMirrorMode = true;
 

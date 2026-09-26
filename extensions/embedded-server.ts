@@ -1855,6 +1855,10 @@ export default function (omp: ExtensionAPI) {
 
   // Store latest context reference for use in command handlers
   let latestCtx: ExtensionContext | null = null;
+  // True once this instance's session_start revealed we are bound to a
+  // subagent/advisor child session (see isChildAgentSession). Child
+  // instances must not touch any process-scoped surface.
+  let childAgentInstance = false;
 
   // ═══════════════════════════════════════
   // Always resolve the freshest `omp` from globalState before calling any
@@ -2379,6 +2383,13 @@ export default function (omp: ExtensionAPI) {
       async (event: unknown, ctx: ExtensionContext) => {
         rememberCtx(ctx);
 
+        // Child-agent instances (subagents / advisors) must not feed the
+        // GUI: their frames would be tagged with the ROOT session's route
+        // meta (globalState.getLatestCtx points at the root instance) and
+        // render into the main transcript. The Agent Hub surfaces children
+        // via list_agents instead.
+        if (childAgentInstance) return;
+
         // Forward event to all connected browser clients
         // Wrap in { type: "event", event: ... } to match the existing frontend protocol
         broadcast({
@@ -2397,6 +2408,12 @@ export default function (omp: ExtensionAPI) {
 
   omp.on("session_start", async (_event, ctx) => {
     rememberCtx(ctx);
+    // Subagent/advisor rebind: this instance drives a CHILD session. Stay
+    // inert — no UI bridge, no auto-title collection, no instance-registry
+    // overwrite (the root instance owns every process-scoped surface; see
+    // isChildAgentSession).
+    childAgentInstance = isChildAgentSession(ctx);
+    if (childAgentInstance) return;
     // Attach the interactive-UI bridge to the shared ui context (idempotent —
     // the same instance survives new_session / switch_session / fork reloads).
     try {
@@ -2410,7 +2427,6 @@ export default function (omp: ExtensionAPI) {
     // Update instance registry with new session file
     updateInstanceSession(ctx.sessionManager.getSessionFile() || "");
   });
-
   omp.on("turn_start", async (_event, _ctx) => {
     turnCount++;
   });
@@ -2431,6 +2447,11 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("turn_end", async (_event, _ctx) => {
+    // Child instances never reach the title logic below (their session_start
+    // bails out), but their turn_end still fires — guard so a child can never
+    // rename the ROOT session via currentOMP(), which resolves to the root
+    // instance's omp.
+    if (childAgentInstance) return;
     if (titleSet || turnCount < 2) return;
 
     // Defensive: if the turn that just ended also kicked off a session
@@ -4521,6 +4542,73 @@ export default function (omp: ExtensionAPI) {
     return null;
   }
 
+  // ═══════════════════════════════════════
+  // Child-agent (subagent / advisor) detection
+  // ═══════════════════════════════════════
+  //
+  // omp rebinds this extension module for EVERY session it drives —
+  // including each subagent/advisor child spawned by the `task` tool (the
+  // root session forwards its prepared extension factories and every child
+  // binds fresh instances to its own ExtensionAPI). A child instance must
+  // stay INERT: the process-scoped HTTP/WS server, the globalState handler
+  // pointers, the `mirror_sync` broadcast and the instance registry all
+  // belong to the ROOT session's instance. A child that re-published them
+  // would (a) hijack the GUI into the subagent's transcript (its
+  // `session_start` broadcasts the child's snapshot), and (b) null the
+  // global handlers again on its `session_shutdown` — leaving the process
+  // answering "No active session" while the root session is still running,
+  // which kills prompts, list_agents and the Agent Hub.
+  //
+  // Detection is belt-and-braces: (1) the process-global AgentRegistry
+  // positively identifies the session file as a `sub`/`advisor` ref (the
+  // root's own ref is `kind: "main"`); (2) a registry-less fallback treats
+  // session files nested more than one directory under the sessions root
+  // as child transcripts — main sessions are always
+  // `<root>/<project>/<file>.jsonl` while children live under
+  // `<root>/<project>/<session>/…` (the same layout fact get_agent_transcript
+  // relies on). Anything unresolved degrades to "root" so the primary
+  // session-switch flow never regresses.
+
+  function sameSessionFilePath(a: string, b: string): boolean {
+    const na = path.resolve(a);
+    const nb = path.resolve(b);
+    return process.platform === "win32" ? na.toLowerCase() === nb.toLowerCase() : na === nb;
+  }
+
+  function isNestedChildTranscriptPath(sessionFile: string): boolean {
+    try {
+      const rel = path.relative(path.resolve(SESSIONS_DIR), path.resolve(sessionFile));
+      if (!rel || rel.startsWith("..")) return false;
+      // Main sessions are "<project>/<file>.jsonl" (2 segments relative to
+      // the sessions root); child transcripts live one or more levels deeper.
+      return rel.split(path.sep).length > 2;
+    } catch {
+      return false;
+    }
+  }
+
+  function isChildAgentSession(ctx: ExtensionContext): boolean {
+    let file: string | null = null;
+    try {
+      const raw = ctx?.sessionManager?.getSessionFile();
+      if (typeof raw === "string" && raw.trim()) file = raw;
+    } catch {}
+    if (!file) return false;
+    try {
+      const refs = resolveAgentRegistry()?.list?.();
+      if (Array.isArray(refs)) {
+        for (const ref of refs) {
+          const r = ref as AgentRefLike;
+          if (typeof r.sessionFile !== "string" || !r.sessionFile) continue;
+          if (!sameSessionFilePath(r.sessionFile, file)) continue;
+          const kind = typeof r.kind === "string" ? r.kind : "";
+          if (kind === "sub" || kind === "advisor") return true;
+          if (kind === "main") return false;
+        }
+      }
+    } catch {}
+    return isNestedChildTranscriptPath(file);
+  }
   // Frozen sanitize: EXACTLY {id, name, kind, parentId, status, running,
   // sessionFile}. `advisor` refs are observability-only and excluded; `main`
   // refs are included (the GUI shows main + subs).
@@ -6029,6 +6117,30 @@ export default function (omp: ExtensionAPI) {
         return bTime - aTime;
       });
 
+      // The workspace this process drives must always appear in the
+      // sidebar, even before its first session is persisted (omp writes a
+      // session's .jsonl only on the first message round-trip). Without
+      // this, "Open Folder" into a fresh workspace navigates to a window
+      // whose left list shows every OTHER project — the folder the user
+      // just opened stays invisible until they send their first message.
+      // Pinned first; dropped as soon as the real (session-backed) project
+      // for the same cwd exists.
+      const normalizedWorkspacePath = (p: string): string => {
+        const resolved = path.resolve(p);
+        return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+      };
+      if (
+        !projects.some(
+          (p) => normalizedWorkspacePath(p.path) === normalizedWorkspacePath(process.cwd()),
+        )
+      ) {
+        projects.unshift({
+          path: process.cwd(),
+          dirName: "", // no sessions-dir backing yet; collapse key only
+          sessions: [],
+          currentWorkspace: true,
+        });
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ projects }));
     } catch (e: unknown) {
@@ -7215,6 +7327,13 @@ export default function (omp: ExtensionAPI) {
   // ═══════════════════════════════════════
   omp.on("session_start", async (_event, ctx) => {
     rememberCtx(ctx);
+    // Child-agent rebind (task tool): the ROOT instance keeps owning the
+    // process-scoped server, the globalState handler pointers and the
+    // mirror_sync broadcast. Re-publishing here would hijack the WebView
+    // into the subagent's transcript; the child's later session_shutdown
+    // would then null the globals and leave the still-running root session
+    // answering "No active session" (dead prompts, dead Agent Hub).
+    if (isChildAgentSession(ctx)) return;
     startServer(ctx);
 
     // Push a fresh state snapshot to every already-connected client.
@@ -7256,7 +7375,10 @@ export default function (omp: ExtensionAPI) {
     // their callers belong to the outgoing session, so resolve them with the
     // kind's default (mirrors the runtime rejecting pending requests when the
     // RPC client goes away — we degrade to "cancelled" instead of hanging).
-    cancelAllUiRequests();
+    // Child instances never recorded dialogs (their session_start bails
+    // before installUiBridge) and must not settle dialogs the ROOT session
+    // is still waiting on.
+    if (!childAgentInstance) cancelAllUiRequests();
     // Tear down the global pointers IFF they still point at *this* instance,
     // so any WS messages that arrive in the gap before the next
     // session_start fail cleanly with "No active session" instead of hitting

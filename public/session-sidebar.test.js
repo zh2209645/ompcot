@@ -121,3 +121,28 @@ describe("import sessions menu (F1)", () => {
     expect(document.querySelector(".session-context-menu.import-menu")).toBeNull();
   });
 });
+
+describe("current-workspace project pinning", () => {
+  test("renders the current workspace with zero sessions plus a hint row", () => {
+    const sidebar = makeSidebar();
+    sidebar.projects = [
+      { path: "D:/just-opened", dirName: "", sessions: [], currentWorkspace: true },
+    ];
+    sidebar.render();
+
+    const header = sidebar.container.querySelector(".project-header .project-name");
+    expect(header?.textContent).toBe("just-opened");
+    const hint = sidebar.container.querySelector(".session-empty-workspace-hint");
+    expect(hint?.textContent).toContain("No sessions yet");
+    // The "+" affordance survives so the user can start the first chat.
+    expect(sidebar.container.querySelector(".project-new-chat-btn")).not.toBeNull();
+  });
+
+  test("non-current projects with zero visible sessions stay hidden", () => {
+    const sidebar = makeSidebar();
+    sidebar.projects = [{ path: "D:/empty-other", dirName: "d1", sessions: [] }];
+    sidebar.render();
+
+    expect(sidebar.container.querySelector(".project-group")).toBeNull();
+  });
+});

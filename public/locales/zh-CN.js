@@ -516,6 +516,7 @@ export const zhCN = {
   "session.archived": "已归档",
   "session.deleteAllArchived": "删除所有已归档会话",
   "session.openProject": "打开项目",
+  "session.noSessionsYet": "还没有会话 — 开始新聊天",
   "session.openProjectAria": "打开项目",
   "session.justNow": "刚刚",
   "session.minutesAgo": "{count} 分钟前",
