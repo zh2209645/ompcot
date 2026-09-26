@@ -649,8 +649,9 @@ describe("createAgentSettings page mode", () => {
     const { settings, container } = setupPaged({ onPageSetChanged });
     await settings.load();
 
-    // model.*, tools.*, theme (unprefixed → appearance), permissions.* (advanced)
-    expect(onPageSetChanged).toHaveBeenCalledWith(["model", "tools", "appearance", "advanced"]);
+    // model.*, tools.*, theme (unprefixed → appearance), permissions.* (other —
+    // unmapped keys land on the Other page, never Advanced)
+    expect(onPageSetChanged).toHaveBeenCalledWith(["model", "tools", "appearance", "other"]);
 
     const modelGroup = container.querySelector('.agent-settings-group[data-group="model"]');
     expect(modelGroup.dataset.page).toBe("model");
@@ -665,7 +666,7 @@ describe("createAgentSettings page mode", () => {
     const permissionsGroup = container.querySelector(
       '.agent-settings-group[data-group="permissions"]',
     );
-    expect(permissionsGroup.dataset.page).toBe("advanced");
+    expect(permissionsGroup.dataset.page).toBe("other");
   });
 
   test("setActivePage shows only that page's groups", async () => {
