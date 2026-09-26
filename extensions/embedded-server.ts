@@ -684,6 +684,60 @@ function errMessage(e: unknown): string {
   return String(e);
 }
 
+// ─── Thinking levels (per-model capability) ──────────────────────────────────
+//
+// omp bakes each model's thinking ladder into `model.thinking.efforts`
+// (pi-catalog `ThinkingConfig`: "Supported user-facing efforts, ordered
+// least → most intensive"). Real ladders are sparse and model-specific —
+// e.g. z-ai/glm-5.3 → ["low","high","max"], z-ai/glm-5v-turbo →
+// ["minimal","low","medium","high","xhigh"] — and the TUI's thinking picker
+// resolves from exactly this field (ModelControls.getAvailableThinkingLevels
+// → pi-catalog getSupportedEfforts(model) → model.thinking.efforts).
+//
+// The extension API only exposes getThinkingLevel/setThinkingLevel — no
+// per-model level getter — so we read the baked field off `ctx.model`
+// directly, feature-detecting every step. On any doubt we fall back to the
+// classic 5-level cycle set so a GUI menu built from this array never ends
+// up empty or wrong-shaped. `xhigh`/`max` appear ONLY when the model's own
+// metadata lists them.
+
+// Canonical effort order, least → most intensive (pi-catalog `Effort`).
+const THINKING_EFFORT_ORDER: readonly string[] = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+// Today's cycle set — the safe default when the model surface is unreadable.
+const FALLBACK_THINKING_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high"];
+
+// Resolve the thinking levels the CURRENT model supports, ordered least →
+// most intensive with "off" first. Never throws.
+function resolveThinkingLevels(model: unknown): string[] {
+  if (!model || typeof model !== "object") {
+    return [...FALLBACK_THINKING_LEVELS];
+  }
+  const m = model as { reasoning?: unknown; thinking?: { efforts?: unknown } };
+  // The surface explicitly says this model cannot reason at all.
+  if (m.reasoning === false) return ["off"];
+  const efforts = m.thinking?.efforts;
+  if (!Array.isArray(efforts) || efforts.length === 0) {
+    // No usable ladder metadata (model missing, or a reasoning model without
+    // a controllable effort surface we can't distinguish from a bad read) →
+    // doubt → today's cycle set.
+    return [...FALLBACK_THINKING_LEVELS];
+  }
+  const levels = efforts.filter(
+    (e): e is string => typeof e === "string" && THINKING_EFFORT_ORDER.includes(e),
+  );
+  if (levels.length === 0) return [...FALLBACK_THINKING_LEVELS];
+  levels.sort((a, b) => THINKING_EFFORT_ORDER.indexOf(a) - THINKING_EFFORT_ORDER.indexOf(b));
+  return ["off", ...levels];
+}
+
 // ─── Provider auth status (Settings → API keys panel) ────────────────────────
 //
 // omp 18.3.0 removed `ModelRegistry.getProviderAuthStatus` AND
@@ -2028,6 +2082,9 @@ export default function (omp: ExtensionAPI) {
     const model = ctx.model;
     const aomp = currentOMP();
     const thinkingLevel = aomp?.getThinkingLevel() ?? "off";
+    // Keep in sync with the `get_state` response below: both feed the GUI's
+    // thinking menu, which filters unsupported levels via `thinkingLevels`.
+    const thinkingLevels = resolveThinkingLevels(model);
     const sessionName = aomp?.getSessionName() ?? "";
     const sessionFile = ctx.sessionManager.getSessionFile();
 
@@ -2039,6 +2096,7 @@ export default function (omp: ExtensionAPI) {
       entries,
       model,
       thinkingLevel,
+      thinkingLevels,
       sessionName,
       sessionFile,
       isStreaming: !ctx.isIdle(),
@@ -2440,6 +2498,10 @@ export default function (omp: ExtensionAPI) {
           const state = {
             model,
             thinkingLevel: aomp?.getThinkingLevel() ?? "off",
+            // Supported levels for THIS model (least → most intensive,
+            // "off" first) — the GUI menu filters on this. Mirrored into
+            // the initial `mirror_sync` snapshot in `buildStateSnapshot`.
+            thinkingLevels: resolveThinkingLevels(model),
             isStreaming: !ctx.isIdle(),
             sessionFile: ctx.sessionManager.getSessionFile(),
             sessionName: aomp?.getSessionName() ?? "",
@@ -2705,9 +2767,14 @@ export default function (omp: ExtensionAPI) {
         case "cycle_thinking_level": {
           const a = requireAomp("cycle_thinking_level");
           if (!a) break;
-          const levels = ["off", "minimal", "low", "medium", "high"];
+          // Cycle within the same resolved set the GUI menu
+          // (`get_state`/`mirror_sync` `thinkingLevels`) is built from, so
+          // cycling never lands on a level the current model doesn't
+          // support. `resolveThinkingLevels` falls back to the classic
+          // 5-level cycle on any doubt.
+          const levels = resolveThinkingLevels(ctx?.model);
           const current = a.getThinkingLevel();
-          const idx = levels.indexOf(current);
+          const idx = levels.indexOf(current ?? "");
           const next = levels[(idx + 1) % levels.length];
           a.setThinkingLevel(next as Parameters<typeof a.setThinkingLevel>[0]);
           sendTo(ws, success("cycle_thinking_level", { level: next }));

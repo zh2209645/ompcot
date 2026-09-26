@@ -34,6 +34,14 @@ import { resolveNewSessionLiveFile } from "./new-session-refresh.js";
 import { createOmpBinarySettings } from "./omp-binary-settings.js";
 import { getOnboardingState } from "./onboarding-state.js";
 import { renderPackageInstallFailure } from "./package-install-status.js";
+import {
+  clearPackageCache,
+  DEFAULT_REGISTRY_BASE,
+  fetchPackages as fetchRegistryPackages,
+  getRegistryBase,
+  resetRegistryBase,
+  setRegistryBase,
+} from "./pkg-registry.js";
 import { renderTranscriptFromEntries, resyncTranscript } from "./session-resync.js";
 import { findPortForSession, getWorkspacePathForPort } from "./session-routing.js";
 import { SessionSidebar } from "./session-sidebar.js";
@@ -2152,6 +2160,9 @@ async function fetchModelInfo() {
       currentThinkingLevel = stateData.data.thinkingLevel;
       updateThinkingBtn();
     }
+    if (stateData.success && Array.isArray(stateData.data?.thinkingLevels)) {
+      setSupportedThinkingLevels(stateData.data.thinkingLevels);
+    }
   } catch (_e) {
     // ignore
   } finally {
@@ -2296,13 +2307,24 @@ document.addEventListener("click", (e) => {
   }
 });
 
-// Thinking level button — opens the effort picker menu (any level in one
+// Thinking level button — opens the depth picker menu (any level in one
 // click). The Settings-tab cycle button keeps its click-to-cycle behavior
 // (app-settings-toggles.js). The chip updates optimistically; the state
 // refresh runs only AFTER the mutation is acknowledged, and get_state loads
 // are generation-guarded, so a stale reply can no longer overwrite the chip
 // (F17).
-setupThinkingLevelMenu({
+// The server reports the levels supported by the current model (get_state
+// `thinkingLevels`, refreshed by fetchModelInfo after set_model etc.);
+// setSupportedThinkingLevels pushes each refreshed set into the menu, which
+// stores it and re-renders immediately if it is open. When the current level
+// is not in the set, the menu simply renders without a selection; a rejected
+// set_thinking_level surfaces the server's error via the existing handling
+// below.
+function setSupportedThinkingLevels(levels) {
+  thinkingMenu?.setLevels(levels);
+}
+
+const thinkingMenu = setupThinkingLevelMenu({
   button: thinkingBtn,
   getCurrentLevel: () => currentThinkingLevel,
   onSelect: async (level) => {
@@ -3020,6 +3042,9 @@ function handleMirrorSync(data) {
     currentThinkingLevel = data.thinkingLevel;
     updateThinkingBtn();
   }
+  if (Array.isArray(data.thinkingLevels)) {
+    setSupportedThinkingLevels(data.thinkingLevels);
+  }
 
   // Clear and render message history
   messageRenderer.clear();
@@ -3528,7 +3553,9 @@ function setExtensionActionButton(button, label, loading = false) {
 // Browse community packages (pi-packages-api)
 // ═══════════════════════════════════════
 
-const PKG_API_BASE = "https://pi-packages-aomp.shixin.workers.dev";
+// Registry base URL lives in pkg-registry.js (user-configurable, persisted
+// in the cross-port `ompcot-pkg-registry` cookie, with an offline fallback
+// cache — see that module for the rationale).
 const browseListEl = document.getElementById("pkg-browse-list");
 const browseSearchEl = document.getElementById("pkg-browse-search");
 const browseOMPllsEl = document.getElementById("pkg-browse-pills");
@@ -3548,6 +3575,7 @@ let browseAllPackages = null;
 let browseInstalledSet = new Set();
 let browseLoaded = false;
 let browseLoading = false;
+let browseFromCache = false;
 let browseActiveType = "all";
 let browseSearchQuery = "";
 let browseInstalledOnly = false;
@@ -3564,6 +3592,7 @@ async function loadBrowsePackages(force = false) {
     return;
   }
   browseLoading = true;
+  browseFromCache = false;
   browseListEl.innerHTML = `<div class="settings-api-keys-loading pkg-browse-full-row">${t("settings.loadingPackages")}</div>`;
   try {
     const [packages, installed] = await Promise.all([
@@ -3575,8 +3604,11 @@ async function loadBrowsePackages(force = false) {
     browseLoaded = true;
     renderBrowsePackages();
   } catch (err) {
-    const message = String(err?.message || err || "Failed to load packages");
-    browseListEl.innerHTML = `<div class="settings-api-keys-empty pkg-browse-full-row">${escapeHtml(message)} <button type="button" class="settings-value-btn" id="pkg-browse-retry">Retry</button></div>`;
+    // Localized failure (registry unreachable / invalid) — the raw cause is
+    // only logged, never rendered, so users see an actionable message.
+    console.warn("[browse] package registry load failed:", err);
+    const message = String(err?.message || err || t("pkg.registryUnreachable"));
+    browseListEl.innerHTML = `<div class="settings-api-keys-empty pkg-browse-full-row">${escapeHtml(message)} <button type="button" class="settings-value-btn" id="pkg-browse-retry">${escapeHtml(t("pkg.retry"))}</button></div>`;
     const retry = document.getElementById("pkg-browse-retry");
     if (retry) retry.addEventListener("click", () => loadBrowsePackages(true));
   } finally {
@@ -3585,19 +3617,12 @@ async function loadBrowsePackages(force = false) {
 }
 
 async function fetchBrowsePackages() {
-  const pageSize = 250;
-  const all = [];
-  let page = 1;
-  let totalPages = 1;
-  do {
-    const res = await fetch(`${PKG_API_BASE}/packages?page=${page}&pageSize=${pageSize}`);
-    if (!res.ok) throw new Error(`Registry returned ${res.status}`);
-    const data = await res.json();
-    if (Array.isArray(data?.packages)) all.push(...data.packages);
-    totalPages = Number(data?.totalPages) || 1;
-    page += 1;
-  } while (page <= totalPages);
-  return all;
+  const result = await fetchRegistryPackages({ page: 1, pageSize: 250 });
+  if (!result.ok) {
+    throw new Error(t(result.error || "pkg.registryUnreachable"));
+  }
+  browseFromCache = Boolean(result.cached);
+  return result.packages;
 }
 
 async function fetchInstalledSources() {
@@ -3722,8 +3747,27 @@ function filterBrowsePackages() {
   return sortBrowsePackages(filtered);
 }
 
+function ensureBrowseCacheBadge() {
+  if (!browseCountEl?.parentNode) return null;
+  let badge = document.getElementById("pkg-browse-cached-badge");
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.id = "pkg-browse-cached-badge";
+    badge.className = "pkg-browse-badge pkg-browse-cached-badge";
+    browseCountEl.insertAdjacentElement("afterend", badge);
+  }
+  return badge;
+}
+
 function renderBrowsePackages() {
   if (!browseListEl) return;
+  // When the registry is unreachable we render the last successful catalog;
+  // a subtle badge in the filter row marks it as offline data.
+  const cacheBadge = ensureBrowseCacheBadge();
+  if (cacheBadge) {
+    cacheBadge.textContent = t("pkg.cachedData");
+    cacheBadge.hidden = !browseFromCache;
+  }
   const results = filterBrowsePackages();
 
   const totalPages = Math.max(1, Math.ceil(results.length / BROWSE_PAGE_SIZE));
@@ -3940,6 +3984,37 @@ if (browseSortEl) {
   });
 }
 
+// Settings → Extensions: "Package registry" override row above the filters.
+// Empty input + Save = back to the default registry; invalid input shows an
+// inline error and saves nothing.
+function setupPkgRegistryRow() {
+  const input = document.getElementById("pkg-registry-input");
+  const saveBtn = document.getElementById("pkg-registry-save");
+  const statusEl = document.getElementById("pkg-registry-status");
+  if (!input || !saveBtn) return;
+
+  // The placeholder always shows the default; only a real override fills
+  // the input so the default state stays visually quiet.
+  const base = getRegistryBase();
+  if (base !== DEFAULT_REGISTRY_BASE) input.value = base;
+
+  saveBtn.addEventListener("click", () => {
+    clearSettingsSaveMessage(statusEl);
+    const raw = input.value.trim();
+    const applied = raw ? setRegistryBase(raw) : resetRegistryBase();
+    if (raw && !applied) {
+      showSettingsSaveError(statusEl, t("pkg.registryInvalidUrl"));
+      return;
+    }
+    clearPackageCache(); // belt-and-braces; set/reset already dropped it
+    input.value = applied === DEFAULT_REGISTRY_BASE ? "" : applied;
+    showSettingsSaveSuccess(statusEl, t("pkg.refreshed"));
+    browseLoaded = false;
+    loadBrowsePackages(true);
+  });
+}
+setupPkgRegistryRow();
+
 // ═══════════════════════════════════════
 // Auto-updater (Tauri-only)
 // ═══════════════════════════════════════
@@ -4077,6 +4152,9 @@ async function openSettings() {
         // Auto-compaction toggle
         toggleAutoCompact.className = `settings-toggle${s.autoCompactionEnabled ? " on" : ""}`;
         // Thinking level
+        if (Array.isArray(s.thinkingLevels)) {
+          setSupportedThinkingLevels(s.thinkingLevels);
+        }
         btnThinkingLevel.textContent = formatThinkingLevelLabel(s.thinkingLevel);
         currentThinkingLevel = s.thinkingLevel || "off";
         updateThinkingBtn();

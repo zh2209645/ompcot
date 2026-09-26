@@ -250,7 +250,7 @@
                   <div class="model-dropdown-menu hidden" id="model-dropdown-menu"></div>
                 </div>
                 <div class="thinking-dropdown" id="thinking-dropdown">
-                  <button type="button" class="thinking-tag off" id="thinking-btn" title="Thinking effort controls reasoning depth. Click to cycle." aria-label="Thinking effort: off. Click to cycle reasoning depth." aria-haspopup="menu" data-i18n="composer.thinkOff" data-i18n-title="composer.thinkingTitleMenu" data-i18n-aria-label="composer.thinkingAriaMenu" tabindex="-1">Think off</button>
+                  <button type="button" class="thinking-tag off" id="thinking-btn" title="Thinking depth controls reasoning. Click to choose." aria-label="Thinking depth. Click to choose." aria-haspopup="menu" data-i18n="composer.thinkOff" data-i18n-title="composer.thinkingTitleMenu" data-i18n-aria-label="composer.thinkingAriaMenu" tabindex="-1">Depth: off</button>
                   <div class="thinking-level-menu hidden" id="thinking-level-menu" role="menu"></div>
                 </div>
                 <button type="button" class="input-mic-btn" id="mic-btn" title="Voice input" data-i18n-title="composer.voiceInput" tabindex="-1">
@@ -335,10 +335,10 @@
             </div>
             <div class="settings-row" id="setting-thinking">
               <span class="settings-label settings-label-stack">
-                <span class="settings-label-main" data-i18n="settings.thinkingEffort">Thinking effort</span>
+                <span class="settings-label-main" data-i18n="settings.thinkingEffort">Thinking depth</span>
                 <span class="settings-label-sub" data-i18n="settings.thinkingEffortSub">Reasoning depth</span>
               </span>
-              <button class="settings-value-btn" id="btn-thinking-level" title="Click to cycle: off, minimal, low, medium, high" data-i18n-title="settings.thinkingCycle" data-i18n="settings.thinkingLevelOff">Thinking: off</button>
+              <button class="settings-value-btn" id="btn-thinking-level" title="Click to cycle: off, minimal, low, medium, high, xhigh, max" data-i18n-title="settings.thinkingCycle" data-i18n="settings.thinkingLevelOff">Depth: off</button>
             </div>
             <div class="settings-row">
               <span class="settings-label" data-i18n="settings.showThinking">Show thinking</span>
@@ -396,6 +396,23 @@
             <p class="settings-help" data-i18n-html="settings.browseHelp">
               Discover extensions, skills, themes, and prompts from the OMP ecosystem. Install with one click.
             </p>
+            <div class="settings-row" id="setting-pkg-registry">
+              <span class="settings-label settings-label-stack">
+                <span class="settings-label-main" data-i18n="pkg.registryLabel">Package registry</span>
+                <span class="settings-label-sub pkg-registry-status settings-save-status hidden" id="pkg-registry-status"></span>
+              </span>
+              <span class="pkg-registry-controls">
+                <input
+                  type="text"
+                  id="pkg-registry-input"
+                  class="settings-input pkg-registry-input"
+                  placeholder="https://pi-packages-aomp.shixin.workers.dev"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <button type="button" class="settings-value-btn" id="pkg-registry-save" data-i18n="common.save">Save</button>
+              </span>
+            </div>
             <div class="pkg-browse-filters">
               <input
                 type="text"

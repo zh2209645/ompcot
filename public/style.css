@@ -1593,16 +1593,21 @@ body {
   border-color: var(--border-hover);
 }
 
-/* Thinking-effort picker menu — anchored like the model dropdown */
+/* Thinking-depth picker menu — anchored like the model dropdown.
+   Absolute positioning is load-bearing: the menu must overlay, never
+   participate in (or push) the composer/page layout. */
 .thinking-dropdown {
   position: relative;
 }
 
 .thinking-level-menu {
   position: absolute;
-  top: calc(100% + 4px);
+  top: calc(100% + 6px);
   right: 0;
   min-width: 172px;
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--bg-solid);
   border: 1px solid var(--border-hover);
   border-radius: var(--radius-md);
@@ -1610,6 +1615,15 @@ body {
   box-shadow: var(--shadow-lg);
   z-index: 1001;
   animation: dropdownIn 0.15s var(--ease);
+}
+
+/* Viewport clamp (set by thinking-level-menu.js): the composer sits at the
+   bottom of the screen, so flip the menu above the chip when opening down
+   would overflow the viewport — it overlays instead of shifting the page. */
+.thinking-level-menu.open-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+  animation: dropdownInUp 0.15s var(--ease);
 }
 
 .thinking-level-menu.hidden {
@@ -2192,6 +2206,41 @@ body {
   margin-left: auto;
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* Package-registry override row (Settings → Extensions) — reuses the
+   settings-input / settings-value-btn controls; only sizing is added. */
+.pkg-registry-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.pkg-registry-input {
+  width: min(230px, 40vw);
+}
+
+/* Inline save/error status inside the registry row (same tones as
+   .settings-static-value[data-tone]). */
+.pkg-registry-status[data-tone="ok"] {
+  color: var(--accent-success, #4ade80);
+}
+
+.pkg-registry-status[data-tone="error"] {
+  color: var(--accent-danger, #ef4444);
+}
+
+/* Offline-catalog badge in the browse toolbar — neutral chip (same tokens
+   as .thinking-tag) so it stays subtle next to the accent type badges. */
+.pkg-browse-cached-badge {
+  color: var(--text-dim);
+  background: transparent;
+  border-color: var(--border);
+}
+
+.pkg-browse-cached-badge[hidden] {
+  display: none;
 }
 
 .pkg-browse-badges {
@@ -2890,6 +2939,17 @@ body {
   .pkg-browse-count {
     margin-left: 0;
     width: 100%;
+  }
+
+  .pkg-registry-controls {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .pkg-registry-input {
+    flex: 1 1 160px;
+    width: auto;
+    min-width: 0;
   }
 }
 
