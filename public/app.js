@@ -54,7 +54,8 @@ import {
 } from "./settings-save-status.js";
 import { setupSidebarSearchControl } from "./sidebar-search-control.js";
 import { StateManager } from "./state.js";
-import { applyTheme, getCurrentTheme, themes } from "./themes.js";
+import { loadImportedThemes, removeImportedTheme, setupThemeImport } from "./theme-import.js";
+import { applyTheme, getCurrentTheme, registerImportedThemes, themes } from "./themes.js";
 import { setupThinkingLevelMenu } from "./thinking-level-menu.js";
 import { ToolCardRenderer } from "./tool-card.js";
 import { initTransport } from "./transport.js";
@@ -3481,6 +3482,10 @@ const settingsClose = document.getElementById("settings-close");
 const settingsNavItems = Array.from(document.querySelectorAll(".settings-nav-item"));
 const settingsTabs = Array.from(document.querySelectorAll(".settings-tab"));
 const themeGrid = document.getElementById("theme-grid");
+const themeImportInput = document.getElementById("theme-import-input");
+const themeImportBtn = document.getElementById("btn-theme-import");
+const themeImportStatus = document.getElementById("theme-import-status");
+const themeImportErrors = document.getElementById("theme-import-errors");
 
 const toggleAutoCompact = document.getElementById("toggle-auto-compact");
 const btnThinkingLevel = document.getElementById("btn-thinking-level");
@@ -4092,11 +4097,14 @@ wsClient.addEventListener("capabilities", () => {
   void ompBinarySettings.refresh();
 });
 
-// Settings → Appearance renders two labeled clusters: the built-in Ompcot
-// themes and the VS Code color schemes (themes.js `group` field).
+// Settings → Appearance renders labeled clusters: the built-in Ompcot
+// themes, the VS Code color schemes, and imported Windows Terminal themes
+// (themes.js `group` field). Imported rows additionally carry a delete
+// affordance.
 const THEME_GROUPS = [
   { key: "builtin", titleKey: "settings.themeGroupBuiltin" },
   { key: "vscode", titleKey: "settings.themeGroupVscode" },
+  { key: "imported", titleKey: "settings.themeGroupImported" },
 ];
 
 function buildThemeGrid() {
@@ -4135,6 +4143,28 @@ function buildThemeGrid() {
         });
         btn.classList.add("active");
       });
+
+      if (group.key === "imported") {
+        // Imported themes are user data: wrap the swatch in a row with a
+        // delete affordance. Builtin/VS Code groups never get one.
+        const row = document.createElement("div");
+        row.className = "theme-swatch-row";
+        row.appendChild(btn);
+        const deleteBtn = document.createElement("button");
+        deleteBtn.type = "button";
+        deleteBtn.className = "theme-swatch-delete";
+        deleteBtn.textContent = "×";
+        deleteBtn.title = t("settings.themeImportDelete");
+        deleteBtn.setAttribute("aria-label", `${t("settings.themeImportDelete")}: ${theme.name}`);
+        deleteBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          handleDeleteImportedTheme(id);
+        });
+        row.appendChild(deleteBtn);
+        grid.appendChild(row);
+        continue;
+      }
+
       grid.appendChild(btn);
     }
 
@@ -4142,6 +4172,32 @@ function buildThemeGrid() {
     themeGrid.appendChild(groupEl);
   }
 }
+
+// Deleting an imported theme drops it from the cookie + registry; if it
+// was the active theme removeImportedTheme already fell back to "night".
+function handleDeleteImportedTheme(id) {
+  removeImportedTheme(id);
+  showThemeImportStatus(t("settings.themeImportDelete"), "ok");
+  buildThemeGrid();
+}
+
+function showThemeImportStatus(message, tone) {
+  if (!themeImportStatus) return;
+  themeImportStatus.textContent = message;
+  themeImportStatus.dataset.tone = tone;
+  themeImportStatus.classList.remove("hidden");
+}
+
+// Import box below the grid: paste a windowsterminalthemes.dev export,
+// hit Import, and the parsed themes land in the registry (persisted via
+// the imports cookie) and in the grid's third group.
+setupThemeImport({
+  textarea: themeImportInput,
+  importBtn: themeImportBtn,
+  statusEl: themeImportStatus,
+  errorsEl: themeImportErrors,
+  onThemesChanged: () => buildThemeGrid(),
+});
 
 let settingsOpenInFlight = false;
 async function openSettings() {
@@ -4340,7 +4396,11 @@ configSubnav = createConfigSubnav({
   },
 });
 
-// Restore saved theme
+// Restore saved theme. Imported Windows Terminal themes must merge into
+// the registry first — a saved `ompcot-theme` id like `wt-campbell` only
+// resolves (instead of falling back to night and rewriting the cookie)
+// once its definition has been registered from the imports cookie.
+registerImportedThemes(loadImportedThemes());
 const savedTheme = getCurrentTheme();
 applyTheme(savedTheme);
 

@@ -317,6 +317,18 @@
           <div class="settings-section">
             <div class="settings-section-title" data-i18n="settings.appearance">Appearance</div>
             <div class="theme-grid" id="theme-grid"></div>
+            <!-- Windows Terminal theme import (markup wired by theme-import.js).
+                 The textarea placeholder documents the JSON wire format and is
+                 intentionally untranslated. -->
+            <div class="theme-import">
+              <div class="theme-import-title" data-i18n="settings.themeImportTitle">Import Windows Terminal theme</div>
+              <textarea class="settings-input theme-import-input" id="theme-import-input" rows="6" spellcheck="false" autocomplete="off"></textarea>
+              <div class="theme-import-actions">
+                <button type="button" class="settings-value-btn" id="btn-theme-import" data-i18n="settings.themeImportImport">Import</button>
+              </div>
+              <div class="theme-import-errors hidden" id="theme-import-errors"></div>
+              <div class="theme-import-status hidden" id="theme-import-status" data-tone="ok"></div>
+            </div>
           </div>
           <div class="settings-section">
             <div class="settings-section-title" data-i18n="settings.language">Language</div>

@@ -290,6 +290,17 @@ export const zhCN = {
   "pkg.cachedData": "缓存数据（离线）",
   "pkg.refreshed": "已刷新",
 
+  // ── Windows Terminal 主题导入（设置 → 外观）──
+  "settings.themeImportTitle": "导入 Windows Terminal 主题",
+  "settings.themeImportImport": "导入",
+  "settings.themeGroupImported": "导入主题",
+  "settings.themeImportInvalidJson": "JSON 解析失败",
+  "settings.themeImportMissingFields": "缺少 name/background/foreground 或颜色格式错误",
+  "settings.themeImportImported": "已导入 {count} 个主题",
+  "settings.themeImportFailed": "导入失败",
+  "settings.themeImportDelete": "删除主题",
+  "settings.themeImportCapReached": "已达导入上限（20），最早的主题已被移除",
+
   // ── 主题分组（设置 → 外观）──
   "settings.themeGroupBuiltin": "内置主题",
   "settings.themeGroupVscode": "VS Code 配色",

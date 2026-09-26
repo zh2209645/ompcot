@@ -296,6 +296,17 @@ export const en = {
   "pkg.cachedData": "Cached data (offline)",
   "pkg.refreshed": "Refreshed",
 
+  // ── Windows Terminal theme import (Settings → Appearance) ──
+  "settings.themeImportTitle": "Import Windows Terminal theme",
+  "settings.themeImportImport": "Import",
+  "settings.themeGroupImported": "Imported themes",
+  "settings.themeImportInvalidJson": "Invalid JSON",
+  "settings.themeImportMissingFields": "Missing name/background/foreground or invalid color format",
+  "settings.themeImportImported": "Imported {count} theme(s)",
+  "settings.themeImportFailed": "Import failed",
+  "settings.themeImportDelete": "Delete theme",
+  "settings.themeImportCapReached": "Import cap reached (20), oldest removed",
+
   // ── theme groups (Settings → Appearance) ──
   "settings.themeGroupBuiltin": "Built-in themes",
   "settings.themeGroupVscode": "VS Code schemes",

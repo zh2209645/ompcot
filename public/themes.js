@@ -2,9 +2,16 @@
  * Theme system — built-in themes + VS Code color schemes
  *
  * Every entry needs a matching `:root[data-theme="<id>"]` token block in
- * `style-theme.css`. `group` ("builtin" | "vscode") controls which labeled
- * cluster the swatch renders under in Settings → Appearance; entries without
- * a group are treated as "builtin".
+ * `style-theme.css`. `group` ("builtin" | "vscode" | "imported") controls
+ * which labeled cluster the swatch renders under in Settings → Appearance;
+ * entries without a group are treated as "builtin".
+ *
+ * Imported themes (Windows Terminal imports via theme-import.js) are NOT
+ * static entries: they are merged into this map at runtime by
+ * `registerImportedThemes()`, and their CSS travels in a dedicated
+ * `<style id="imported-themes-css">` element instead of the static
+ * stylesheet — so the registry↔CSS parity tests for the static set are
+ * unaffected by them by design.
  *
  * Storage note: the active theme is persisted in a cookie (not
  * localStorage). Ompcot spawns one omp process per workspace, each on
@@ -198,4 +205,80 @@ if (!readThemeCookie()) {
       root.setAttribute("data-theme", e.matches ? "terracotta" : "night");
     }
   });
+}
+
+// ═══════════════════════════════════════
+// Imported themes (Windows Terminal imports — see theme-import.js)
+//
+// Imported entries live in the same `themes` map (group: "imported") so
+// `applyTheme` / `getCurrentTheme` resolve their ids like any other
+// theme: the id persists in the ordinary `ompcot-theme` cookie and
+// stays stable across windows because the definition itself travels in
+// the `ompcot-theme-imports` cookie. Their CSS is injected once into a
+// single shared `<style id="imported-themes-css">` element rather than
+// the static style-theme.css.
+// ═══════════════════════════════════════
+
+const IMPORTED_STYLE_ID = "imported-themes-css";
+
+function toRegistryEntry(record) {
+  return {
+    group: "imported",
+    name: record.name,
+    dark: Boolean(record.dark),
+    colors: record.swatches,
+    vars: {},
+    // Not part of the swatch contract — kept so the record can be
+    // round-tripped back to the imports cookie without re-parsing CSS.
+    slug: record.slug ?? "",
+    css: record.css,
+  };
+}
+
+/** The currently registered imported themes, as persistence records. */
+export function getImportedThemes() {
+  const records = [];
+  for (const [id, theme] of Object.entries(themes)) {
+    if (theme.group !== "imported" || !theme.css) continue;
+    records.push({
+      id,
+      name: theme.name,
+      slug: theme.slug ?? "",
+      css: theme.css,
+      swatches: theme.colors,
+      dark: Boolean(theme.dark),
+    });
+  }
+  return records;
+}
+
+/**
+ * Replace the imported slice of the registry with `list` (persistence
+ * records as produced by theme-import.js). Replace semantics keep this
+ * a single entry point for boot restore, import, and delete; builtin
+ * and VS Code entries are never touched. Also re-syncs the shared
+ * imported-themes stylesheet.
+ */
+export function registerImportedThemes(list) {
+  for (const [id, theme] of Object.entries(themes)) {
+    if (theme.group === "imported") delete themes[id];
+  }
+  for (const record of Array.isArray(list) ? list : []) {
+    if (!record?.id || !record?.css) continue;
+    themes[record.id] = toRegistryEntry(record);
+  }
+  syncImportedStylesheet();
+}
+
+function syncImportedStylesheet() {
+  if (typeof document === "undefined") return;
+  let styleEl = document.getElementById(IMPORTED_STYLE_ID);
+  if (!styleEl) {
+    styleEl = document.createElement("style");
+    styleEl.id = IMPORTED_STYLE_ID;
+    document.head.appendChild(styleEl);
+  }
+  styleEl.textContent = getImportedThemes()
+    .map((record) => record.css)
+    .join("\n");
 }

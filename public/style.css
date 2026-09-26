@@ -3154,9 +3154,9 @@ body {
   color: var(--text-primary);
 }
 
-/* Theme grid — two labeled clusters (built-in / VS Code), each a 2-col grid.
-   Capped height keeps 15 swatches from pushing the rest of General below the
-   fold; the container scrolls when it overflows. */
+/* Theme grid — labeled clusters (built-in / VS Code / imported), each a
+   2-col grid. Capped height keeps the swatch stack from pushing the rest
+   of General below the fold; the container scrolls when it overflows. */
 .theme-grid {
   display: flex;
   flex-direction: column;
@@ -3355,6 +3355,111 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Imported swatch rows (Windows Terminal imports) — the only group whose
+   rows carry an inline delete affordance. */
+.theme-swatch-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+}
+
+.theme-swatch-row .theme-swatch {
+  flex: 1;
+  min-width: 0;
+}
+
+.theme-swatch-delete {
+  flex-shrink: 0;
+  width: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass);
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--duration) var(--ease);
+}
+
+.theme-swatch-delete:hover {
+  color: var(--accent-danger, #ef4444);
+  border-color: var(--accent-danger, #ef4444);
+  background: var(--bg-glass-hover);
+}
+
+/* Windows Terminal theme import — sits under the theme grid, separated by
+   a hairline so it reads as a sibling sub-section of Appearance. */
+.theme-import {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.theme-import-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* Mono textarea for pasting theme JSON. Overrides the fixed 26px height
+   of .settings-input; keeps its glass surface + focus ring. */
+.theme-import-input {
+  width: 100%;
+  height: auto;
+  min-height: 132px;
+  padding: 8px 10px;
+  resize: vertical;
+  line-height: 1.5;
+  font-size: 11px;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+}
+
+.theme-import-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.theme-import-status {
+  font-size: 12px;
+}
+
+.theme-import-status[data-tone="ok"] {
+  color: var(--accent-success, #4ade80);
+}
+
+.theme-import-status[data-tone="error"] {
+  color: var(--accent-danger, #ef4444);
+}
+
+.theme-import-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--accent-danger, #ef4444);
+}
+
+.theme-import-errors .theme-import-error-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.theme-import-errors code {
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+  word-break: break-all;
 }
 
 /* ═══════════════════════════════════════════════════════
