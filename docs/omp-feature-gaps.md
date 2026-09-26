@@ -3,11 +3,14 @@
 | | |
 |---|---|
 | **Audit date** | 2026-09-25 |
+| **Last status review** | 2026-09-26 (aligned to Ompcot v0.8.3) |
 | **omp version audited** | 18.3.0 (local system install; source: `pi-coding-agent@18.3.0` `CHANGELOG.md`, changelog coverage 18.0.1 → 18.3.0) |
 | **Ompcot GUI version audited** | 0.5.1 @ commit `b123906` (feat(settings): split Configuration into categorized sub-pages) |
 | **omp upstream** | can1357/oh-my-pi |
 
 > Method: cross-reference of the omp 18.x changelog against the GUI's actual consumption surface (RPC commands sent, broker controls, HTTP endpoints used, UI affordances) in `public/` and `extensions/embedded-server.ts`.
+
+> Status review 2026-09-26 (v0.8.3): B4's interactive dialogs shipped via omp's `extension_ui_request` loop (already reflected in the B4 row). Post-audit v0.8.x additions — the **Models & Reasoning** configuration page and **registry-resilience Extensions** browsing — are beyond the original audit scope and are not scored here.
 
 This document records which omp capabilities the GUI does **not** expose today, split by remediation cost, plus explicit non-gaps. Use it as the backlog source when planning GUI feature work.
 
@@ -74,3 +77,4 @@ These run inside the agent; the GUI benefits automatically (tool cards render th
 - Broker controls used: workspace/session lifecycle, packages, updater, folder picker, open-in-app, devtools
 - HTTP: `/api/instances`, `/api/git-branch`, `/api/sessions`(+`/delete-batch`, `/switch`), `/api/search`, `/api/cost-dashboard`, `/api/files`, `/api/open`, `/api/rpc`, `/api/lan-qr`, `/api/health`, `/api/agent-settings`(+`PUT`), `/api/agent-config`, `/api/models-config`, external package registry
 - Unused server surface: `set_thinking_level`, `steer`, `follow_up`, `get_messages`, `cycle_model`, `GET /api/omp-version`, `POST /api/agent-settings/reset`
+- v0.8.x additions beyond the audit scope (not listed above): Models & Reasoning page RPCs (`get_model_configuration`, `set_model_role`, `set_default_thinking_level`, `set_task_agent_*`) and the registry-resilient Extensions package browse

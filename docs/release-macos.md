@@ -1,5 +1,7 @@
 # macOS release policy
 
+> **Note:** CI is the primary release path — releases are manually dispatched via `gh workflow run Release --ref vX.Y.Z` (see [AUTO_UPDATER.md](./AUTO_UPDATER.md) for the full pipeline). This document and the `bun run release:mac:dmg` script below cover only the **local bundle-signing policy check**; they are not part of the routine release flow.
+
 This project publishes macOS artifacts to intentionally trigger the Gatekeeper
 "developer cannot be verified" path (not a damaged app path).
 

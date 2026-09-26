@@ -2,9 +2,9 @@
 
 [English](./README.md) | [中文](./README.zh.md)
 
-A local desktop GUI for the [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) coding agent. No cloud, no account — runs entirely on your machine.
+A local desktop GUI for the [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) coding agent. No cloud, no account — runs entirely on your machine. UI in **English and 简体中文** (switchable in Settings).
 
-Ompcot bundles the `omp` runtime **inside the .app**, so there's no separate `omp` install to manage, no PATH shenanigans, and no version drift between Ompcot and the agent it talks to.
+Ompcot does **not** bundle `omp` — it spawns the **system `omp` from your PATH** (or the `OMP_BIN` env var) once per workspace, so you can update omp independently of the app and always run the version you chose.
 
 > **Forked from [Picot](https://github.com/shixin-guo/picot)** (which was a fork of Tau), adapted for OMP instead of Pi.
 
@@ -12,9 +12,15 @@ Ompcot bundles the `omp` runtime **inside the .app**, so there's no separate `om
 
 ## Install
 
-[Download from GitHub Releases](https://github.com/zephyrq-z/ompcot/releases)
+[Download from GitHub Releases](https://github.com/zh2209645/ompcot/releases)
 
-You **do not** need to install the `omp` CLI separately — Ompcot bundles its own omp runtime.
+You **need `omp` installed first** — Ompcot uses your system omp, it does not ship one:
+
+```bash
+brew install omp   # macOS; see upstream for other platforms
+```
+
+Install options and details: [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi). To point Ompcot at a specific binary, set the `OMP_BIN` environment variable.
 
 ### macOS unsigned release notice
 
@@ -40,83 +46,67 @@ Ompcot gives you a full visual interface for OMP. Open any project folder, start
 
 ### 💬 Chat
 
-- Full markdown rendering with syntax-highlighted code blocks
-- **Streaming responses** with live typing indicator (powered by remend)
-- Image attachments — paste, drag & drop, or button
-- Inline **diff viewer** for edit tool calls (red/green lines)
-- Tool-call cards and **thinking blocks** rendered live
-- Copy any message with one click
-- Scroll-to-bottom button with unread indicator
-- **Message queuing** — type while the agent is working; messages queue as pills and auto-send when ready
+- **Streaming responses** with full markdown rendering and syntax-highlighted code blocks
+- **Tool-call cards** with inline diff viewer (red/green) and live **thinking blocks**
+- **Model dropdown** plus a per-model **thinking-depth menu** — depth options follow each model's capabilities and lock when unsupported
+- **Slash-command autocomplete** (`/` in the composer) reaching omp's full command set
+- **Message queuing** while the agent works — choose per message between **Queue** and **Steer-now** delivery
+- Image attachments (paste, drag & drop, or button), one-click copy, abort, unread indicator
 
-### 🗂️ Multi-Session & Multi-Agent
+### 🗂️ Sessions & Agents
 
-- **Multiple agents in parallel** — each session spawns its own headless omp process; no new OS window, no interruption of running sessions
-- Browse and resume any past session from the sidebar
-- Full-text search across all session history with highlighted snippets
-- Sessions sorted by creation time; live session marked with a green dot
-- Inline session rename, favourites, tags, and filtering
+- Session history with **full-text search**, favourites, archive, rename, batch delete, and **HTML export**
+- **Fork a conversation** from any message (wired up; activates automatically when your omp build supports it)
+- **Import** sessions from Claude Code / Codex — guided entry points
+- **Parallel sessions** — each new chat spawns its own headless agent process; previously-running sessions keep running, no new window
+- **Agent Hub** — live roster of running subagents with status and read-only transcript viewing
 
 ### 🗃️ Projects & Workspace
 
 - **Multi-project** — each project gets its own window, working directory, session history, and agent
-- Shows the **current git branch** in the project header
-- **Open in external editor** — launch VS Code, Cursor, or any app directly from Ompcot
-- Native folder picker to open any project without touching the terminal
+- Current **git branch** in the project header; **open in external editor** (VS Code, Cursor, …)
+- Native folder picker, plus a **file browser** sidebar with lazy-loaded tree and drag-to-input
 
-### 📱 Mobile & LAN Access
+### 🔌 MCP & Interactions
 
-- **LAN QR code** — scan to open Ompcot on any device on the same network
-- Mobile-optimised URL handling and App Launcher support (installable as PWA on iOS/Android)
+- **MCP server management** — add/edit (stdio / HTTP / SSE) and enable/disable with persistence, validated by omp's own rules
+- **Interactive agent dialogs** — select / confirm / input requests from the agent surface as dialogs, replayable with deadlines
 
-### 📦 Package Manager
+### ⚙️ Settings
 
-- Browse, install, and remove community packages from within the UI
-- Built on top of `omp install` — no separate package commands needed
+- **General** — appearance themes and UI language
+- **Extensions** — package browser with configurable registry and offline cache
+- **Usage** — account usage quotas plus a local **cost dashboard** (per-session token/cost, trends, per-model breakdown, context-window visualiser)
+- **Configuration** — Providers (API keys + **OAuth login** via `omp login`), **Models & Reasoning** (default model & thinking depth, 15 model roles, per-agent model overrides), MCP, and Advanced raw `config.yml`
 
-### 💰 Cost & Usage Dashboard
+### 🎨 Themes
 
-- Per-session cost tracking with live token/cost metrics
-- Full cost dashboard with infobar, trends, and per-model breakdown
-- **Context window visualiser** — click the token pill to see cached tokens, fresh input, and available space
-
-### 🎨 Themes & Appearance
-
-- Six built-in themes: **Dusk**, Dawn, Midnight, Clean, Terracotta, Sage
-- Frosted-glass header and input bar (`backdrop-filter: blur`)
-- Native macOS title bar overlay integration
-- **Window dragging** from the header area — feels like a native app
+- Six built-in themes, nine VS Code colour schemes, and **Windows Terminal theme import** (windowsterminalthemes.dev JSON)
 
 ### 🎤 Voice Input
 
-- Mic button in the input area using Web Speech API (on-device dictation)
-- Live transcription into the textarea; pulses red while recording
+- Mic button using on-device dictation (Web Speech API), with live transcription
 
-### 🗄️ File Browser
+### 📱 Mobile & LAN Access
 
-- Right sidebar with lazy-loaded file tree
-- Navigate directories, open files natively
-- Drag files onto the input to insert their path
+- **LAN QR code** — scan to open Ompcot on any device on the same network; mobile-optimised, installable as PWA
 
-### ⚙️ Settings & Control
+### 🔄 Updates
 
-- Model picker with search/filter and keyboard support
-- Thinking level toggle (off / low / medium / high)
-- Auto and manual **context compaction** with status display
-- Push notification toggle
+- **Built-in auto-updater** — the app keeps itself current with releases published to GitHub
 
 ---
 
-## OMP capabilities integrated
+## OMP integration
 
-Ompcot does not re-implement agent logic — it embeds OMP and exposes its runtime capabilities through a native UI.
+Ompcot does not re-implement agent logic — it drives the omp CLI you already have and exposes its runtime capabilities through a native UI.
 
-- **Embedded `omp --mode rpc` runtime** — one managed process per workspace, isolated by project
+- **System `omp --mode rpc` runtime** — one managed process per workspace, resolved from PATH (`OMP_BIN` overrides); update omp independently of Ompcot
 - **Streaming RPC bridge** — token-by-token output, tool-call events, and thinking blocks rendered live
 - **Session lifecycle APIs** — create, switch, and resume sessions; full per-project history
-- **WebSocket broker** — multiple UI clients can connect to the same omp process simultaneously
+- **Multi-client sessions** — several UI clients (desktop windows, mobile via LAN) can attach to the same agent
 - **Extension compatibility** — user extensions from `~/.omp/agent/extensions/` and `.omp/extensions/` are auto-loaded
-- **Credential reuse** — reads OMP's existing `~/.omp/agent/auth.json`; no separate login needed
+- **Credential handling through omp itself** — API keys and OAuth logins land in omp's own `~/.omp/agent/auth.json`
 
 ---
 
@@ -133,45 +123,51 @@ Ompcot does not re-implement agent logic — it embeds OMP and exposes its runti
 │                                                      │
 │   resources/                                         │
 │      ├─ public/             (frontend)               │
-│      ├─ extensions/         (embedded-server.mjs)    │
-│      └─ omp/                (omp binary)             │
+│      └─ extensions/         (embedded-server.mjs)    │
 └──────────────────────────────────────────────────────┘
-                       │
-                       ▼ reads / writes
-              ~/.omp/agent/
-                 ├─ sessions/   (chat history)
-                 ├─ auth.json   (API keys)
-                 └─ settings.json
+          │  omp resolved from PATH (or OMP_BIN)
+          ▼ reads / writes
+~/.omp/agent/
+   ├─ sessions/   (chat history)
+   ├─ auth.json   (API keys)
+   └─ settings.json
 ```
 
-The embedded omp process loads `embedded-server.mjs` at startup. That extension owns the HTTP + WebSocket surface the Tauri WebView talks to: static assets, `/api/sessions`, `/api/cost-dashboard`, RPC bridge for prompts, etc. Ompcot's Rust side controls process lifecycle, port allocation, and window management.
+Each omp process loads `embedded-server.mjs` at startup. That extension owns the HTTP + WebSocket surface the Tauri WebView talks to: static assets, session APIs, the RPC bridge for prompts, etc. Ompcot's Rust side controls process lifecycle, port allocation, and window management.
 
 ---
 
 ## Usage
 
-1. Launch **Ompcot**
-2. Click a project bubble or pick a folder
-3. Start chatting — the embedded omp agent starts automatically
+1. Make sure `omp` is installed (`omp --version` in a terminal)
+2. Launch **Ompcot** and pick a folder
+3. Start chatting — Ompcot spawns the omp agent for that workspace automatically
 
-Provide your model credentials via `omp /login` inside any workspace, or by writing `~/.omp/agent/auth.json` directly. Ompcot doesn't manage credentials itself.
+Provide model credentials via **Settings → Configuration → Providers** (API keys or OAuth login), or via `omp /login` in a terminal. Ompcot delegates all credential handling to omp itself.
+
+---
+
+## Documentation
+
+- [Auto-updater & releases](docs/AUTO_UPDATER.md) — updater architecture, release pipeline, incident runbook
+- [OMP feature-gap audit](docs/omp-feature-gaps.md) — which omp capabilities the GUI exposes, and what's still missing
+- [macOS release policy](docs/release-macos.md) — local bundle-signing policy check
 
 ---
 
 ## Build from source
 
 ```bash
-git clone https://github.com/zephyrq-z/ompcot.git
+git clone https://github.com/zh2209645/ompcot.git
 cd ompcot
 bun install --frozen-lockfile
-bun run fetch:omp   # copy omp binary from Homebrew into resources/
 bun run dev          # start tauri dev with hot reload
 ```
 
 To make a release build:
 
 ```bash
-bun run build        # runs fetch:omp + build:extensions + tauri build
+bun run build        # build:extensions + tauri build
 ```
 
 After any changes under `src-tauri/`:
@@ -180,8 +176,6 @@ After any changes under `src-tauri/`:
 bun run check:rust   # cargo check + clippy + fmt (fast; no full build needed)
 ```
 
-To bump the embedded omp version, edit `scripts/omp-version.json`, run `bun run fetch:omp`, smoke-test, and commit.
-
 ---
 
 ## Upstream
@@ -189,7 +183,7 @@ To bump the embedded omp version, edit `scripts/omp-version.json`, run `bun run 
 Ompcot is a fork of [Picot](https://github.com/shixin-guo/picot) (which was a fork of Tau), adapted for OMP. Key changes:
 
 - **Pi → OMP migration** — all binary references, package names, paths, and env vars updated
-- **Homebrew-sourced binary** — copies omp from local Homebrew installation instead of downloading from GitHub releases
+- **System omp runtime** — spawns the omp from your PATH (`OMP_BIN` to override); `brew upgrade omp` picks up new versions without rebuilding the app
 - **OMP SDK packages** — `@oh-my-pi/pi-coding-agent` and related packages
 
 ---
