@@ -369,6 +369,13 @@ jobs:
   #   - any failure, 0 fragments   -> nothing to publish: fail loudly; the
   #                                  updater endpoint keeps serving the
   #                                  previously published manifest
+  #
+  # v0.7.4 incident follow-up: this job deliberately has NO checkout step,
+  # so GH_REPO must be exported for every `gh release ...` call (see the
+  # comment inside the publish script for the full anatomy). All manifest
+  # and fragment READS go through the GitHub API asset endpoint, never the
+  # CDN download URL -- the CDN can serve the pre-upload state for minutes
+  # and would break both the merge base and the convergence check.
   publish-updater-manifest:
     needs: build-and-release
     if: ${{ always() }}
@@ -393,6 +400,22 @@ jobs:
 
           TAG="$GITHUB_REF_NAME"
 
+          # v0.7.4 incident follow-up (run 36212561970): this job checks out
+          # nothing (it needs no repo sources), so the working directory is
+          # not a git repository. gh resolves the repository for every
+          # `gh release ...` subcommand from the git remote of the CWD when
+          # GH_REPO is unset -- so in v0.7.4 BOTH `gh release view` (inside
+          # the notes command substitution, silently swallowed) and
+          # `gh release upload` died with "failed to run git: fatal: not a
+          # git repository" on every attempt. The upload itself never
+          # happened, the convergence check never even ran, and the job
+          # failed after 5 retries with the misleading "did not converge"
+          # error -- leaving Latest without latest.json. Pin the repository
+          # via GH_REPO so every gh invocation in this job resolves it from
+          # the environment; no git checkout is ever needed. (`gh api` calls
+          # with absolute paths never needed repo resolution; they worked.)
+          export GH_REPO="$GITHUB_REPOSITORY"
+
           release_json() {
             gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG"
           }
@@ -402,6 +425,12 @@ jobs:
           }
 
           # Live manifest contents, or {} when the release has no latest.json yet.
+          # NOTE: reads go through the GitHub API asset endpoint
+          # (`gh api .../releases/assets/<id>` with octet-stream), never the
+          # browser/download URL -- the asset CDN can serve the previous
+          # state (or 404) for minutes after an upload, so a convergence
+          # check (or a merge base) read via the CDN would produce false
+          # negatives. The API endpoint reads the true stored asset.
           fetch_live_manifest() {
             local url
             url="$(release_json | jq -r '.assets[] | select(.name == "latest.json") | .url // empty')" || return 1
@@ -463,7 +492,7 @@ jobs:
           # this job's own live.json/fresh.json/latest.json bookkeeping.
           publish_updater_manifest() {
             local workdir="$1"
-            local attempt name version="" fv ok f
+            local attempt name version="" fv ok f notes="" notes_failures=0 upload_failures=0 mismatch_failures=0
             for attempt in 1 2 3 4 5; do
               rm -rf "$workdir"
               mkdir -p "$workdir/fragments"
@@ -498,9 +527,20 @@ jobs:
                 return 1
               fi
 
+              # Release body -> manifest notes. `gh release view` needs repo
+              # resolution (GH_REPO above). A failure must retry the attempt;
+              # in v0.7.4 this failure was silently swallowed inside the jq
+              # command substitution and published notes="" unnoticed.
+              if ! notes="$(gh release view "$TAG" --json body --jq .body)"; then
+                notes_failures=$((notes_failures + 1))
+                echo "::warning::attempt $attempt: cannot read release body for notes, retrying"
+                sleep "$(jitter)"
+                continue
+              fi
+
               jq -s \
                 --arg version "$version" \
-                --arg notes "$(gh release view "$TAG" --json body --jq .body)" \
+                --arg notes "$notes" \
                 --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                 '{
                   version: $version,
@@ -510,6 +550,7 @@ jobs:
                 }' "$workdir/live.json" "$workdir"/fragments/latest.*.json > "$workdir/latest.json"
 
               if ! gh release upload "$TAG" "$workdir/latest.json" --clobber; then
+                upload_failures=$((upload_failures + 1))
                 echo "::warning::attempt $attempt: latest.json upload conflicted or failed, retrying with a fresh read"
                 sleep "$(jitter)"
                 continue
@@ -539,16 +580,23 @@ jobs:
                 jq -r '.platforms | keys[]' "$workdir/fresh.json"
                 # Fragments were bookkeeping only; drop them from the
                 # release page (single writer, so these deletes are safe;
-                # a missing asset is ignored).
+                # a missing asset is ignored). They are only removed AFTER
+                # convergence -- on a failed publish they stay behind as
+                # the recovery inputs (v0.7.4's manual repair rebuilt
+                # latest.json from exactly these fragments).
                 for name in $(fragment_names); do
                   gh release delete-asset "$TAG" "$name" --yes || true
                 done
                 return 0
               fi
+              mismatch_failures=$((mismatch_failures + 1))
               echo "::warning::attempt $attempt: convergence check failed, retrying with a fresh read"
               sleep "$(jitter)"
             done
-            echo "::error::latest.json did not converge after 5 attempts on release $TAG"
+            # Distinguish "we could not publish" from "we published but could
+            # not verify": the v0.7.4 error blamed convergence when the real
+            # failure was that no upload ever succeeded.
+            echo "::error::latest.json did not converge after 5 attempts on release $TAG (notes read failures: $notes_failures, upload failures: $upload_failures, convergence mismatches: $mismatch_failures)"
             return 1
           }
 
