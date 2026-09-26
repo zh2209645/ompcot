@@ -16,7 +16,9 @@
 // - A stored selector missing from the available-models list renders as an
 //   extra flagged option (⚠ not in available list) instead of being silently
 //   dropped by the rebuild.
-// - `available: false` degrades to an unavailable note; a failed fetch keeps
+// - `available: false` degrades to an unavailable note AND schedules a
+//   bounded silent retry (the embedded server can still be initializing on
+//   the first page load — the note is not a dead end); a failed fetch keeps
 //   last-good content with an error line + retry above it.
 // - The page is fully rebuilt by render(); onLanguageChanged re-renders, and
 //   per-row statuses survive the rebuild (keyed by row id).
@@ -25,6 +27,12 @@ import { onLanguageChanged, t } from "./i18n.js";
 import { wsRpc } from "./ws-rpc.js";
 
 const OK_STATUS_MS = 2000;
+// `available:false` is not terminal: the in-process Settings surface may not
+// be reachable yet when the page first loads (extension context still
+// initializing), so the note silently re-fetches a few times before giving
+// up. Reopening the page restarts the budget. Exported for the tests.
+export const UNAVAILABLE_RETRY_MS = 5000;
+const UNAVAILABLE_RETRY_MAX = 3;
 
 function cssEscape(value) {
   return typeof window.CSS?.escape === "function" ? window.CSS.escape(value) : value;
@@ -59,6 +67,10 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
   let loadFailed = false; // last configuration fetch failed
   let loadGeneration = 0;
   let destroyed = false;
+  // Silent-retry bookkeeping for the available:false note (see
+  // scheduleUnavailableRetry).
+  let unavailableRetries = 0; // attempts spent this page-open
+  let unavailableRetryTimer = null;
   // rowKey → { text, tone, timer } — survives full re-renders so a save
   // confirmation is not wiped by the refetch that follows it.
   const rowStatuses = new Map();
@@ -511,6 +523,37 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
     return section;
   }
 
+  // ── Unavailable-note silent retry ───────────────────────────────────────
+  //
+  // At most one retry in flight, only while the page is visible, and at most
+  // UNAVAILABLE_RETRY_MAX per page-open so we never spin forever. A later
+  // successful load renders real content and simply stops rescheduling; the
+  // manual retry button (error path) and reopening the page stay available
+  // regardless.
+
+  function clearUnavailableRetry() {
+    if (unavailableRetryTimer) {
+      clearTimeout(unavailableRetryTimer);
+      unavailableRetryTimer = null;
+    }
+  }
+
+  function scheduleUnavailableRetry() {
+    if (
+      destroyed ||
+      unavailableRetryTimer ||
+      unavailableRetries >= UNAVAILABLE_RETRY_MAX ||
+      document.visibilityState === "hidden"
+    ) {
+      return;
+    }
+    unavailableRetries += 1;
+    unavailableRetryTimer = setTimeout(() => {
+      unavailableRetryTimer = null;
+      void refresh();
+    }, UNAVAILABLE_RETRY_MS);
+  }
+
   // ── Page states ─────────────────────────────────────────────────────────
 
   function errorLine() {
@@ -541,6 +584,7 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
     if (loadFailed) pageEl.appendChild(errorLine());
     if (config?.available === false) {
       pageEl.appendChild(noteEl("models.unavailable"));
+      scheduleUnavailableRetry();
       return;
     }
     pageEl.appendChild(buildMainSession());
@@ -551,6 +595,7 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
 
   function destroy() {
     destroyed = true;
+    clearUnavailableRetry();
     unsubscribeLanguage();
     for (const entry of rowStatuses.values()) {
       if (entry.timer) clearTimeout(entry.timer);

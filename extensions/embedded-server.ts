@@ -833,6 +833,47 @@ const AGENT_THINKING_LEVEL_VALUES: ReadonlySet<string> = new Set([
   "max",
 ]);
 
+// Value shapes `get_model_configuration` needs from the `omp config list
+// --json` catalog when the in-process Settings instance is unreachable (see
+// readModelConfigValuesFromCli inside the extension body).
+export type ModelConfigCliValues = {
+  modelRoles: Record<string, unknown> | null;
+  cycleOrder: string[] | null;
+  modelTags: Record<string, unknown> | null;
+  defaultThinkingLevel: string | null;
+};
+
+// Pure parser: mine the model/reasoning keys out of a parsed
+// `omp config list --json` catalog (`{ "<dotted.key>": { value?, ... } }`).
+// Missing/unusable keys degrade to null fields; a non-object catalog is
+// rejected wholesale. Exported for unit tests only.
+export function extractModelConfigCliValues(catalog: unknown): ModelConfigCliValues | null {
+  if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) return null;
+  const record = catalog as Record<string, unknown>;
+  const entryValue = (key: string): unknown => {
+    const entry = record[key];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const value = (entry as { value?: unknown }).value;
+    return value === undefined ? null : value;
+  };
+  const asRecord = (value: unknown): Record<string, unknown> | null =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? { ...(value as Record<string, unknown>) }
+      : null;
+  const modelRolesRaw = entryValue("modelRoles");
+  const cycleOrderRaw = entryValue("cycleOrder");
+  const modelTagsRaw = entryValue("modelTags");
+  const levelRaw = entryValue("defaultThinkingLevel");
+  return {
+    modelRoles: asRecord(modelRolesRaw),
+    cycleOrder: Array.isArray(cycleOrderRaw)
+      ? cycleOrderRaw.filter((v): v is string => typeof v === "string" && !!v.trim())
+      : null,
+    modelTags: asRecord(modelTagsRaw),
+    defaultThinkingLevel: typeof levelRaw === "string" && levelRaw.trim() ? levelRaw : null,
+  };
+}
+
 // Tolerant YAML-subset scalar unwrap for agent frontmatter: strips matching
 // quotes, tries JSON for [/{ literals, and passes anything else through
 // verbatim. Never throws.
@@ -3843,6 +3884,12 @@ export default function (omp: ExtensionAPI) {
     thinkingLevelOptions: string[];
     taskAgents: TaskAgentRow[];
     available: boolean;
+    // INFORMATIONAL, additive-safe: which surface supplied the values —
+    // "inprocess" (live Settings instance), "fallback" (`omp config list
+    // --json`), or "none" (no usable source; the only available:false case).
+    // The frozen frontend contract ignores this field; it exists for
+    // diagnostics. Optional so older payloads without it stay valid.
+    settingsSource?: "inprocess" | "fallback" | "none";
   };
 
   // Computed at call time (never a literal at the import site) so esbuild
@@ -4088,13 +4135,73 @@ export default function (omp: ExtensionAPI) {
     return rows.sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  // Value-surface read fallback for buildModelConfiguration: when the
+  // in-process Settings instance is unreachable (the extension context can
+  // still be initializing when the WebView's FIRST page load fires
+  // get_model_configuration), re-read the same keys from
+  // `omp config list --json` — the catalog route's pattern. Discriminated
+  // result so the caller logs ONE diagnostic line naming the failure.
+  async function readModelConfigValuesFromCli(): Promise<
+    { ok: true; values: ModelConfigCliValues } | { ok: false; reason: string }
+  > {
+    let stdout: string;
+    try {
+      stdout = await execOmpCli(["config", "list", "--json"], OMP_CLI_TIMEOUT_MS);
+    } catch (e) {
+      return { ok: false, reason: `omp config list --json failed: ${errMessage(e)}` };
+    }
+    let catalog: unknown;
+    try {
+      catalog = JSON.parse(stdout);
+    } catch (e) {
+      return {
+        ok: false,
+        reason: `omp config list --json produced non-JSON output: ${errMessage(e)}`,
+      };
+    }
+    const values = extractModelConfigCliValues(catalog);
+    if (!values) {
+      return { ok: false, reason: "omp config list --json catalog had an unexpected shape" };
+    }
+    return { ok: true, values };
+  }
+
   // Build the full `get_model_configuration` payload. Roles: runtime
   // enumeration when reachable, else static built-ins, UNIONED with the
   // configured role-bearing settings keys (exactly what the runtime's
-  // getKnownRoleIds computes) so custom roles never disappear.
+  // getKnownRoleIds computes) so custom roles never disappear. Values come
+  // from the in-process Settings instance when reachable, else from the CLI
+  // fallback — a slow extension-context boot must not render the page
+  // unavailable when the config file is perfectly readable.
   async function buildModelConfiguration(): Promise<ModelConfigurationPayload> {
     const instance = getSettingsInstance();
     const settingsReachable = !!instance && typeof instance.get === "function";
+
+    let settingsSource: "inprocess" | "fallback" | "none" = "inprocess";
+    let cliFailure: string | null = null;
+    let modelRoles: Record<string, unknown> | null = null;
+    let cycleOrder: string[] | null = null;
+    let modelTags: Record<string, unknown> | null = null;
+    let defaultThinkingLevelRaw: unknown;
+
+    if (settingsReachable) {
+      modelRoles = asPlainRecord(readSettingsValue(instance, "modelRoles"));
+      cycleOrder = asStringArray(readSettingsValue(instance, "cycleOrder"));
+      modelTags = asPlainRecord(readSettingsValue(instance, "modelTags"));
+      defaultThinkingLevelRaw = readSettingsValue(instance, "defaultThinkingLevel");
+    } else {
+      const cli = await readModelConfigValuesFromCli();
+      if (cli.ok) {
+        settingsSource = "fallback";
+        modelRoles = cli.values.modelRoles;
+        cycleOrder = cli.values.cycleOrder;
+        modelTags = cli.values.modelTags;
+        defaultThinkingLevelRaw = cli.values.defaultThinkingLevel;
+      } else {
+        settingsSource = "none";
+        cliFailure = cli.reason;
+      }
+    }
 
     let runtimeIds: string[] | null = null;
     const mod = await resolveModelRolesModule();
@@ -4118,10 +4225,6 @@ export default function (omp: ExtensionAPI) {
       }
     }
 
-    const modelRoles = asPlainRecord(readSettingsValue(instance, "modelRoles"));
-    const cycleOrder = asStringArray(readSettingsValue(instance, "cycleOrder"));
-    const modelTags = asPlainRecord(readSettingsValue(instance, "modelTags"));
-
     const base = runtimeIds && runtimeIds.length > 0 ? runtimeIds : [...BUILTIN_MODEL_ROLE_IDS];
     const ids: string[] = [];
     const seen = new Set<string>();
@@ -4141,18 +4244,34 @@ export default function (omp: ExtensionAPI) {
       return { id, current: typeof value === "string" && value.trim() ? value : null };
     });
 
-    const rawLevel = readSettingsValue(instance, "defaultThinkingLevel");
-    const defaultThinkingLevel = typeof rawLevel === "string" && rawLevel.trim() ? rawLevel : null;
+    const defaultThinkingLevel =
+      typeof defaultThinkingLevelRaw === "string" && defaultThinkingLevelRaw.trim()
+        ? defaultThinkingLevelRaw
+        : null;
+
+    // `available` = "did we produce usable configuration data": at least one
+    // surface (in-process Settings or the CLI fallback) supplied a readable
+    // catalog, so the roles array carries effective values. The static
+    // built-in skeleton alone — no instance AND the fallback empty — is the
+    // only available:false case.
+    const available = settingsSource !== "none";
+    if (!available) {
+      console.error(
+        `[Embedded] get_model_configuration returning available:false — in-process Settings surface unreachable and CLI fallback failed (${cliFailure ?? "unknown error"})`,
+      );
+    }
 
     return {
       roles,
-      // true = neither runtime role metadata nor Settings were reachable, so
-      // `roles` is only the static built-in list (custom roles may be missing).
-      roleIdsKnownOnly: runtimeIds === null && !settingsReachable,
+      // true = neither runtime role metadata nor an in-process Settings
+      // instance were reachable, so `roles` is only the static built-in list
+      // unioned with fallback-reported keys (custom roles may be missing).
+      roleIdsKnownOnly: runtimeIds === null && settingsSource !== "inprocess",
       defaultThinkingLevel,
       thinkingLevelOptions: resolveDefaultThinkingLevelOptions(),
       taskAgents: await listTaskAgentDefinitions(instance),
-      available: settingsReachable,
+      available,
+      settingsSource,
     };
   }
 

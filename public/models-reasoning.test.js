@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { JSDOM } from "jsdom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { setLanguage } from "./i18n.js";
-import { createModelsReasoning } from "./models-reasoning.js";
+import { createModelsReasoning, UNAVAILABLE_RETRY_MS } from "./models-reasoning.js";
 
 const html = readFileSync(join(process.cwd(), "public/index.html"), "utf8");
 
@@ -95,6 +95,7 @@ describe("models & reasoning page", () => {
   afterEach(() => {
     for (const mr of instances.splice(0)) mr.destroy();
     vi.restoreAllMocks();
+    vi.useRealTimers();
     dom.window.close();
     delete globalThis.window;
     delete globalThis.document;
@@ -304,6 +305,79 @@ describe("models & reasoning page", () => {
     expect($(".mr-note").textContent).toBe("Unavailable");
     expect($('[data-mr-row="default-model"]')).toBeNull();
     expect($$("[data-mr-row^='role:']")).toHaveLength(0);
+  });
+
+  test("available:false schedules a silent retry; a later good load replaces the note", async () => {
+    vi.useFakeTimers();
+    const ctx = setup();
+    const configFetches = () =>
+      ctx.ws.sent.filter((m) => m.type === "get_model_configuration").length;
+
+    const pending = ctx.mr.refresh();
+    await vi.advanceTimersByTimeAsync(0);
+    ctx.ws.respondTo("get_model_configuration", { ...CONFIG, available: false });
+    ctx.ws.respondTo("get_available_models", { models: MODELS });
+    await pending;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect($(".mr-note").textContent).toBe("Unavailable");
+    expect(configFetches()).toBe(1);
+
+    // +5s: exactly one silent re-fetch, answered with a healthy payload.
+    await vi.advanceTimersByTimeAsync(UNAVAILABLE_RETRY_MS);
+    expect(configFetches()).toBe(2);
+    ctx.ws.respondTo("get_model_configuration", CONFIG);
+    ctx.ws.respondTo("get_available_models", { models: MODELS });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The note is replaced by the regular content path…
+    expect($(".mr-note")).toBeNull();
+    expect($('[data-mr-row="default-model"] select').value).toBe("claude-opus-4-20250514");
+
+    // …and no further retries fire once content is up.
+    await vi.advanceTimersByTimeAsync(UNAVAILABLE_RETRY_MS * 4);
+    expect(configFetches()).toBe(2);
+  });
+
+  test("available:false silent retries are capped at three per page-open", async () => {
+    vi.useFakeTimers();
+    const ctx = setup();
+    const configFetches = () =>
+      ctx.ws.sent.filter((m) => m.type === "get_model_configuration").length;
+
+    const pending = ctx.mr.refresh();
+    await vi.advanceTimersByTimeAsync(0);
+    ctx.ws.respondTo("get_model_configuration", { ...CONFIG, available: false });
+    ctx.ws.respondTo("get_available_models", { models: MODELS });
+    await pending;
+    expect(configFetches()).toBe(1);
+
+    for (let expected = 2; expected <= 4; expected++) {
+      await vi.advanceTimersByTimeAsync(UNAVAILABLE_RETRY_MS);
+      expect(configFetches()).toBe(expected);
+      ctx.ws.respondTo("get_model_configuration", { ...CONFIG, available: false });
+      ctx.ws.respondTo("get_available_models", { models: MODELS });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    // Budget spent: the note stays and nothing else is sent.
+    await vi.advanceTimersByTimeAsync(UNAVAILABLE_RETRY_MS * 4);
+    expect(configFetches()).toBe(4);
+    expect($(".mr-note").textContent).toBe("Unavailable");
+  });
+
+  test("destroy() cancels a pending silent retry", async () => {
+    vi.useFakeTimers();
+    const ctx = setup();
+    const pending = ctx.mr.refresh();
+    await vi.advanceTimersByTimeAsync(0);
+    ctx.ws.respondTo("get_model_configuration", { ...CONFIG, available: false });
+    ctx.ws.respondTo("get_available_models", { models: MODELS });
+    await pending;
+
+    ctx.mr.destroy();
+    await vi.advanceTimersByTimeAsync(UNAVAILABLE_RETRY_MS * 4);
+    expect(ctx.ws.sent.filter((m) => m.type === "get_model_configuration")).toHaveLength(1);
   });
 
   test("an empty task agent list shows a note instead of cards", async () => {
