@@ -17,16 +17,22 @@ jobs:
         include:
           # macOS Apple Silicon (arm64) host build.
           - os: macos-latest
+            updater_platform: darwin-aarch64
           # macOS Intel (x64) build. The macos-13 Intel runner was retired by
           # GitHub, so we cross-compile x86_64 from an Apple Silicon runner.
           - os: macos-14
             rust_target: x86_64-apple-darwin
+            updater_platform: darwin-x86_64
           # Linux deb/rpm bundling is currently more stable on 22.04 than
           # 24.04 for GTK/WebKit bundles in CI.
           - os: ubuntu-22.04
+            updater_platform: linux-x86_64
           - os: ubuntu-24.04-arm
+            updater_platform: linux-aarch64
           - os: windows-2022
+            updater_platform: windows-x86_64
           - os: windows-11-arm
+            updater_platform: windows-aarch64
 
     runs-on: ${{ matrix.os }}
 
@@ -106,8 +112,7 @@ jobs:
           # binaries (e.g. `.relr.dyn`), see tauri#14796.
           NO_STRIP: "true"
           # Signing key for the Tauri updater. Required so the bundler
-          # produces `*.sig` files and `latest.json` (the manifest the
-          # auto-updater reads from the GitHub release). Configure these
+          # produces `*.sig` files for the artifacts. Configure these
           # one-time in repo Settings → Secrets → Actions. See
           # docs/AUTO_UPDATER.md for how to generate the key pair.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -121,13 +126,17 @@ jobs:
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: --bundles deb,rpm
-          # tauri-action will only attach `latest.json` (the updater
-          # manifest) when this is `true`. Combined with
-          # `bundle.createUpdaterArtifacts` in tauri.conf.json, the
-          # release ends up with: installers + `*.sig` files +
-          # `latest.json` pinning the URL/signature of each platform
-          # bundle. The Tauri updater endpoint then resolves to
-          # `https://github.com/.../releases/latest/download/latest.json`.
+          # v0.7.2 incident follow-up: tauri-action's updater-JSON publisher
+          # (includeUpdaterJson, which defaults to TRUE in v0) downloads the
+          # existing latest.json, merges its own platforms in, DELETEs the
+          # release asset and re-uploads it. With 6 concurrent matrix jobs
+          # that delete can 404 (another job replaced the asset between our
+          # read and our delete) and the whole step fails, dropping that
+          # job's platforms from the manifest. So the action no longer
+          # touches latest.json at all: every job uploads a uniquely named
+          # fragment (see the next step) and the publish-updater-manifest
+          # job below is the single writer of latest.json.
+          includeUpdaterJson: false
           updaterJsonPreferNsis: true
 
       - name: Build Tauri app and publish assets
@@ -136,8 +145,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Signing key for the Tauri updater. Required so the bundler
-          # produces `*.sig` files and `latest.json` (the manifest the
-          # auto-updater reads from the GitHub release). Configure these
+          # produces `*.sig` files for the artifacts. Configure these
           # one-time in repo Settings → Secrets → Actions. See
           # docs/AUTO_UPDATER.md for how to generate the key pair.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -153,12 +161,286 @@ jobs:
           # When a Rust target is set (Intel cross-build on an Apple Silicon
           # runner), pass it through so the bundler emits an x86_64 app.
           args: ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
-          # tauri-action will only attach `latest.json` (the updater
-          # manifest) when this is `true`. Combined with
-          # `bundle.createUpdaterArtifacts` in tauri.conf.json, the
-          # release ends up with: installers + `*.sig` files +
-          # `latest.json` pinning the URL/signature of each platform
-          # bundle. The Tauri updater endpoint then resolves to
-          # `https://github.com/.../releases/latest/download/latest.json`.
+          # v0.7.2 incident follow-up: tauri-action's updater-JSON publisher
+          # (includeUpdaterJson, which defaults to TRUE in v0) downloads the
+          # existing latest.json, merges its own platforms in, DELETEs the
+          # release asset and re-uploads it. With 6 concurrent matrix jobs
+          # that delete can 404 (another job replaced the asset between our
+          # read and our delete) and the whole step fails, dropping that
+          # job's platforms from the manifest. So the action no longer
+          # touches latest.json at all: every job uploads a uniquely named
+          # fragment (see the next step) and the publish-updater-manifest
+          # job below is the single writer of latest.json.
+          includeUpdaterJson: false
           updaterJsonPreferNsis: true
 
+      # Uploads this job's platform entries as a *uniquely named* fragment
+      # asset (latest.<platform>.json). Unique names cannot collide across
+      # the 6 concurrent matrix jobs, so there is no shared-asset race here;
+      # --clobber only ever replaces this same job's own fragment on
+      # workflow re-runs. shell: bash makes this portable across all
+      # runners (on Windows the default would be pwsh).
+      - name: Upload updater manifest fragment
+        if: matrix.updater_platform != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPDATER_PLATFORM: ${{ matrix.updater_platform }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+
+          : "${UPDATER_PLATFORM:?updater_platform missing from matrix entry}"
+          TAG="$GITHUB_REF_NAME"
+
+          # Cross-compiled builds (macos-14 x86_64) land under target/<triple>/.
+          TARGET_DIR="src-tauri/target"
+          if [ -n "$RUST_TARGET" ]; then
+            TARGET_DIR="src-tauri/target/$RUST_TARGET"
+          fi
+
+          # Signature priority, mirroring tauri-action's updaterJsonPreferNsis
+          # semantics: nsis (.exe.sig) beats msi, .app.tar.gz.sig is macOS'
+          # only updater artifact, deb beats rpm for the plain linux-<arch> key.
+          sig_priority() {
+            case "$1" in
+              *.exe.sig | *.app.tar.gz.sig) echo 3 ;;
+              *.deb.sig) echo 2 ;;
+              *) echo 1 ;;
+            esac
+          }
+
+          bundle_of() {
+            case "$1" in
+              *.app.tar.gz.sig) echo "app" ;;
+              *.exe.sig) echo "nsis" ;;
+              *.msi.sig) echo "msi" ;;
+              *.deb.sig) echo "deb" ;;
+              *.rpm.sig) echo "rpm" ;;
+              *) echo "" ;;
+            esac
+          }
+
+          # Browser download URL of an asset tauri-action uploaded moments
+          # ago; retry while the lookup yields nothing or fails, to ride out
+          # release asset-list propagation.
+          asset_url() {
+            local name="$1" url
+            for _ in 1 2 3; do
+              url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+                --jq ".assets[] | select(.name == \"$name\") | .browser_download_url" 2>/dev/null || true)"
+              if [ -n "$url" ]; then
+                printf '%s\n' "$url"
+                return 0
+              fi
+              sleep 3
+            done
+            echo "::error::release asset '$name' not found on release $TAG" >&2
+            return 1
+          }
+
+          mapfile -t SIGS < <(find "$TARGET_DIR/release/bundle" -type f -name '*.sig' 2>/dev/null | sort)
+          if [ "${#SIGS[@]}" -eq 0 ]; then
+            echo "::error::no updater signatures (*.sig) under $TARGET_DIR/release/bundle"
+            exit 1
+          fi
+
+          # Highest priority first; -s keeps alphabetical order on ties.
+          mapfile -t ORDERED < <(
+            for sig in "${SIGS[@]}"; do
+              printf '%s %s\n' "$(sig_priority "$sig")" "$sig"
+            done | sort -rn -s -k1,1 | cut -d' ' -f2-
+          )
+
+          VERSION="$(jq -r '.version' src-tauri/tauri.conf.json)"
+
+          # Platforms for this fragment: the plain "<os>-<arch>" key from the
+          # highest-priority signature plus "<os>-<arch>-<bundle>" variant
+          # keys for every signature -- the same key set tauri-action's
+          # includeUpdaterJson used to emit, so the manifest shape is
+          # unchanged.
+          PLATFORMS="$(
+            for i in "${!ORDERED[@]}"; do
+              sig="${ORDERED[$i]}"
+              artifact="$(basename "$sig" .sig)"
+              entry="$(jq -cn --arg signature "$(cat "$sig")" --arg url "$(asset_url "$artifact")" \
+                '{signature: $signature, url: $url}')"
+              keys=("$UPDATER_PLATFORM")
+              bundle="$(bundle_of "$sig")"
+              [ -n "$bundle" ] && keys+=("$UPDATER_PLATFORM-$bundle")
+              for key in "${keys[@]}"; do
+                if [ "$key" != "$UPDATER_PLATFORM" ] || [ "$i" -eq 0 ]; then
+                  jq -cn --arg key "$key" --argjson entry "$entry" '{($key): $entry}'
+                fi
+              done
+            done | jq -cs 'add // {}'
+          )"
+
+          FRAGMENT="latest.$UPDATER_PLATFORM.json"
+          jq -cn --arg version "$VERSION" --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --argjson platforms "$PLATFORMS" \
+                '{version: $version, notes: "", pub_date: $pub_date, platforms: $platforms}' > "$FRAGMENT"
+
+          echo "Uploading fragment $FRAGMENT:"
+          cat "$FRAGMENT"
+
+          gh release upload "$TAG" "$FRAGMENT" --clobber
+
+  # Single writer for the shared updater manifest (latest.json). The build
+  # matrix uploads uniquely named per-platform fragments; this job downloads
+  # them fresh, merges them, and publishes latest.json exactly once -- there
+  # are no concurrent writers, so the download -> merge -> DELETE -> re-upload
+  # race that broke v0.7.2 (missing windows-x86_64 entries) cannot recur. The
+  # publish itself is still an optimistic read-merge-publish loop with
+  # jittered retries and a convergence check, to survive races with manual
+  # manifest repairs or workflow re-runs.
+  publish-updater-manifest:
+    needs: build-and-release
+    # Publish a complete manifest only when the whole matrix is green. If a
+    # build job failed we deliberately leave latest.json untouched (clients
+    # keep the previous release's manifest) and the run stays red.
+    if: ${{ !cancelled() && needs.build-and-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge fragments and publish latest.json (single writer, race-safe)
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          TAG="$GITHUB_REF_NAME"
+
+          release_json() {
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG"
+          }
+
+          asset_url() {
+            release_json | jq -r ".assets[] | select(.name == \"$1\") | .url"
+          }
+
+          # Live manifest contents, or {} when the release has no latest.json yet.
+          fetch_live_manifest() {
+            local url
+            url="$(release_json | jq -r '.assets[] | select(.name == "latest.json") | .url // empty')" || return 1
+            if [ -z "$url" ]; then
+              printf '{}\n'
+            else
+              gh api -H 'Accept: application/octet-stream' "$url" || return 1
+            fi
+          }
+
+          fragment_names() {
+            release_json | jq -r '.assets[].name' | grep -E '^latest\..+\.json$' || true
+          }
+
+          # 3-7.9 s randomized backoff.
+          jitter() {
+            printf '%s.%s' "$((RANDOM % 5 + 3))" "$((RANDOM % 10))"
+          }
+
+          # Read-merge-publish with optimistic concurrency: every attempt
+          # re-fetches the live manifest AND all fragments from the release
+          # (never reusing a stale local copy), publishes with a single
+          # overwriting upload (gh --clobber: delete+upload in one step that
+          # also tolerates a missing asset -- no separate DELETE that can
+          # 404 mid-race), then converges by re-reading the live manifest.
+          # Fails only if some fragment's platform entries are still absent
+          # after 5 attempts.
+          publish_updater_manifest() {
+            local workdir="$1"
+            local attempt name version="" fv ok f
+            for attempt in 1 2 3 4 5; do
+              rm -rf "$workdir"
+              mkdir -p "$workdir"
+
+              # Fresh read of every input on every attempt.
+              if ! fetch_live_manifest > "$workdir/live.json"; then
+                echo "::warning::attempt $attempt: cannot read live latest.json, retrying"
+                sleep "$(jitter)"
+                continue
+              fi
+              for name in $(fragment_names); do
+                if ! gh api -H 'Accept: application/octet-stream' "$(asset_url "$name")" \
+                    > "$workdir/$name"; then
+                  echo "::warning::attempt $attempt: cannot download fragment $name, retrying"
+                  sleep "$(jitter)"
+                  continue 2
+                fi
+              done
+
+              # All fragments must describe the same app version.
+              for f in "$workdir"/latest.*.json; do
+                fv="$(jq -r '.version' "$f")"
+                if [ -z "$version" ]; then
+                  version="$fv"
+                elif [ "$version" != "$fv" ]; then
+                  echo "::error::fragment version mismatch ($version vs $fv in $(basename "$f"))"
+                  return 1
+                fi
+              done
+              if [ -z "$version" ]; then
+                echo "::error::no latest.<platform>.json fragments found on release $TAG"
+                return 1
+              fi
+
+              jq -s \
+                --arg version "$version" \
+                --arg notes "$(gh release view "$TAG" --json body --jq .body)" \
+                --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '{
+                  version: $version,
+                  notes: $notes,
+                  pub_date: $pub_date,
+                  platforms: ((.[0].platforms // {}) + (.[1:] | map(.platforms) | add // {}))
+                }' "$workdir/live.json" "$workdir"/latest.*.json > "$workdir/latest.json"
+
+              if ! gh release upload "$TAG" "$workdir/latest.json" --clobber; then
+                echo "::warning::attempt $attempt: latest.json upload conflicted or failed, retrying with a fresh read"
+                sleep "$(jitter)"
+                continue
+              fi
+
+              # Convergence check: re-read the live manifest and require
+              # every fragment's platform entries (key + signature + url)
+              # to be present in it. Another writer may have carried them
+              # (e.g. a manual repair); that still counts as success.
+              if ! fetch_live_manifest > "$workdir/fresh.json"; then
+                echo "::warning::attempt $attempt: cannot re-read live latest.json, retrying"
+                sleep "$(jitter)"
+                continue
+              fi
+              ok=1
+              for f in "$workdir"/latest.*.json; do
+                jq -e --slurpfile live "$workdir/fresh.json" '
+                  .platforms as $want
+                  | [ ($want | keys[]) as $k
+                      | select( $live[0].platforms[$k] == null
+                                or $live[0].platforms[$k] != $want[$k] ) ]
+                  | length == 0
+                ' "$f" > /dev/null || ok=0
+              done
+              if [ "$ok" -eq 1 ]; then
+                echo "latest.json published and converged. Platforms:"
+                jq -r '.platforms | keys[]' "$workdir/fresh.json"
+                # Fragments were bookkeeping only; drop them from the
+                # release page (single writer, so these deletes are safe;
+                # a missing asset is ignored).
+                for name in $(fragment_names); do
+                  gh release delete-asset "$TAG" "$name" --yes || true
+                done
+                return 0
+              fi
+              echo "::warning::attempt $attempt: convergence check failed, retrying with a fresh read"
+              sleep "$(jitter)"
+            done
+            echo "::error::latest.json did not converge after 5 attempts on release $TAG"
+            return 1
+          }
+
+          # Run when executed directly; tests can source this script and
+          # drive publish_updater_manifest() against a mocked `gh`.
+          if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+            publish_updater_manifest "$(mktemp -d)"
+          fi
