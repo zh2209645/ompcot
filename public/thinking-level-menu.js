@@ -7,7 +7,11 @@
 //
 // The menu renders the level set reported by the server (get_state
 // `thinkingLevels`, model-specific). Callers push fresh sets via the returned
-// `setLevels()`; a missing/empty/invalid set falls back to DEFAULT_LEVELS.
+// `setLevels()`; a missing/invalid set falls back to DEFAULT_LEVELS, while an
+// explicit EMPTY array is the server's "this model has no controllable
+// thinking depth" contract (`thinking: undefined` in the pi-catalog) — the
+// chip becomes disabled (dimmed, tooltip/aria from composer.thinkUnsupported)
+// and the menu cannot open.
 
 import { t } from "./i18n.js";
 
@@ -36,16 +40,24 @@ export function thinkingLevelLabel(level) {
 /**
  * A set is usable only when it is a non-empty array of non-empty strings;
  * anything else (missing, empty, malformed) falls back to the default set.
+ * (An EMPTY array is handled separately by the disabled state — see
+ * isEmptyLevelSet.)
  */
 function normalizeLevels(candidates) {
-  if (
-    !Array.isArray(candidates) ||
-    candidates.length === 0 ||
-    !candidates.every((level) => typeof level === "string" && level.length > 0)
-  ) {
-    return THINKING_LEVELS;
-  }
-  return candidates;
+  return isValidLevelSet(candidates) ? candidates : THINKING_LEVELS;
+}
+
+/** Server contract: an explicit empty array = "no controllable thinking depth". */
+function isEmptyLevelSet(candidates) {
+  return Array.isArray(candidates) && candidates.length === 0;
+}
+
+function isValidLevelSet(candidates) {
+  return (
+    Array.isArray(candidates) &&
+    candidates.length > 0 &&
+    candidates.every((level) => typeof level === "string" && level.length > 0)
+  );
 }
 
 /**
@@ -53,10 +65,10 @@ function normalizeLevels(candidates) {
  *
  * @param {object} options
  * @param {HTMLButtonElement} options.button - the #thinking-btn chip
- * @param {string[]} [options.levels] - initial selectable levels
+ * @param {string[]} [options.levels] - initial selectable levels; `[]` starts disabled
  * @param {() => string} options.getCurrentLevel - current level getter
  * @param {(level: string) => void} options.onSelect - called with the picked level
- * @returns {{ setLevels: (levels: string[]) => void } | null} null when wiring is impossible
+ * @returns {{ setLevels: (levels: string[]) => void, isSupported: () => boolean } | null} null when wiring is impossible
  */
 export function setupThinkingLevelMenu({
   button,
@@ -71,6 +83,10 @@ export function setupThinkingLevelMenu({
   if (!anchor || !menu) return null;
 
   let activeLevels = normalizeLevels(levels);
+  // Server contract: an explicit empty array means the current model has no
+  // controllable thinking depth. Anything else (including missing/malformed
+  // sets) means "selectable", with the default set as the unknown fallback.
+  let supported = !isEmptyLevelSet(levels);
 
   const isOpen = () => !menu.classList.contains("hidden");
 
@@ -83,6 +99,25 @@ export function setupThinkingLevelMenu({
     button.setAttribute("aria-expanded", "false");
     // preventScroll: refocusing the chip must never scroll the page.
     if (refocus) button.focus({ preventScroll: true });
+  };
+
+  // Dimmed + not clickable + unsupported tooltip/aria (composer.thinkUnsupported).
+  // When re-enabled, restore the menu-semantics attributes; title/aria are
+  // re-derived by app.js updateThinkingBtn(), which consults isSupported().
+  const applySupportedState = () => {
+    button.disabled = !supported;
+    if (supported) {
+      button.setAttribute("aria-haspopup", "menu");
+      button.setAttribute("aria-expanded", isOpen() ? "true" : "false");
+      button.title = t("composer.thinkingTitleMenu");
+      button.setAttribute("aria-label", t("composer.thinkingAriaMenu"));
+      return;
+    }
+    close();
+    button.removeAttribute("aria-haspopup");
+    button.setAttribute("aria-expanded", "false");
+    button.title = t("composer.thinkUnsupported");
+    button.setAttribute("aria-label", t("composer.thinkUnsupported"));
   };
 
   // The composer sits at the bottom of the viewport, so opening downward
@@ -137,6 +172,7 @@ export function setupThinkingLevelMenu({
   };
 
   const open = () => {
+    if (!supported) return;
     buildItems();
     menu.classList.remove("hidden");
     updateMenuDirection();
@@ -146,11 +182,18 @@ export function setupThinkingLevelMenu({
 
   /**
    * Replace the rendered level set (server contract: get_state
-   * `thinkingLevels`). Invalid sets fall back to the default five. If the
-   * menu is open it re-renders in place.
+   * `thinkingLevels`, or the set_model ack). Invalid sets fall back to the
+   * default five; an explicit EMPTY array disables the chip (model without
+   * controllable thinking depth). If the menu is open it re-renders in place.
    */
   const setLevels = (nextLevels) => {
-    activeLevels = normalizeLevels(nextLevels);
+    const nextSupported = !isEmptyLevelSet(nextLevels);
+    const wasSupported = supported;
+    supported = nextSupported;
+    if (nextSupported) activeLevels = normalizeLevels(nextLevels);
+    if (supported !== wasSupported) {
+      applySupportedState();
+    }
     if (isOpen()) {
       buildItems();
       updateMenuDirection();
@@ -158,9 +201,15 @@ export function setupThinkingLevelMenu({
     }
   };
 
-  button.setAttribute("aria-haspopup", "menu");
-  button.setAttribute("aria-expanded", "false");
-  button.addEventListener("click", () => (isOpen() ? close(true) : open()));
+  /** Whether the current model exposes a controllable thinking-depth set. */
+  const isSupported = () => supported;
+
+  applySupportedState();
+  button.addEventListener("click", () => {
+    if (!supported || button.disabled) return;
+    if (isOpen()) close(true);
+    else open();
+  });
 
   // Arrow keys / Home / End move focus between items; Esc closes without
   // selecting (Esc handling mirrors the model-dropdown search input).
@@ -188,5 +237,5 @@ export function setupThinkingLevelMenu({
     if (isOpen() && !anchor.contains(e.target)) close();
   });
 
-  return { setLevels };
+  return { setLevels, isSupported };
 }

@@ -2074,11 +2074,19 @@ function formatCompactThinkingLevelLabel(level) {
 }
 function updateThinkingBtn() {
   thinkingBtn.textContent = formatCompactThinkingLevelLabel(currentThinkingLevel);
-  thinkingBtn.title = t("composer.thinkingTitleMenu");
-  thinkingBtn.setAttribute(
-    "aria-label",
-    t("composer.thinkingAriaDynamicMenu", { level: currentThinkingLevel }),
-  );
+  if (thinkingMenu?.isSupported() === false) {
+    // Current model has no controllable thinking depth (server contract:
+    // get_state `thinkingLevels: []`) — the chip is disabled by the menu
+    // module; its tooltip/aria must explain why.
+    thinkingBtn.title = t("composer.thinkUnsupported");
+    thinkingBtn.setAttribute("aria-label", t("composer.thinkUnsupported"));
+  } else {
+    thinkingBtn.title = t("composer.thinkingTitleMenu");
+    thinkingBtn.setAttribute(
+      "aria-label",
+      t("composer.thinkingAriaDynamicMenu", { level: currentThinkingLevel }),
+    );
+  }
   thinkingBtn.classList.toggle("off", currentThinkingLevel === "off");
 }
 let currentModelId = "";
@@ -2259,7 +2267,7 @@ function openModelDropdown() {
       el.addEventListener("click", async () => {
         closeModelDropdown();
         const display = m.id.replace(/^claude-/, "").replace(/-\d{8}$/, "");
-        await rpcCommand(
+        const result = await rpcCommand(
           { type: "set_model", provider: m.provider, modelId: m.id },
           t("status.switchingModel", { model: display }),
         );
@@ -2269,6 +2277,24 @@ function openModelDropdown() {
           contextWindowSize = m.contextWindow;
           updateTokenUsage();
         }
+        // The set_model ack carries the new model's thinking surface
+        // ({ model, thinkingLevel, thinkingLevels, reasoning }) — feed the
+        // depth menu directly from it so the chip refreshes immediately
+        // instead of waiting for (or racing) the next state fetch. An empty
+        // `thinkingLevels` disables the chip (no controllable depth).
+        if (result?.success && result.data) {
+          if (result.data.thinkingLevel) {
+            currentThinkingLevel = result.data.thinkingLevel;
+          }
+          if (Array.isArray(result.data.thinkingLevels)) {
+            setSupportedThinkingLevels(result.data.thinkingLevels);
+          }
+          updateThinkingBtn();
+        }
+        // Backup re-sync: fetchModelInfo re-reads level + set from get_state
+        // (generation-guarded, so it cannot clobber the ack-fed state with
+        // anything older).
+        await fetchModelInfo();
       });
       itemsContainer.appendChild(el);
     });
@@ -2314,12 +2340,15 @@ document.addEventListener("click", (e) => {
 // are generation-guarded, so a stale reply can no longer overwrite the chip
 // (F17).
 // The server reports the levels supported by the current model (get_state
-// `thinkingLevels`, refreshed by fetchModelInfo after set_model etc.);
-// setSupportedThinkingLevels pushes each refreshed set into the menu, which
-// stores it and re-renders immediately if it is open. When the current level
-// is not in the set, the menu simply renders without a selection; a rejected
-// set_thinking_level surfaces the server's error via the existing handling
-// below.
+// `thinkingLevels`, or the set_model ack); setSupportedThinkingLevels pushes
+// each refreshed set into the menu, which stores it and re-renders immediately
+// if it is open. When the current level is not in the set, the menu simply
+// renders without a selection; a rejected set_thinking_level surfaces the
+// server's error via the existing handling below. An EMPTY array is the
+// server's "no controllable thinking depth on this model" contract — the menu
+// module disables the chip (dimmed, composer.thinkUnsupported tooltip, menu
+// cannot open). A missing/malformed set means "unknown model" and keeps
+// today's default-five behavior.
 function setSupportedThinkingLevels(levels) {
   thinkingMenu?.setLevels(levels);
 }
@@ -4151,9 +4180,19 @@ async function openSettings() {
         const s = data.data;
         // Auto-compaction toggle
         toggleAutoCompact.className = `settings-toggle${s.autoCompactionEnabled ? " on" : ""}`;
-        // Thinking level
+        // Thinking level. Empty `thinkingLevels` = current model has no
+        // controllable thinking depth: disable the click-to-cycle button with
+        // the same unsupported tooltip as the composer chip (the server also
+        // rejects cycle_thinking_level with that exact message).
         if (Array.isArray(s.thinkingLevels)) {
           setSupportedThinkingLevels(s.thinkingLevels);
+          const thinkingUnsupported = s.thinkingLevels.length === 0;
+          btnThinkingLevel.disabled = thinkingUnsupported;
+          if (thinkingUnsupported) {
+            btnThinkingLevel.title = t("composer.thinkUnsupported");
+          } else {
+            btnThinkingLevel.title = t("settings.thinkingCycle");
+          }
         }
         btnThinkingLevel.textContent = formatThinkingLevelLabel(s.thinkingLevel);
         currentThinkingLevel = s.thinkingLevel || "off";

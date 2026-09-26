@@ -4396,6 +4396,29 @@ body.hide-thinking .thinking-block {
   background: var(--bg-glass-hover);
 }
 
+/* Chip disabled — the current model has no controllable thinking depth
+   (server contract: get_state `thinkingLevels: []`). Dimmed, not clickable,
+   hover feedback suppressed. Applies to both the settings value button and
+   the composer chip; the composer variant keeps its transparent resting
+   surface so disabling never paints a new box. */
+.thinking-tag:disabled,
+.thinking-tag:disabled:hover,
+.settings-value-btn:disabled,
+.settings-value-btn:disabled:hover {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--bg-glass);
+  border-color: var(--border);
+}
+
+.composer-toolbar .thinking-tag:disabled,
+.composer-toolbar .thinking-tag:disabled:hover {
+  background: transparent;
+  border-color: transparent;
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Menus anchored in the composer open upward, right-aligned */
 .composer-toolbar .model-dropdown-menu {
   top: auto;

@@ -694,12 +694,19 @@ function errMessage(e: unknown): string {
 // resolves from exactly this field (ModelControls.getAvailableThinkingLevels
 // → pi-catalog getSupportedEfforts(model) → model.thinking.efforts).
 //
+// The pi-catalog type is explicit that `thinking.efforts` is never empty: "a
+// reasoning model without a controllable effort surface carries
+// `thinking: undefined`". So an absent `thinking` (or a non-array/empty
+// `efforts`) on a REACHABLE model object is not doubt — it is the catalog
+// saying "no user-facing depth control". The contract with the GUI:
+//   - `[]`                → model has NO controllable thinking depth (chip disabled)
+//   - fallback 5-level set → model object unreachable (no ctx.model / registry
+//                           lookup failed) — we simply don't know
+//
 // The extension API only exposes getThinkingLevel/setThinkingLevel — no
-// per-model level getter — so we read the baked field off `ctx.model`
-// directly, feature-detecting every step. On any doubt we fall back to the
-// classic 5-level cycle set so a GUI menu built from this array never ends
-// up empty or wrong-shaped. `xhigh`/`max` appear ONLY when the model's own
-// metadata lists them.
+// per-model level getter — so we read the baked field off the model object
+// directly, feature-detecting every step. `xhigh`/`max` appear ONLY when the
+// model's own metadata lists them.
 
 // Canonical effort order, least → most intensive (pi-catalog `Effort`).
 const THINKING_EFFORT_ORDER: readonly string[] = [
@@ -711,29 +718,40 @@ const THINKING_EFFORT_ORDER: readonly string[] = [
   "max",
 ];
 
-// Today's cycle set — the safe default when the model surface is unreadable.
+// Today's cycle set — the safe default ONLY when the model surface is
+// unreachable (we don't know the model at all).
 const FALLBACK_THINKING_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high"];
+
+// Whether the model reports a reasoning surface (`model.reasoning === true`).
+// Anything else (false, undefined, unreachable) reports false; the GUI uses
+// this only as a secondary signal next to `thinkingLevels`.
+function modelSupportsReasoning(model: unknown): boolean {
+  return (
+    !!model && typeof model === "object" && (model as { reasoning?: unknown }).reasoning === true
+  );
+}
 
 // Resolve the thinking levels the CURRENT model supports, ordered least →
 // most intensive with "off" first. Never throws.
 function resolveThinkingLevels(model: unknown): string[] {
   if (!model || typeof model !== "object") {
+    // Model object unreachable (no ctx.model / registry lookup failed) —
+    // we simply don't know → today's cycle set.
     return [...FALLBACK_THINKING_LEVELS];
   }
-  const m = model as { reasoning?: unknown; thinking?: { efforts?: unknown } };
-  // The surface explicitly says this model cannot reason at all.
-  if (m.reasoning === false) return ["off"];
+  const m = model as { thinking?: { efforts?: unknown } };
   const efforts = m.thinking?.efforts;
   if (!Array.isArray(efforts) || efforts.length === 0) {
-    // No usable ladder metadata (model missing, or a reasoning model without
-    // a controllable effort surface we can't distinguish from a bad read) →
-    // doubt → today's cycle set.
-    return [...FALLBACK_THINKING_LEVELS];
+    // Per the pi-catalog contract, a model without a controllable effort
+    // surface carries `thinking: undefined` (efforts is never empty on
+    // models that DO have a ladder). EMPTY array = no user-facing depth
+    // control — the GUI disables the chip on this.
+    return [];
   }
   const levels = efforts.filter(
     (e): e is string => typeof e === "string" && THINKING_EFFORT_ORDER.includes(e),
   );
-  if (levels.length === 0) return [...FALLBACK_THINKING_LEVELS];
+  if (levels.length === 0) return [];
   levels.sort((a, b) => THINKING_EFFORT_ORDER.indexOf(a) - THINKING_EFFORT_ORDER.indexOf(b));
   return ["off", ...levels];
 }
@@ -2084,7 +2102,9 @@ export default function (omp: ExtensionAPI) {
     const thinkingLevel = aomp?.getThinkingLevel() ?? "off";
     // Keep in sync with the `get_state` response below: both feed the GUI's
     // thinking menu, which filters unsupported levels via `thinkingLevels`.
+    // `reasoning` is the secondary capability signal (model.reasoning === true).
     const thinkingLevels = resolveThinkingLevels(model);
+    const reasoning = modelSupportsReasoning(model);
     const sessionName = aomp?.getSessionName() ?? "";
     const sessionFile = ctx.sessionManager.getSessionFile();
 
@@ -2097,6 +2117,7 @@ export default function (omp: ExtensionAPI) {
       model,
       thinkingLevel,
       thinkingLevels,
+      reasoning,
       sessionName,
       sessionFile,
       isStreaming: !ctx.isIdle(),
@@ -2499,9 +2520,14 @@ export default function (omp: ExtensionAPI) {
             model,
             thinkingLevel: aomp?.getThinkingLevel() ?? "off",
             // Supported levels for THIS model (least → most intensive,
-            // "off" first) — the GUI menu filters on this. Mirrored into
-            // the initial `mirror_sync` snapshot in `buildStateSnapshot`.
+            // "off" first) — the GUI menu filters on this. EMPTY array
+            // means the model has no controllable thinking depth (chip
+            // disabled). Mirrored into the initial `mirror_sync` snapshot
+            // in `buildStateSnapshot`.
             thinkingLevels: resolveThinkingLevels(model),
+            // Secondary capability signal: does the model report a
+            // reasoning surface at all (model.reasoning === true).
+            reasoning: modelSupportsReasoning(model),
             isStreaming: !ctx.isIdle(),
             sessionFile: ctx.sessionManager.getSessionFile(),
             sessionName: aomp?.getSessionName() ?? "",
@@ -2728,7 +2754,19 @@ export default function (omp: ExtensionAPI) {
             sendTo(ws, error("set_model", "No API key for this model"));
             break;
           }
-          sendTo(ws, success("set_model", model));
+          // Ack carries the new model's thinking surface so the GUI can
+          // refresh its depth chip/menu immediately, without waiting for
+          // (or racing) the next get_state fetch. Shape mirrors get_state:
+          // `thinkingLevels: []` = no controllable depth on the new model.
+          sendTo(
+            ws,
+            success("set_model", {
+              model,
+              thinkingLevel: a.getThinkingLevel(),
+              thinkingLevels: resolveThinkingLevels(model),
+              reasoning: modelSupportsReasoning(model),
+            }),
+          );
           break;
         }
 
@@ -2770,9 +2808,17 @@ export default function (omp: ExtensionAPI) {
           // Cycle within the same resolved set the GUI menu
           // (`get_state`/`mirror_sync` `thinkingLevels`) is built from, so
           // cycling never lands on a level the current model doesn't
-          // support. `resolveThinkingLevels` falls back to the classic
-          // 5-level cycle on any doubt.
+          // support. An EMPTY resolved set means the current model has no
+          // controllable thinking depth → explicit error (the GUI also
+          // disables its controls on this).
           const levels = resolveThinkingLevels(ctx?.model);
+          if (levels.length === 0) {
+            sendTo(
+              ws,
+              error("cycle_thinking_level", "This model does not support thinking depth control"),
+            );
+            break;
+          }
           const current = a.getThinkingLevel();
           const idx = levels.indexOf(current ?? "");
           const next = levels[(idx + 1) % levels.length];
@@ -2784,6 +2830,15 @@ export default function (omp: ExtensionAPI) {
         case "set_thinking_level": {
           const a = requireAomp("set_thinking_level");
           if (!a) break;
+          // Same capability gate as cycle_thinking_level: an EMPTY resolved
+          // set means no user-facing depth control on this model.
+          if (resolveThinkingLevels(ctx?.model).length === 0) {
+            sendTo(
+              ws,
+              error("set_thinking_level", "This model does not support thinking depth control"),
+            );
+            break;
+          }
           a.setThinkingLevel(command.level as Parameters<typeof a.setThinkingLevel>[0]);
           sendTo(ws, success("set_thinking_level"));
           break;

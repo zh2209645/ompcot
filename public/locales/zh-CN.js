@@ -279,6 +279,9 @@ export const zhCN = {
   "mcp.argsPlaceholder": "每行一个参数",
   "mcp.envPlaceholder": "KEY=值（每行一条）",
 
+  // ── 无可控思考深度的模型（缺少 effort 档位）──
+  "composer.thinkUnsupported": "当前模型不支持调整思考深度",
+
   // ── 软件包注册表（设置 → 扩展浏览）──
   "pkg.registryLabel": "注册表地址",
   "pkg.registryInvalidUrl": "地址必须是 http(s) 链接",

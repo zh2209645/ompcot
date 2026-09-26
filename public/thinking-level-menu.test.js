@@ -84,8 +84,11 @@ describe("setupThinkingLevelMenu", () => {
     expect(items.find((el) => el.classList.contains("active")).dataset.level).toBe("high");
   });
 
-  test("falls back to the default five levels for a missing, empty or invalid set", () => {
-    for (const invalid of [undefined, null, [], ["off", 42], "low"]) {
+  test("falls back to the default five levels for a missing or invalid set", () => {
+    // NOTE: `[]` is deliberately absent — an explicit empty array is the
+    // server's "no controllable thinking depth" contract and disables the
+    // chip (see the unsupported-models suite below).
+    for (const invalid of [undefined, null, ["off", 42], "low"]) {
       const { button, menu } = setupMenu({ levels: invalid });
       button.click();
       expect(itemsOf(menu).map((el) => el.dataset.level)).toEqual(THINKING_LEVELS);
@@ -231,5 +234,91 @@ describe("setupThinkingLevelMenu", () => {
     });
     expect(noopApi).toBeNull();
     expect(anchored.api).not.toBeNull();
+  });
+});
+
+describe("unsupported models (empty server level set)", () => {
+  test("an explicit empty set disables the chip: tooltip/aria swap, menu cannot open", () => {
+    const { button, menu, api } = setupMenu({ levels: [] });
+
+    expect(api.isSupported()).toBe(false);
+    expect(button.disabled).toBe(true);
+    expect(button.title).toBe("This model does not support thinking depth control");
+    expect(button.getAttribute("aria-label")).toBe(
+      "This model does not support thinking depth control",
+    );
+    // Menu semantics are dropped while unsupported.
+    expect(button.hasAttribute("aria-haspopup")).toBe(false);
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+
+    // Clicking (even programmatically, which bypasses native disabling)
+    // must not open the menu or render any level item.
+    button.click();
+    expect(menu.classList.contains("hidden")).toBe(true);
+    expect(menu.querySelectorAll(".thinking-level-item")).toHaveLength(0);
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  test("setLevels([]) disables the chip and closes an open menu; the disabled style is pinned", () => {
+    const { api, button, menu } = setupMenu({ current: "low" });
+    button.click();
+    expect(menu.classList.contains("hidden")).toBe(false);
+
+    api.setLevels([]);
+    expect(api.isSupported()).toBe(false);
+    expect(button.disabled).toBe(true);
+    expect(menu.classList.contains("hidden")).toBe(true);
+    expect(button.title).toBe("This model does not support thinking depth control");
+
+    // CSS contract: the disabled chip is dimmed and not clickable.
+    const css = readFileSync(join(process.cwd(), "public/style.css"), "utf8");
+    const disabledBody =
+      css.match(
+        /\.thinking-tag:disabled,\s*\.thinking-tag:disabled:hover,\s*\.settings-value-btn:disabled,\s*\.settings-value-btn:disabled:hover\s*\{([^}]+)\}/,
+      )?.[1] || "";
+    expect(disabledBody).not.toBe("");
+    expect(disabledBody).toContain("opacity:");
+    expect(disabledBody).toContain("cursor: not-allowed");
+  });
+
+  test("re-enabling via a fresh set (set_model ack path) updates the chip immediately", () => {
+    const { api, button, menu } = setupMenu({ levels: [] });
+    expect(button.disabled).toBe(true);
+
+    // app.js feeds the set_model ack straight into setLevels: after
+    // switching to a model WITH an effort ladder the chip must come back
+    // synchronously, with no extra round-trip.
+    api.setLevels(["off", "low", "high"]);
+    expect(api.isSupported()).toBe(true);
+    expect(button.disabled).toBe(false);
+    expect(button.title).toBe("Thinking depth controls reasoning. Click to choose.");
+
+    button.click();
+    expect(menu.classList.contains("hidden")).toBe(false);
+    expect(itemsOf(menu).map((el) => el.dataset.level)).toEqual(["off", "low", "high"]);
+  });
+
+  test("the set_model ack seam swaps the rendered set immediately, even while open", () => {
+    const { api, button, menu } = setupMenu({ current: "high" });
+    button.click();
+    expect(itemsOf(menu).map((el) => el.dataset.level)).toEqual(THINKING_LEVELS);
+
+    api.setLevels(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    expect(menu.classList.contains("hidden")).toBe(false);
+    expect(itemsOf(menu).map((el) => el.dataset.level)).toEqual([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+
+    // Switching to an unsupported model through the same seam disables again.
+    api.setLevels([]);
+    expect(api.isSupported()).toBe(false);
+    expect(button.disabled).toBe(true);
+    expect(menu.classList.contains("hidden")).toBe(true);
   });
 });

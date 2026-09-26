@@ -285,6 +285,9 @@ export const en = {
   "mcp.argsPlaceholder": "one argument per line",
   "mcp.envPlaceholder": "KEY=value (one per line)",
 
+  // ── thinking depth on models without a controllable effort surface ──
+  "composer.thinkUnsupported": "This model does not support thinking depth control",
+
   // ── package registry (Settings → Extensions browse) ──
   "pkg.registryLabel": "Package registry",
   "pkg.registryInvalidUrl": "Address must be an http(s) URL",
