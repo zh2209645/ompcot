@@ -3,7 +3,12 @@ import { join } from "node:path";
 import { JSDOM } from "jsdom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { setLanguage } from "./i18n.js";
-import { createModelsReasoning, UNAVAILABLE_RETRY_MS } from "./models-reasoning.js";
+import {
+  createModelsReasoning,
+  isModelSelectorAvailable,
+  normalizeModelSelector,
+  UNAVAILABLE_RETRY_MS,
+} from "./models-reasoning.js";
 
 const html = readFileSync(join(process.cwd(), "public/index.html"), "utf8");
 
@@ -80,6 +85,97 @@ class MockWsClient extends EventTarget {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const change = (dom) => new dom.window.Event("change", { bubbles: true });
+
+// ── Pure selector-normalization table (no DOM needed) ──────────────────────
+
+describe("normalizeModelSelector", () => {
+  const roles = new Map([
+    ["smol", "zai/glm-5.3:high"],
+    ["via-role", "@smol"],
+    ["bare", "gpt-5"],
+    ["unset", null],
+    ["loop-a", "@loop-b"],
+    ["loop-b", "@loop-a"],
+  ]);
+
+  test("strips a trailing :effort suffix when the prefix stays non-empty", () => {
+    expect(normalizeModelSelector("zai/glm-5.3:high")).toBe("zai/glm-5.3");
+    expect(normalizeModelSelector("gpt-5:off")).toBe("gpt-5");
+    expect(normalizeModelSelector("gpt-5:inherit")).toBe("gpt-5");
+    expect(normalizeModelSelector("glm-5.3:MAX")).toBe("glm-5.3"); // case-insensitive suffix
+    // Not an effort word / empty prefix → untouched.
+    expect(normalizeModelSelector("gpt-5:blue")).toBe("gpt-5:blue");
+    expect(normalizeModelSelector(":high")).toBe(":high");
+    // Only ONE trailing suffix is stripped per string.
+    expect(normalizeModelSelector("gpt-5:high:xhigh")).toBe("gpt-5:high");
+  });
+
+  test("resolves @role refs one level through the roles table, stripping again", () => {
+    expect(normalizeModelSelector("@smol", roles)).toBe("zai/glm-5.3");
+    expect(normalizeModelSelector("@bare", roles)).toBe("gpt-5");
+  });
+
+  test("nested @role chains resolve; cycles and unset roles stay flagged", () => {
+    // @via-role → "@smol" → "zai/glm-5.3:high" → "zai/glm-5.3"
+    expect(normalizeModelSelector("@via-role", roles)).toBe("zai/glm-5.3");
+    // Unset / unknown role refs return the raw ref (cannot match any id).
+    expect(normalizeModelSelector("@unset", roles)).toBe("@unset");
+    expect(normalizeModelSelector("@missing", roles)).toBe("@missing");
+    // Cycle guard: stops on the revisited ref instead of looping forever.
+    expect(normalizeModelSelector("@loop-a", roles)).toBe("@loop-a");
+  });
+
+  test("trims and passes plain ids through", () => {
+    expect(normalizeModelSelector("  gpt-5  ")).toBe("gpt-5");
+    expect(normalizeModelSelector("")).toBe("");
+    expect(normalizeModelSelector(null)).toBe("");
+    expect(normalizeModelSelector("claude-opus-4-20250514")).toBe("claude-opus-4-20250514");
+  });
+});
+
+describe("isModelSelectorAvailable", () => {
+  const roles = new Map([
+    ["smol", "zai/glm-5.3:high"],
+    ["unset", null],
+  ]);
+  const list = [
+    { id: "glm-5.3", provider: "zai", contextWindow: 128000 }, // bare id + provider field
+    { id: "gpt-5", provider: "openai", contextWindow: 128000 },
+    { id: "openrouter/anthropic/claude-sonnet-4" }, // provider-prefixed id shape
+  ];
+
+  test("matches exact, case-insensitive, effort-suffixed and role-ref selectors", () => {
+    expect(isModelSelectorAvailable("gpt-5", list)).toBe(true);
+    expect(isModelSelectorAvailable("GPT-5", list)).toBe(true);
+    expect(isModelSelectorAvailable("zai/glm-5.3:high", list)).toBe(true);
+    expect(isModelSelectorAvailable("@smol", list, roles)).toBe(true);
+    expect(isModelSelectorAvailable("openrouter/anthropic/claude-sonnet-4", list)).toBe(true);
+  });
+
+  test("matches provider-prefixed selector vs bare id and the reverse", () => {
+    // Selector carries the provider prefix, available id is bare.
+    expect(isModelSelectorAvailable("zai/glm-5.3", list)).toBe(true);
+    // Bare selector vs provider-prefixed id (last segment).
+    expect(isModelSelectorAvailable("claude-sonnet-4", list)).toBe(true);
+    // provider/id exact composite also matches.
+    expect(isModelSelectorAvailable("zai/glm-5.3", [{ id: "glm-5.3", provider: "zai" }])).toBe(
+      true,
+    );
+  });
+
+  test("flags only genuinely-absent base ids", () => {
+    expect(isModelSelectorAvailable("custom-local-model", list)).toBe(false);
+    expect(isModelSelectorAvailable("custom/local:high", list)).toBe(false);
+    // Unresolved role ref → raw "@unset" cannot match → flagged.
+    expect(isModelSelectorAvailable("@unset", list, roles)).toBe(false);
+    expect(isModelSelectorAvailable("@missing", list, roles)).toBe(false);
+    // Different provider with same last segment: both-prefixed needs exact.
+    expect(isModelSelectorAvailable("other/glm-5.3", [{ id: "zai/glm-5.3" }])).toBe(false);
+    // Nothing stored → nothing to flag.
+    expect(isModelSelectorAvailable("", list)).toBe(true);
+    expect(isModelSelectorAvailable(null, list)).toBe(true);
+  });
+});
 
 describe("models & reasoning page", () => {
   let dom;
@@ -174,6 +270,63 @@ describe("models & reasoning page", () => {
 
     // Footnote at the section bottom.
     expect($(".mr-footnote").textContent).toContain("settings overrides");
+  });
+
+  test("effort-suffixed and @role selectors render unflagged; only genuinely-absent ids are flagged", async () => {
+    const ctx = setup();
+    await loadPage(ctx, {
+      config: {
+        ...CONFIG,
+        roles: [
+          { id: "default", current: "zai/glm-5.3:high" }, // effort suffix, base id available
+          { id: "smol", current: "gpt-5" },
+          { id: "plan", current: "@smol" }, // role ref → resolves to gpt-5
+          { id: "vision", current: "@unset-role" }, // unresolved role ref → flagged
+          { id: "advisor", current: "custom-local-model" }, // genuinely absent → flagged
+        ],
+        taskAgents: [
+          {
+            ...CONFIG.taskAgents[0],
+            overrideModel: "glm-5.3:low", // bare-selector form of an available id
+          },
+        ],
+      },
+      models: [
+        { id: "glm-5.3", provider: "zai", contextWindow: 128000 },
+        { id: "gpt-5", provider: "openai", contextWindow: 128000 },
+      ],
+    });
+
+    const optionTexts = (rowKey) =>
+      Array.from($(`[data-mr-row="${rowKey}"] select`).options).map((o) => o.textContent);
+
+    // Effort suffix: raw selector stays selected and visible, unflagged.
+    expect($('[data-mr-row="default-model"] select').value).toBe("zai/glm-5.3:high");
+    expect(
+      optionTexts("default-model").some((text) => text.includes("not in available list")),
+    ).toBe(false);
+
+    // @smol resolves to gpt-5 → unflagged extra option.
+    expect($('[data-mr-row="role:plan"] select').value).toBe("@smol");
+    expect(optionTexts("role:plan").some((text) => text.includes("not in available list"))).toBe(
+      false,
+    );
+
+    // Unresolved role ref and genuinely-absent id stay flagged.
+    expect(optionTexts("role:vision").some((text) => text.includes("not in available list"))).toBe(
+      true,
+    );
+    expect(optionTexts("role:advisor").some((text) => text.includes("not in available list"))).toBe(
+      true,
+    );
+
+    // Task-agent override in bare form still matches the available id → unflagged.
+    expect($('[data-mr-row="agent:explorer"] .mr-override select').value).toBe("glm-5.3:low");
+    expect(
+      Array.from($('[data-mr-row="agent:explorer"] .mr-override select').options).some((o) =>
+        o.textContent.includes("not in available list"),
+      ),
+    ).toBe(false);
   });
 
   test("default model and thinking depth save via RPC, then refetch", async () => {

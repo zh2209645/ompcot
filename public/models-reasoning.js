@@ -13,9 +13,13 @@
 // - Every mutation fires immediately on control change, shows per-row
 //   saving/saved/error status (server error text verbatim), then refetches the
 //   configuration so the page always mirrors server state.
-// - A stored selector missing from the available-models list renders as an
-//   extra flagged option (⚠ not in available list) instead of being silently
-//   dropped by the rebuild.
+// - A stored selector whose NORMALIZED base id is genuinely absent from the
+//   available-models list renders as an extra flagged option (⚠ not in
+//   available list) instead of being silently dropped by the rebuild.
+//   Selectors are not bare registry ids — real omp accepts `zai/glm-5.3:high`
+//   (provider-prefixed + effort suffix), `@smol` (role reference), aliases,
+//   and bare ids — so the flag check compares after normalization
+//   (normalizeModelSelector / isModelSelectorAvailable below).
 // - `available: false` degrades to an unavailable note AND schedules a
 //   bounded silent retry (the embedded server can still be initializing on
 //   the first page load — the note is not a dead end); a failed fetch keeps
@@ -33,6 +37,120 @@ const OK_STATUS_MS = 2000;
 // up. Reopening the page restarts the budget. Exported for the tests.
 export const UNAVAILABLE_RETRY_MS = 5000;
 const UNAVAILABLE_RETRY_MAX = 3;
+
+// ── Model-selector normalization (exported pure helpers) ────────────────
+//
+// Stored model selectors are not necessarily bare registry ids:
+//   zai/glm-5.3:high  provider-prefixed + trailing `:effort` suffix
+//   @smol             role reference — resolves to that role's current model
+//   glm-5.3           bare id (available lists may be prefixed or bare)
+// The not-in-list check must compare the normalized base id, or every
+// legitimate selector shape gets flagged 「模型未在可用列表」.
+
+// Effort words that may appear as a selector's trailing `:effort` suffix.
+// "off"/"inherit" are agent-local thinking values, not persisted-default
+// enum options, but a stored selector may still carry them.
+export const MODEL_SELECTOR_EFFORTS = new Set([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "auto",
+  "off",
+  "inherit",
+]);
+
+// Strip ONE trailing `:effort` suffix. Only strips when the remaining
+// prefix is non-empty (":high" stays) and the suffix is a known effort word
+// ("gpt-5:blue" stays — that may be a real id).
+function stripTrailingEffort(value) {
+  const idx = value.lastIndexOf(":");
+  if (idx <= 0) return value;
+  const suffix = value.slice(idx + 1).toLowerCase();
+  if (!MODEL_SELECTOR_EFFORTS.has(suffix)) return value;
+  return value.slice(0, idx);
+}
+
+function lookupRoleCurrent(rolesById, roleId) {
+  if (!rolesById) return null;
+  if (typeof rolesById.get === "function") {
+    const current = rolesById.get(roleId);
+    return typeof current === "string" ? current : null;
+  }
+  const current = rolesById[roleId];
+  return typeof current === "string" ? current : null;
+}
+
+/**
+ * Reduce a stored model selector to the base id used for list matching:
+ * trim → strip a trailing `:effort` suffix → resolve `@role` references
+ * through the current roles table (one level per spec, with a cycle guard;
+ * the resolved value gets its effort suffix stripped again). An unresolved
+ * role reference (the role itself is unset/unknown) returns the raw ref —
+ * it cannot match any model id, so it stays flagged, which is correct.
+ *
+ * @param {string|null|undefined} selector stored selector value
+ * @param {Map<string, string|null>|Record<string, string>|null} rolesById
+ *   role id → the role's current selector (Map or plain object)
+ * @returns {string} normalized base id ("" for empty input)
+ */
+export function normalizeModelSelector(selector, rolesById = null) {
+  let value = String(selector ?? "").trim();
+  if (!value) return "";
+  value = stripTrailingEffort(value);
+  const seen = new Set();
+  while (value.startsWith("@")) {
+    if (seen.has(value)) break; // @a → @b → @a cycle: stop, stays flagged
+    seen.add(value);
+    const current = lookupRoleCurrent(rolesById, value.slice(1));
+    if (typeof current !== "string" || !current.trim()) return value;
+    value = stripTrailingEffort(current.trim());
+  }
+  return value;
+}
+
+function lastSegmentLower(id) {
+  const lower = String(id).toLowerCase();
+  const idx = lower.lastIndexOf("/");
+  return idx >= 0 ? lower.slice(idx + 1) : null;
+}
+
+/**
+ * Is the stored selector's normalized base id genuinely present in the
+ * available-models list? get_available_models entries look like
+ * `{ id, provider, contextWindow }` where `id` may be bare (`gpt-5`) or
+ * provider-prefixed (`zai/glm-5.3`) depending on the provider, so we match
+ *   - exact id (case-insensitive),
+ *   - `${provider}/${id}` when the entry carries a provider,
+ *   - cross bare↔prefixed last-segment: selector `zai/glm-5.3` vs id
+ *     `glm-5.3`, and the reverse.
+ * Both-prefixed ids must match exactly (no last-segment guess — different
+ * providers can share a model name).
+ *
+ * @param {string} selector stored selector value
+ * @param {Array<{id: string, provider?: string}>} models available list
+ * @returns {boolean} true when available or nothing is stored
+ */
+export function isModelSelectorAvailable(selector, models, rolesById = null) {
+  const base = normalizeModelSelector(selector, rolesById);
+  if (!base) return true; // nothing stored → nothing to flag
+  const baseLower = base.toLowerCase();
+  const baseLast = lastSegmentLower(base);
+  for (const model of Array.isArray(models) ? models : []) {
+    const id = typeof model?.id === "string" ? model.id : "";
+    if (!id) continue;
+    const idLower = id.toLowerCase();
+    if (baseLower === idLower) return true;
+    const provider = typeof model?.provider === "string" ? model.provider.toLowerCase() : "";
+    if (provider && baseLower === `${provider}/${idLower}`) return true;
+    const idLast = lastSegmentLower(id);
+    if (baseLast && !idLast && baseLast === idLower) return true;
+    if (idLast && !baseLast && baseLower === idLast) return true;
+  }
+  return false;
+}
 
 function cssEscape(value) {
   return typeof window.CSS?.escape === "function" ? window.CSS.escape(value) : value;
@@ -82,6 +200,17 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
   const unsubscribeLanguage = onLanguageChanged(() => render());
 
   const rpcOptions = () => ({ timeoutMs: requestTimeoutMs });
+
+  // Role id → the role's current selector, for `@role` reference resolution
+  // in the not-in-list check (see normalizeModelSelector).
+  function rolesById() {
+    const map = new Map();
+    for (const role of Array.isArray(config?.roles) ? config.roles : []) {
+      if (!role || typeof role.id !== "string" || role.id.length === 0) continue;
+      map.set(role.id, typeof role.current === "string" ? role.current : null);
+    }
+    return map;
+  }
 
   // ── Row statuses (painted into whatever render() last built) ────────────
 
@@ -200,9 +329,12 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
 
   /**
    * Model picker as a plain select. Options: optional empty option (Not set /
-   * No override), then every available model, then — when the stored selector
-   * is not among them — the stored value as a flagged extra option so a
-   * stale/custom selector stays visible instead of being silently dropped.
+   * No override), then every available model, then — when the stored
+   * selector is not literally among them — the stored value as an extra
+   * option so a stale/custom selector stays visible instead of being
+   * silently dropped. The extra option is flagged (⚠ not in available list)
+   * only when the selector's NORMALIZED base id is genuinely absent
+   * (effort suffix / `@role` ref / provider-prefix variants render clean).
    */
   function buildModelSelect({ value, emptyKey, ariaLabel, onChange }) {
     const select = document.createElement("select");
@@ -229,10 +361,12 @@ export function createModelsReasoning({ root, wsClient, requestTimeoutMs } = {})
 
     const current = typeof value === "string" ? value : "";
     if (current && !known.has(current)) {
-      const flagged = document.createElement("option");
-      flagged.value = current;
-      flagged.textContent = `⚠ ${current} (${t("models.notInList")})`;
-      select.appendChild(flagged);
+      const extra = document.createElement("option");
+      extra.value = current;
+      extra.textContent = isModelSelectorAvailable(current, models, rolesById())
+        ? current
+        : `⚠ ${current} (${t("models.notInList")})`;
+      select.appendChild(extra);
     }
 
     select.value = current;

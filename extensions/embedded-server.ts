@@ -841,6 +841,11 @@ export type ModelConfigCliValues = {
   cycleOrder: string[] | null;
   modelTags: Record<string, unknown> | null;
   defaultThinkingLevel: string | null;
+  // Task-agent settings: needed to render override/disabled state when the
+  // in-process instance is unreachable — the same keys the CLI write
+  // fallback (createModelConfigWriter) persists to the global layer.
+  taskAgentModelOverrides: Record<string, unknown> | null;
+  taskDisabledAgents: string[] | null;
 };
 
 // Pure parser: mine the model/reasoning keys out of a parsed
@@ -864,6 +869,8 @@ export function extractModelConfigCliValues(catalog: unknown): ModelConfigCliVal
   const cycleOrderRaw = entryValue("cycleOrder");
   const modelTagsRaw = entryValue("modelTags");
   const levelRaw = entryValue("defaultThinkingLevel");
+  const taskOverridesRaw = entryValue("task.agentModelOverrides");
+  const taskDisabledRaw = entryValue("task.disabledAgents");
   return {
     modelRoles: asRecord(modelRolesRaw),
     cycleOrder: Array.isArray(cycleOrderRaw)
@@ -871,6 +878,10 @@ export function extractModelConfigCliValues(catalog: unknown): ModelConfigCliVal
       : null,
     modelTags: asRecord(modelTagsRaw),
     defaultThinkingLevel: typeof levelRaw === "string" && levelRaw.trim() ? levelRaw : null,
+    taskAgentModelOverrides: asRecord(taskOverridesRaw),
+    taskDisabledAgents: Array.isArray(taskDisabledRaw)
+      ? taskDisabledRaw.filter((v): v is string => typeof v === "string" && !!v.trim())
+      : null,
   };
 }
 
@@ -1127,7 +1138,9 @@ function computeProviderAuthStatus(registry: ModelRegistry, provider: string): P
 // embedded omp version degrades to the CLI fallback instead of crashing the
 // extension. This is a source-level contract, not a documented API.
 
-type OmpSettingsInstanceLike = {
+// Exported for the model-config writer unit tests (a structural mock of the
+// runtime surface; also used by the in-process code paths below).
+export type OmpSettingsInstanceLike = {
   get?: (path: string) => unknown;
   set?: (path: string, value: unknown) => unknown;
   // Runtime-override layer (wins over global/project in the merged view).
@@ -1148,6 +1161,176 @@ type OmpSettingsStaticLike = {
   instance?: OmpSettingsInstanceLike | null;
   SETTINGS_SCHEMA?: Record<string, unknown>;
 };
+
+// ─── Model-config write path: in-process first, `omp config` CLI fallback ────
+//
+// v0.8.1 bug: the four Models & Reasoning setters hard-required the
+// in-process Settings singleton, so every save errored with "In-process
+// Settings surface is unavailable in this build" whenever the instance was
+// unreachable — which in the real app is the common case (the catalog reads
+// already run through the `omp config` CLI fallback for exactly that
+// reason, source:"cli"). The CLI CAN express these writes; the only open
+// question was VALUE serialization, settled by smoke-testing omp 18.3.0 in
+// an isolated HOME (round-trip verified via `omp config get <key> --json`).
+
+// `omp config set <KEY> <VALUE>` VALUE serialization (verified against omp
+// 18.3.0, isolated HOME):
+//   - records/arrays MUST be passed as JSON text:
+//       omp config set modelRoles '{"default":"gpt-5"}'
+//     round-trips as a real record (config.yml gets structured YAML).
+//     The naive String(value) form is REJECTED — "Invalid record JSON:
+//     [object Object]" — which is why these writes originally had no CLI
+//     fallback.
+//   - scalar strings MUST be passed BARE. A JSON-quoted scalar ('"low"') is
+//     kept literally WITH its quotes and fails schema validation
+//     (`Invalid value: "low". Valid values: minimal, low, …`).
+// So: strings pass through verbatim; records/arrays/numbers/booleans are
+// JSON.stringify'd. `config set` REPLACES the whole value (no merge) —
+// callers must merge before writing. Invalid values exit non-zero (the
+// exec rejects), so the existing pre-write RPC validation stays the first
+// gate and the CLI is a second one; nothing invalid ever lands on disk.
+export function serializeCliConfigValue(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+// Parse `omp config get <key> --json` stdout (`{ key, value, type,
+// description }`) down to the bare value. Throws on non-JSON output or an
+// unexpected envelope — the caller surfaces that as the read failure.
+export function parseCliConfigGetJson(stdout: string): unknown {
+  const parsed: unknown = JSON.parse(stdout);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const value = (parsed as { value?: unknown }).value;
+    if (value !== undefined) return value;
+  }
+  throw new Error("omp config get --json produced an unexpected envelope");
+}
+
+// Pure static helpers shared by the model-config read/write surfaces.
+
+function readSettingsValue(instance: OmpSettingsInstanceLike | null, key: string): unknown {
+  if (!instance || typeof instance.get !== "function") return undefined;
+  try {
+    return instance.get(key);
+  } catch {
+    return undefined;
+  }
+}
+
+function asPlainRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return { ...(value as Record<string, unknown>) };
+}
+
+function asStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter((v): v is string => typeof v === "string" && !!v.trim());
+}
+
+// Injectable core of the Models & Reasoning write path (backs the four
+// `set_*` RPCs). Module-scoped with injected surfaces so the fallback flow
+// — in-process first, CLI second, error only when BOTH fail — is unit
+// testable without a live omp runtime. `execCli` receives the full argument
+// vector after the omp binary, e.g. ["config", "set", key, serialized].
+export type ModelConfigWriterDeps = {
+  getInstance: () => OmpSettingsInstanceLike | null;
+  execCli: (args: string[]) => Promise<string>;
+  onError?: (message: string, err?: unknown) => void;
+};
+
+export type ModelConfigWriter = {
+  readSettingValue(key: string): Promise<unknown>;
+  writeStructuredSetting(key: string, value: unknown): Promise<void>;
+  writeTaskAgentSetting(key: string, value: unknown): Promise<void>;
+};
+
+export function createModelConfigWriter(deps: ModelConfigWriterDeps): ModelConfigWriter {
+  const log = deps.onError ?? ((message: string, err?: unknown) => console.error(message, err));
+
+  // Current value for a read-modify-write merge. In-process effective value
+  // when the instance is reachable (for the HOST_DEFAULTED task.* keys this
+  // includes the runtime-override layer, so a merge never drops it);
+  // otherwise one fresh `omp config get <key> --json` round-trip. A CLI
+  // read failure rejects BEFORE any write — merging onto an unreadable
+  // value would silently wipe sibling keys/entries.
+  async function readSettingValue(key: string): Promise<unknown> {
+    const instance = deps.getInstance();
+    if (instance && typeof instance.get === "function") {
+      return readSettingsValue(instance, key);
+    }
+    const stdout = await deps.execCli(["config", "get", key, "--json"]);
+    return parseCliConfigGetJson(stdout);
+  }
+
+  // Structured (record/array/scalar) persisted write: in-process set() +
+  // flush() when available (persists to the global layer AND is effective
+  // in-process immediately), else `omp config set` (persists globally; see
+  // serializeCliConfigValue for the VALUE form). Errors only when BOTH
+  // paths fail, naming both failures.
+  async function writeStructuredSetting(key: string, value: unknown): Promise<void> {
+    const instance = deps.getInstance();
+    let inProcessFailure: string;
+    if (instance && typeof instance.set === "function") {
+      try {
+        instance.set(key, value);
+        // set() persists on a debounce; flush before continuing so the
+        // write survives an immediately-following process exit.
+        if (typeof instance.flush === "function") {
+          await instance.flush();
+        }
+        return;
+      } catch (err: unknown) {
+        inProcessFailure = errMessage(err);
+        log(`[Embedded] in-process set() failed for ${key} — falling back to CLI:`, err);
+      }
+    } else {
+      inProcessFailure = "in-process Settings surface is unavailable in this build";
+    }
+    try {
+      await deps.execCli(["config", "set", key, serializeCliConfigValue(value)]);
+    } catch (cliErr: unknown) {
+      throw new Error(
+        `cannot persist ${key}: in-process Settings write failed (${inProcessFailure}) and the \`omp config set\` fallback failed too (${errMessage(cliErr)})`,
+      );
+    }
+  }
+
+  // Persist + runtime-sync for the task-agent settings.
+  // `task.disabledAgents` and `task.agentModelOverrides` are in omp's
+  // HOST_DEFAULTED_SETTING_PATHS (main.ts): in RPC mode the runtime
+  // installs a runtime-override layer carrying the schema default whenever
+  // the path is not otherwise configured, and that override SHADOWS
+  // global-layer writes in Settings.get(). Persisting via set() alone
+  // therefore lands on disk (config.yml, verified) but reads back as the
+  // stale default until the override is mirrored. With an in-process
+  // instance we mirror immediately, so the effective view (the live task
+  // tool AND get_model_configuration) matches right away.
+  //
+  // WITHOUT an instance (CLI write path) the mirror is impossible: the
+  // write is persisted to the global layer and applies to NEW sessions and
+  // freshly spawned omp processes. Reads reflect that global layer too —
+  // get_model_configuration's CLI fallback reads the same file — so the
+  // page shows the saved value, but already-running sessions in THIS
+  // process keep the host default until the process restarts (on the next
+  // start omp's `isConfigured` guard sees the persisted value and skips
+  // re-installing the default, so the layers converge). Logged, not hidden.
+  async function writeTaskAgentSetting(key: string, value: unknown): Promise<void> {
+    await writeStructuredSetting(key, value);
+    const instance = deps.getInstance();
+    if (instance && typeof instance.override === "function") {
+      try {
+        instance.override(key, value);
+      } catch (err: unknown) {
+        log(`[Embedded] runtime-override sync failed for ${key}:`, err);
+      }
+      return;
+    }
+    log(
+      `[Embedded] ${key} persisted via the CLI fallback without an in-process Settings instance — the runtime-override layer was not mirrored; the change applies to new sessions/spawns, and running sessions keep the host default until restart`,
+    );
+  }
+
+  return { readSettingValue, writeStructuredSetting, writeTaskAgentSetting };
+}
 
 // ─── Agent roster + MCP surfaces (B1/B2) ──────────────────────────────────────
 //
@@ -3657,6 +3840,15 @@ export default function (omp: ExtensionAPI) {
     return null;
   }
 
+  // Models & Reasoning write path (see createModelConfigWriter at module
+  // scope): in-process Settings first, `omp config` CLI fallback second —
+  // the same surface pairing the read path already uses. execCli binds the
+  // embedded omp binary and the standard CLI timeout.
+  const modelConfigWriter = createModelConfigWriter({
+    getInstance: getSettingsInstance,
+    execCli: (args) => execOmpCli(args, OMP_CLI_TIMEOUT_MS),
+  });
+
   // Enumerate setting keys + metadata in-process. We try, in order:
   //   1. instance.list() / instance.entries() — full rows (key/value/type/
   //      description/redacted) when the runtime exposes them,
@@ -3857,11 +4049,11 @@ export default function (omp: ExtensionAPI) {
   // `set_task_agent_model_override`, `set_task_agent_disabled`.
   //
   // Reads go through the in-process Settings singleton (merged effective
-  // values); writes are read-modify-write of the whole setting value through
-  // instance.set() + flush() — the same persisted-settings path as every
-  // other write in this file. There is deliberately NO CLI fallback for the
-  // structured writes: `omp config set` stringifies values, which would
-  // corrupt records/arrays (`[object Object]`).
+  // values) with a `omp config list --json` fallback; writes are
+  // read-modify-write of the whole setting value through
+  // modelConfigWriter (in-process set() + flush() first, `omp config set`
+  // with JSON-serialized values second — see serializeCliConfigValue for
+  // the CLI VALUE form verified against omp 18.3.0).
 
   type ModelRoleRow = { id: string; current: string | null };
 
@@ -3939,63 +4131,6 @@ export default function (omp: ExtensionAPI) {
     return await globalState.modelRolesModuleCache.promise;
   }
 
-  function readSettingsValue(instance: OmpSettingsInstanceLike | null, key: string): unknown {
-    if (!instance || typeof instance.get !== "function") return undefined;
-    try {
-      return instance.get(key);
-    } catch {
-      return undefined;
-    }
-  }
-
-  function asPlainRecord(value: unknown): Record<string, unknown> | null {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-    return { ...(value as Record<string, unknown>) };
-  }
-
-  function asStringArray(value: unknown): string[] | null {
-    if (!Array.isArray(value)) return null;
-    return value.filter((v): v is string => typeof v === "string" && !!v.trim());
-  }
-
-  // Structured (record/array) persisted write: in-process Settings only.
-  async function writeStructuredSetting(key: string, value: unknown): Promise<void> {
-    const instance = getSettingsInstance();
-    if (!instance || typeof instance.set !== "function") {
-      throw new Error(
-        "In-process Settings surface is unavailable in this build — cannot persist structured setting",
-      );
-    }
-    instance.set(key, value);
-    if (typeof instance.flush === "function") {
-      await instance.flush();
-    }
-  }
-
-  // Persist + runtime-sync for the task-agent settings. `task.disabledAgents`
-  // and `task.agentModelOverrides` are in omp's HOST_DEFAULTED_SETTING_PATHS
-  // (main.ts): in RPC mode the runtime installs a runtime-override layer
-  // carrying the schema default whenever the path is not otherwise
-  // configured, and that override SHADOWS global-layer writes in
-  // Settings.get(). Persisting via set() alone therefore lands on disk
-  // (config.yml, verified) but reads back as the stale default until process
-  // restart. After persisting we mirror the value into the runtime layer via
-  // override() so the effective view (the live task tool AND
-  // get_model_configuration) matches immediately. On the next process start
-  // omp's guard (`isConfigured`) sees the persisted global value and skips
-  // re-installing the host default, so the layers converge.
-  async function writeTaskAgentSetting(key: string, value: unknown): Promise<void> {
-    await writeStructuredSetting(key, value);
-    const instance = getSettingsInstance();
-    if (instance && typeof instance.override === "function") {
-      try {
-        instance.override(key, value);
-      } catch (err: unknown) {
-        console.error(`[Embedded] runtime-override sync failed for ${key}:`, errMessage(err));
-      }
-    }
-  }
-
   function isValidRoleOrAgentKey(value: string): boolean {
     return /^[A-Za-z0-9_-]{1,64}$/.test(value);
   }
@@ -4035,8 +4170,14 @@ export default function (omp: ExtensionAPI) {
   // string|string[]; thinkingLevel). Project scope wins on name collisions
   // (mirrors discoverAgents precedence). Never throws on weird files:
   // unreadable/unparseable entries come back with parseError:true.
+  //
+  // `cliValues` carries the `omp config list --json` values for the task.*
+  // keys when the in-process instance is unreachable — without it, a
+  // CLI-written override/disable would persist to config.yml but vanish
+  // from the rendered page until an instance appeared.
   async function listTaskAgentDefinitions(
     instance: OmpSettingsInstanceLike | null,
+    cliValues: ModelConfigCliValues | null,
   ): Promise<TaskAgentRow[]> {
     const agentRoot = (() => {
       try {
@@ -4051,10 +4192,18 @@ export default function (omp: ExtensionAPI) {
       { dir: path.join(agentRoot, "agents"), source: "user" },
     ];
 
-    const overrides = asPlainRecord(readSettingsValue(instance, "task.agentModelOverrides")) ?? {};
-    const disabledSet = new Set(
-      asStringArray(readSettingsValue(instance, "task.disabledAgents")) ?? [],
-    );
+    // Settings merge (keyed by agent NAME — verified in omp's agents-hub).
+    // Effective in-process values when the instance is reachable (includes
+    // the runtime-override layer); global-layer CLI catalog values
+    // otherwise, so CLI-written state still renders.
+    const settingsReachable = !!instance && typeof instance.get === "function";
+    const overrides = settingsReachable
+      ? (asPlainRecord(readSettingsValue(instance, "task.agentModelOverrides")) ?? {})
+      : (cliValues?.taskAgentModelOverrides ?? {});
+    const disabledList = settingsReachable
+      ? (asStringArray(readSettingsValue(instance, "task.disabledAgents")) ?? [])
+      : (cliValues?.taskDisabledAgents ?? []);
+    const disabledSet = new Set(disabledList);
 
     const rows: TaskAgentRow[] = [];
     const seenNames = new Set<string>();
@@ -4139,8 +4288,10 @@ export default function (omp: ExtensionAPI) {
   // in-process Settings instance is unreachable (the extension context can
   // still be initializing when the WebView's FIRST page load fires
   // get_model_configuration), re-read the same keys from
-  // `omp config list --json` — the catalog route's pattern. Discriminated
-  // result so the caller logs ONE diagnostic line naming the failure.
+  // `omp config list --json` — the catalog route's pattern. Includes the
+  // task.* keys so CLI-written overrides/disabled state renders.
+  // Discriminated result so the caller logs ONE diagnostic line naming the
+  // failure.
   async function readModelConfigValuesFromCli(): Promise<
     { ok: true; values: ModelConfigCliValues } | { ok: false; reason: string }
   > {
@@ -4179,6 +4330,7 @@ export default function (omp: ExtensionAPI) {
 
     let settingsSource: "inprocess" | "fallback" | "none" = "inprocess";
     let cliFailure: string | null = null;
+    let cliValues: ModelConfigCliValues | null = null;
     let modelRoles: Record<string, unknown> | null = null;
     let cycleOrder: string[] | null = null;
     let modelTags: Record<string, unknown> | null = null;
@@ -4193,6 +4345,7 @@ export default function (omp: ExtensionAPI) {
       const cli = await readModelConfigValuesFromCli();
       if (cli.ok) {
         settingsSource = "fallback";
+        cliValues = cli.values;
         modelRoles = cli.values.modelRoles;
         cycleOrder = cli.values.cycleOrder;
         modelTags = cli.values.modelTags;
@@ -4269,7 +4422,7 @@ export default function (omp: ExtensionAPI) {
       roleIdsKnownOnly: runtimeIds === null && settingsSource !== "inprocess",
       defaultThinkingLevel,
       thinkingLevelOptions: resolveDefaultThinkingLevelOptions(),
-      taskAgents: await listTaskAgentDefinitions(instance),
+      taskAgents: await listTaskAgentDefinitions(instance, cliValues),
       available,
       settingsSource,
     };
@@ -4277,20 +4430,22 @@ export default function (omp: ExtensionAPI) {
 
   // set_model_role: read-modify-write of the whole modelRoles record
   // (sibling keys preserved verbatim). null selector removes the key.
+  // The read falls back to `omp config get modelRoles --json` when the
+  // in-process instance is unreachable; the write falls back to
+  // `omp config set modelRoles <json>` (see modelConfigWriter).
   async function setModelRole(role: string, selector: string | null): Promise<{ ok: true }> {
-    const instance = getSettingsInstance();
-    const record = asPlainRecord(readSettingsValue(instance, "modelRoles")) ?? {};
+    const record = asPlainRecord(await modelConfigWriter.readSettingValue("modelRoles")) ?? {};
     if (selector === null) {
       delete record[role];
     } else {
       record[role] = selector;
     }
-    await writeStructuredSetting("modelRoles", record);
+    await modelConfigWriter.writeStructuredSetting("modelRoles", record);
     return { ok: true };
   }
 
   async function setDefaultThinkingLevel(level: string): Promise<{ ok: true }> {
-    await writeStructuredSetting("defaultThinkingLevel", level);
+    await modelConfigWriter.writeStructuredSetting("defaultThinkingLevel", level);
     return { ok: true };
   }
 
@@ -4300,27 +4455,27 @@ export default function (omp: ExtensionAPI) {
     agent: string,
     model: string | null,
   ): Promise<{ ok: true }> {
-    const instance = getSettingsInstance();
-    const overrides = asPlainRecord(readSettingsValue(instance, "task.agentModelOverrides")) ?? {};
+    const overrides =
+      asPlainRecord(await modelConfigWriter.readSettingValue("task.agentModelOverrides")) ?? {};
     if (model === null) {
       delete overrides[agent];
     } else {
       overrides[agent] = model;
     }
-    await writeTaskAgentSetting("task.agentModelOverrides", overrides);
+    await modelConfigWriter.writeTaskAgentSetting("task.agentModelOverrides", overrides);
     return { ok: true };
   }
 
   async function setTaskAgentDisabled(agent: string, disabled: boolean): Promise<{ ok: true }> {
-    const instance = getSettingsInstance();
-    const list = asStringArray(readSettingsValue(instance, "task.disabledAgents")) ?? [];
+    const list =
+      asStringArray(await modelConfigWriter.readSettingValue("task.disabledAgents")) ?? [];
     const set = new Set(list);
     if (disabled) {
       set.add(agent);
     } else {
       set.delete(agent);
     }
-    await writeTaskAgentSetting("task.disabledAgents", [...set]);
+    await modelConfigWriter.writeTaskAgentSetting("task.disabledAgents", [...set]);
     return { ok: true };
   }
 
