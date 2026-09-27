@@ -4,7 +4,7 @@ import { en } from "./locales/en.js";
 import { zhCN } from "./locales/zh-CN.js";
 
 describe("configuration page map", () => {
-  test("page order follows the omp settings taxonomy, Providers first, Advanced last", () => {
+  test("page order follows the omp settings taxonomy, Providers first, Debug last", () => {
     expect(CONFIG_PAGES.map((page) => page.id)).toEqual([
       "providers",
       "models",
@@ -20,21 +20,23 @@ describe("configuration page map", () => {
       "tasks",
       "other",
       "advanced",
+      "debug",
     ]);
   });
 
-  test("Providers, Models & Reasoning, MCP and Advanced are always-present pages", () => {
+  test("Providers, Models & Reasoning, MCP, Advanced and Debug are always-present pages", () => {
     expect(CONFIG_PAGES.filter((page) => isAlwaysPage(page.id)).map((page) => page.id)).toEqual([
       "providers",
       "models",
       "mcp",
       "advanced",
+      "debug",
     ]);
   });
 
   test("Other is a catalog-driven page ordered after Tasks, before Advanced", () => {
-    // The catch-all bucket hides when the catalog has no unmapped keys —
-    // only Advanced is always present at the end of the strip.
+    // The catch-all bucket hides when the catalog has no unmapped keys — only
+    // the static pages (Advanced, Debug) are always present at the end.
     const other = CONFIG_PAGES.find((page) => page.id === "other");
     expect(other).toBeTruthy();
     expect(isAlwaysPage("other")).toBe(false);

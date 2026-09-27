@@ -38,6 +38,8 @@ export const CONFIG_PAGES = [
   { id: "other", i18nKey: "settings.pages.other" },
   // Raw config.yml editor only — no catalog keys live on this page.
   { id: "advanced", i18nKey: "settings.pages.advanced", always: true },
+  // Debug capture/export — static UI (debug-panel.js), no catalog keys.
+  { id: "debug", i18nKey: "settings.pages.debug", always: true },
 ];
 
 const ALWAYS_PAGE_IDS = new Set(CONFIG_PAGES.filter((page) => page.always).map((page) => page.id));

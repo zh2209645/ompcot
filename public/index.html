@@ -619,6 +619,44 @@
               </div>
             </div>
           </section>
+          <!-- Debug: capture + export the window/process debug bundle -->
+          <section class="settings-config-page" data-config-page="debug" hidden>
+            <div class="settings-section">
+              <div class="settings-section-title" data-i18n="debug.title">Debug capture</div>
+              <p class="settings-help" data-i18n="debug.help">
+                Records this window's console output, WebSocket frames, session routing and
+                transcript operations, plus what the omp process broadcast, into a bounded
+                in-memory buffer. Export writes one JSON file and shows its path.
+              </p>
+              <div class="settings-row">
+                <span class="settings-label settings-label-stack">
+                  <span class="settings-label-main" data-i18n="debug.capture">Capture</span>
+                  <span class="settings-label-sub" data-i18n="debug.captureSub">Record new observations</span>
+                </span>
+                <button class="settings-toggle" id="debug-capture-toggle" aria-pressed="true"></button>
+              </div>
+              <div class="settings-config-meta">
+                <span class="settings-label" data-i18n="debug.windowEntries">Window entries</span>
+                <span class="settings-static-value" id="debug-window-count">0</span>
+              </div>
+              <div class="settings-config-meta">
+                <span class="settings-label" data-i18n="debug.processEntries">omp process entries</span>
+                <span class="settings-static-value" id="debug-process-count"></span>
+              </div>
+              <div class="settings-config-actions">
+                <div class="config-editor-error settings-save-status hidden" id="debug-status"></div>
+                <div class="settings-config-button-group">
+                  <button class="btn-secondary" id="debug-refresh" data-i18n="debug.refresh">Refresh</button>
+                  <button class="btn-primary" id="debug-export" data-i18n="debug.export">Export bundle</button>
+                </div>
+              </div>
+              <p class="settings-help hidden" id="debug-dump-path"></p>
+              <p class="settings-help" data-i18n="debug.note">
+                The bundle lands in the system temp directory (ompcot-debug). It contains no
+                message text or tool output — ids, sizes and routing metadata only.
+              </p>
+            </div>
+          </section>
         </div>
       </div>
     </section>

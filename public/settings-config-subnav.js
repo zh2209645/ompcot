@@ -30,13 +30,13 @@ import { onLanguageChanged, t } from "./i18n.js";
 // Static pages own their entire markup (no shared agent-settings catalog
 // mount, no catalog fetch). Advanced is static by design: it hosts only the
 // raw config.yml editor — unmapped catalog keys render on the Other page.
-const STATIC_PAGES = new Set(["providers", "models", "mcp", "advanced"]);
+const STATIC_PAGES = new Set(["providers", "models", "mcp", "advanced", "debug"]);
 
 // Pages whose loader is a live list: re-run on every activation. Advanced is
 // the one one-shot editor (re-running it would clobber an unsaved config.yml
 // draft); the Providers page reloads on every activation too — its own
 // models.yml editor skips the refetch while the textarea holds unsaved edits.
-const RELOAD_ON_OPEN = new Set(["providers", "models", "mcp"]);
+const RELOAD_ON_OPEN = new Set(["providers", "models", "mcp", "debug"]);
 
 export function createConfigSubnav({ root, catalog, loaders = {} }) {
   const subnavEl = root?.querySelector("#settings-config-subnav") ?? null;

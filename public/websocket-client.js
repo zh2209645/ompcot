@@ -131,6 +131,7 @@ export class WebSocketClient extends EventTarget {
     this.ws.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data);
+        this.captureFrame("in", message);
         this.handleMessage(message);
       } catch (error) {
         console.error("[WS] Failed to parse message:", error);
@@ -222,6 +223,19 @@ export class WebSocketClient extends EventTarget {
     }
   }
 
+  /**
+   * Debug capture sink, installed by the app (`Settings → Debug`). Frames are
+   * summarized by the sink — this class only guarantees it sees both
+   * directions and never that it succeeds.
+   */
+  captureFrame(direction, payload) {
+    try {
+      this.debugSink?.(direction, payload);
+    } catch {
+      /* debug capture must never break the transport */
+    }
+  }
+
   send(data) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       // Prefer broker envelope, while remaining backward-compatible with
@@ -248,6 +262,7 @@ export class WebSocketClient extends EventTarget {
         sessionId: payload.sessionId,
         sourcePort: payload.sourcePort,
       });
+      this.captureFrame("out", payload);
       this.ws.send(JSON.stringify(payload));
       // Return the requestId so callers can correlate a later
       // `command_undeliverable` reply back to the message they sent.

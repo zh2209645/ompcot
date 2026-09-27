@@ -67,6 +67,7 @@ describe("settings configuration sub-pages", () => {
       "tasks",
       "other",
       "advanced",
+      "debug",
     ]);
     expect(pillOf("providers").getAttribute("aria-selected")).toBe("true");
     expect(sectionOf("providers").hidden).toBe(false);
@@ -109,7 +110,15 @@ describe("settings configuration sub-pages", () => {
 
     subnav.onCatalogPageSet(["model", "tools"]);
 
-    expect(pillIds()).toEqual(["providers", "models", "model", "tools", "mcp", "advanced"]);
+    expect(pillIds()).toEqual([
+      "providers",
+      "models",
+      "model",
+      "tools",
+      "mcp",
+      "advanced",
+      "debug",
+    ]);
     expect(subnav.getPage()).toBe("model"); // still non-empty, no fallback
     expect(host().hidden).toBe(false);
 
@@ -140,7 +149,7 @@ describe("settings configuration sub-pages", () => {
 
     expect(subnav.getPage()).toBe("providers");
     expect(sectionOf("other").hidden).toBe(true);
-    expect(pillIds()).toEqual(["providers", "models", "model", "mcp", "advanced"]);
+    expect(pillIds()).toEqual(["providers", "models", "model", "mcp", "advanced", "debug"]);
   });
 
   test("collapses to Providers when the active page has zero catalog entries", () => {
@@ -153,7 +162,15 @@ describe("settings configuration sub-pages", () => {
     expect(subnav.getPage()).toBe("providers");
     expect(pillOf("providers").classList.contains("active")).toBe(true);
     expect(sectionOf("providers").hidden).toBe(false);
-    expect(pillIds()).toEqual(["providers", "models", "model", "tools", "mcp", "advanced"]);
+    expect(pillIds()).toEqual([
+      "providers",
+      "models",
+      "model",
+      "tools",
+      "mcp",
+      "advanced",
+      "debug",
+    ]);
   });
 
   test("Advanced is static: config.yml only — no catalog fetch, no catalog host", () => {
@@ -170,7 +187,15 @@ describe("settings configuration sub-pages", () => {
     expect(subnav.getPage()).toBe("advanced"); // always-present page never falls back
     expect(sectionOf("advanced").hidden).toBe(false);
     expect(host().hidden).toBe(true); // static page — no catalog mount
-    expect(pillIds()).toEqual(["providers", "models", "model", "mcp", "other", "advanced"]);
+    expect(pillIds()).toEqual([
+      "providers",
+      "models",
+      "model",
+      "mcp",
+      "other",
+      "advanced",
+      "debug",
+    ]);
   });
 
   test("a failed catalog load keeps every page reachable instead of hiding them", () => {
@@ -181,7 +206,7 @@ describe("settings configuration sub-pages", () => {
     catalog.load.mockRejectedValueOnce(new Error("boom"));
     subnav.onCatalogPageSet(null);
 
-    expect(pillIds()).toHaveLength(14);
+    expect(pillIds()).toHaveLength(15);
     expect(subnav.getPage()).toBe("model"); // unknown ≠ empty
     expect(host().hidden).toBe(false); // error + retry stays visible
   });

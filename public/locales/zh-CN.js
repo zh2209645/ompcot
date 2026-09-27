@@ -209,6 +209,24 @@ export const zhCN = {
   "settings.pages.tools": "工具",
   "settings.pages.tasks": "任务",
   "settings.pages.advanced": "高级",
+  "settings.pages.debug": "调试",
+  "debug.title": "调试抓取",
+  "debug.help":
+    "把本窗口的控制台输出、WebSocket 帧、会话路由与转录操作，以及 omp 进程广播的内容，记录到一个有上限的内存缓冲区。导出会写成一个 JSON 文件并显示路径。",
+  "debug.capture": "抓取",
+  "debug.captureSub": "记录新的观测",
+  "debug.captureOn": "抓取已开启",
+  "debug.captureOff": "抓取已暂停",
+  "debug.windowEntries": "窗口条目",
+  "debug.processEntries": "omp 进程条目",
+  "debug.unavailable": "不可用",
+  "debug.refresh": "刷新",
+  "debug.export": "导出诊断包",
+  "debug.exporting": "正在导出…",
+  "debug.exported": "已导出 {frontend} 条窗口记录与 {extension} 条进程记录",
+  "debug.exportFailed": "导出失败：{error}",
+  "debug.note":
+    "诊断包写入系统临时目录（ompcot-debug）。其中不含消息正文或工具输出，只有 id、大小与路由元数据。",
 
   // ── command palette ──
   "palette.commands": "命令",

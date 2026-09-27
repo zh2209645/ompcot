@@ -216,6 +216,24 @@ export const en = {
   "settings.pages.tools": "Tools",
   "settings.pages.tasks": "Tasks",
   "settings.pages.advanced": "Advanced",
+  "settings.pages.debug": "Debug",
+  "debug.title": "Debug capture",
+  "debug.help":
+    "Records this window's console output, WebSocket frames, session routing and transcript operations, plus what the omp process broadcast, into a bounded in-memory buffer. Export writes one JSON file and shows its path.",
+  "debug.capture": "Capture",
+  "debug.captureSub": "Record new observations",
+  "debug.captureOn": "Capture enabled",
+  "debug.captureOff": "Capture paused",
+  "debug.windowEntries": "Window entries",
+  "debug.processEntries": "omp process entries",
+  "debug.unavailable": "Unavailable",
+  "debug.refresh": "Refresh",
+  "debug.export": "Export bundle",
+  "debug.exporting": "Exporting…",
+  "debug.exported": "Exported {frontend} window and {extension} process entries",
+  "debug.exportFailed": "Export failed: {error}",
+  "debug.note":
+    "The bundle lands in the system temp directory (ompcot-debug). It contains no message text or tool output — ids, sizes and routing metadata only.",
 
   // ── command palette ──
   "palette.commands": "Commands",

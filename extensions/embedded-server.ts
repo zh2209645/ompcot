@@ -51,6 +51,13 @@ import {
   buildEmptyCostDashboardPayload,
   type CostSession,
 } from "./cost-dashboard-data.ts";
+import {
+  createDebugBuffer,
+  summarizeBroadcast,
+  summarizeCommand,
+  summarizeValue,
+  writeDebugBundle,
+} from "./debug-buffer.ts";
 import { buildProjectSearchMatch } from "./session-search";
 
 // `omp` is compiled with `bun build --compile`. Inside that runtime,
@@ -334,6 +341,25 @@ const BIND_HOST = resolveBindHost();
 const EMBEDDED_OMP_VERSION = process.env.OMCOT_OMP_VERSION || "";
 
 const STATIC_DIR = process.env.OMCOT_STATIC_DIR || findPublicDir();
+
+/**
+ * Process-wide debug buffer: the frames this extension broadcasts, the commands
+ * windows send, and the HTTP routes they hit. Exposed to the GUI through
+ * `GET /api/debug-log` and included in `POST /api/debug-dump` so a rendering
+ * bug can be reported with the traffic that produced it (see debug-buffer.ts).
+ */
+const debugBuffer = createDebugBuffer();
+
+/** Directory the exported debug bundles are written to. */
+const DEBUG_DUMP_DIR = path.join(os.tmpdir(), "ompcot-debug");
+
+function recordDebug(kind: string, data: unknown, coalesceKey: string | null = null): void {
+  try {
+    debugBuffer.log(kind, data, coalesceKey);
+  } catch {
+    /* debug capture must never break a request or an event */
+  }
+}
 
 function findPublicDir(): string {
   const candidates: string[] = [];
@@ -2099,7 +2125,27 @@ export default function (omp: ExtensionAPI) {
   // ═══════════════════════════════════════
   // Helper: broadcast to all clients
   // ═══════════════════════════════════════
+  /**
+   * Coalescing key for a forwarded frame: a streaming message or a running
+   * tool emits hundreds of near-identical frames, and the debug buffer should
+   * hold their transitions, not their deltas (see debug-buffer.ts).
+   */
+  function frameCoalesceKey(data: unknown): string | null {
+    const frame = data as Record<string, unknown> | null;
+    if (frame?.type !== "event") return null;
+    const event = (frame.event ?? {}) as Record<string, unknown>;
+    const message = (event.message ?? {}) as Record<string, unknown>;
+    const identity = message.timestamp ?? event.entryId ?? event.toolCallId ?? null;
+    if (identity === null) return null;
+    return `${String(event.type)}:${String(identity)}`;
+  }
+
   function broadcast(data: unknown) {
+    // Debug capture first: it is bounded and failure-isolated, and a frame that
+    // fails to serialize must not cost us the observation that it happened.
+    try {
+      recordDebug("broadcast", summarizeBroadcast(data), frameCoalesceKey(data));
+    } catch {}
     const json = JSON.stringify(withRouteMeta(data));
     for (const client of globalState.clients) {
       if (client.readyState === WS_OPEN) {
@@ -2855,6 +2901,9 @@ export default function (omp: ExtensionAPI) {
   // Handle commands from browser clients
   // ═══════════════════════════════════════
   async function handleCommand(ws: UnifiedWS, command: RpcCommand) {
+    try {
+      recordDebug("command", summarizeCommand(command as unknown as Record<string, unknown>));
+    } catch {}
     const id = command.id;
     const ctx = latestCtx;
     // Always resolve `omp` from the global publisher rather than the
@@ -5647,6 +5696,9 @@ export default function (omp: ExtensionAPI) {
     urlPath: string,
   ) {
     urlPath = normalizeApiRoutePath(urlPath);
+    try {
+      recordDebug("http", { method: req.method || "GET", path: summarizeValue(urlPath, 200) });
+    } catch {}
 
     // CORS (audit A5): never a wildcard. Mirror the Origin only when it is a
     // loopback origin or matches this request's own Host (same-origin fetch
@@ -5690,6 +5742,80 @@ export default function (omp: ExtensionAPI) {
         healthPayload.lanUrls = lanUrls;
       }
       res.end(JSON.stringify(healthPayload));
+      return;
+    }
+
+    // Debug capture (Settings → Debug): the extension half of the bundle. The
+    // GUI polls this for its live counts and merges it into the exported dump.
+    if (urlPath === "/api/debug-log" && req.method === "GET") {
+      const limitParam = Number.parseInt(
+        new URL(`http://localhost${req.url || urlPath}`).searchParams.get("limit") || "",
+        10,
+      );
+      const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 0;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          entries: debugBuffer.snapshot(limit || debugBuffer.size()),
+          size: debugBuffer.size(),
+          bytes: debugBuffer.bytes(),
+        }),
+      );
+      return;
+    }
+
+    if (urlPath === "/api/debug-dump" && req.method === "POST") {
+      readCappedBody(req, res, async (body) => {
+        let payload: { frontend?: unknown; meta?: unknown } = {};
+        try {
+          payload = body ? (JSON.parse(body) as { frontend?: unknown; meta?: unknown }) : {};
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid JSON body" }));
+          return;
+        }
+        const capturedAt = new Date().toISOString();
+        const safeStamp = capturedAt.replace(/[:.]/g, "-");
+        const frontendEntries = Array.isArray(payload.frontend) ? payload.frontend.length : 0;
+        try {
+          const bundle = {
+            kind: "ompcot-debug-bundle",
+            version: 1,
+            capturedAt,
+            meta: {
+              ...(payload.meta && typeof payload.meta === "object" ? payload.meta : {}),
+              embeddedOmpVersion: EMBEDDED_OMP_VERSION || null,
+              port: globalState.server?.port || PORT,
+              workspaceId,
+              debugDumpDir: DEBUG_DUMP_DIR,
+            },
+            frontend: Array.isArray(payload.frontend) ? payload.frontend : [],
+            extension: debugBuffer.snapshot(),
+            extensionMeta: { size: debugBuffer.size(), bytes: debugBuffer.bytes() },
+          };
+          const written = await writeDebugBundle(
+            path.join(DEBUG_DUMP_DIR, `ompcot-debug-${safeStamp}.json`),
+            bundle,
+            fs.promises as unknown as {
+              mkdir: (path: string, options: { recursive: boolean }) => Promise<unknown>;
+              writeFile: (path: string, data: string, encoding: string) => Promise<unknown>;
+            },
+          );
+          recordDebug("debug-dump", { path: written.path, bytes: written.bytes });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              path: written.path,
+              bytes: written.bytes,
+              frontendEntries,
+              extensionEntries: debugBuffer.size(),
+            }),
+          );
+        } catch (err: unknown) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: errMessage(err) }));
+        }
+      });
       return;
     }
 
