@@ -21,9 +21,17 @@
  *   of painting the view the user already navigated away from.
  */
 
-/** Events that draw into the transcript, and are dropped while an agent owns it. */
+/**
+ * Events that draw into the transcript, and are dropped while an agent owns it.
+ *
+ * `agent_start` is deliberately absent: it paints nothing (it only flips the
+ * streaming state, the typing indicator and the sidebar's running mark), and
+ * dropping it made a run that began during a peek invisible to the sidebar —
+ * the dot never appeared, and the 5s activity reconcile then treated the
+ * window's own process as idle, because the local flag drives that verdict.
+ * `agent_end` stays unfiltered for the same reason in the other direction.
+ */
 const TRANSCRIPT_EVENTS = new Set([
-  "agent_start",
   "message_start",
   "message_update",
   "message_end",

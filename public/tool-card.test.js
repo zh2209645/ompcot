@@ -246,3 +246,59 @@ describe("ToolCardRenderer identity (one card per tool call)", () => {
     expect(container.querySelector(".tool-output").textContent).toBe("after re-render");
   });
 });
+
+describe("ToolCardRenderer status settling", () => {
+  let container;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+  });
+
+  it("settles a history card to done when its result lands, even if the live status still says streaming", () => {
+    // What a peek/suppressed frame leaves behind: the live lookup never saw the
+    // end frame, so the reloaded card is drawn "Working…" — and without the
+    // result settling it, the pill pulsed forever.
+    const renderer = new ToolCardRenderer(container, { statusLookup: () => "streaming" });
+    renderer.createHistoryCard({ toolCallId: "call_9", toolName: "bash", args: { command: "x" } });
+    const pill = container.querySelector(".tool-status");
+    expect(pill.className).toContain("streaming");
+
+    renderer.addHistoryResult("call_9", { content: [{ type: "text", text: "done" }] }, false);
+
+    expect(pill.className).toContain("complete");
+    expect(pill.className).not.toContain("streaming");
+    expect(container.querySelector(".tool-output").textContent).toBe("done");
+  });
+
+  it("keeps an errored history result labelled as an error", () => {
+    const renderer = new ToolCardRenderer(container, { statusLookup: () => "streaming" });
+    renderer.createHistoryCard({ toolCallId: "call_10", toolName: "bash", args: {} });
+
+    renderer.addHistoryResult("call_10", { content: [{ type: "text", text: "boom" }] }, true);
+
+    expect(container.querySelector(".tool-status").className).toContain("error");
+  });
+
+  it("finalizes the card on screen after a re-render dropped the renderer's index", () => {
+    const renderer = new ToolCardRenderer(container);
+    renderer.createToolCard({
+      toolCallId: "call_7",
+      toolName: "bash",
+      args: { command: "x" },
+      status: "streaming",
+      output: "",
+    });
+    // A transcript repaint replaces the DOM and resets the index, then draws
+    // the same call again from the session entries.
+    renderer.clear();
+    renderer.createHistoryCard({ toolCallId: "call_7", toolName: "bash", args: { command: "x" } });
+
+    // The late end frame must land on the visible card, not on a lost index.
+    renderer.finalizeToolCard("call_7", { content: [{ type: "text", text: "ok" }] }, false);
+
+    const pill = container.querySelector(".tool-status");
+    expect(pill.className).toContain("complete");
+    expect(container.querySelectorAll(".tool-card")).toHaveLength(1);
+    expect(container.querySelector(".tool-output").textContent).toBe("ok");
+  });
+});

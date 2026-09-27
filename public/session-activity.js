@@ -27,32 +27,45 @@
  * The window's own process is the exception. For it the live event stream is
  * strictly better evidence than the registry: a run this window watched finish
  * must not be resurrected by a registry flag that was never corrected (a lost
- * `agent_end` write, a stale `${pid}.json`). `foreground` therefore disables
- * the registry's vote for that one process — otherwise the poll loop re-added
- * the dot ~5s after `agent_end` had already cleared it.
+ * `agent_end` write, a stale `${pid}.json`). `foreground` therefore disables the
+ * registry's vote to *stop* that one process — but it must not read a momentary
+ * `isStreaming:false` as proof of idleness either: the registry samples
+ * `!ctx.isIdle()` (false between messages and tool calls) and the window's own
+ * flag is cleared by non-terminal events (`state.reset()` on a selection, a
+ * suppressed `agent_start`). So the entry for the foreground port may only
+ * *add* a mark; when the local flag says idle, the entry is treated as unknown
+ * (keep whatever the marks say) instead of dropping them. The foreground *file*
+ * is immune from the stop rule entirely while the local flag says running, so a
+ * clobbered or never-recreated registry entry cannot unmark a run the event
+ * stream still reports.
  *
  * @param {Iterable<string>} markedFiles session files currently marked as running
  * @param {Array<{sessionFile?: unknown, isStreaming?: unknown, port?: number}>} instances `/api/instances` payload
- * @param {{port?: number|null, streaming?: boolean}} [foreground] window's own process
+ * @param {{port?: number|null, streaming?: boolean, file?: string|null}} [foreground] window's own process
  * @returns {{start: string[], stop: string[]}} files to mark and unmark
  */
 export function reconcileSessionActivity(markedFiles, instances, foreground = {}) {
   const foregroundPort = typeof foreground?.port === "number" ? foreground.port : null;
   const foregroundStreaming = foreground?.streaming === true;
+  const foregroundFile =
+    typeof foreground?.file === "string" && foreground.file ? foreground.file : null;
   const streaming = new Set();
   const unknown = new Set();
   for (const instance of Array.isArray(instances) ? instances : []) {
     const file = instance?.sessionFile;
     if (typeof file !== "string" || file.length === 0) continue;
     if (foregroundPort !== null && instance?.port === foregroundPort) {
-      // Own process: trust the event stream. When it is running, the mark came
-      // from `agent_start` already; when it is idle, the entry is stale.
+      // Own process: the event stream decides. Running → the mark came from
+      // `agent_start` already; idle while the registry says streaming → keep the
+      // existing marks rather than trusting either side alone.
       if (foregroundStreaming) streaming.add(file);
+      else if (instance.isStreaming === true) unknown.add(file);
       continue;
     }
     if (instance.isStreaming === true) streaming.add(file);
     else if (instance.isStreaming !== false) unknown.add(file);
   }
+  if (foregroundFile && foregroundStreaming) unknown.add(foregroundFile);
 
   const marked = new Set(markedFiles || []);
   const start = [];

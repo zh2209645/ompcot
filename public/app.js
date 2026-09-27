@@ -71,6 +71,7 @@ import { loadImportedThemes, removeImportedTheme, setupThemeImport } from "./the
 import { applyTheme, getCurrentTheme, registerImportedThemes, themes } from "./themes.js";
 import { setupThinkingLevelMenu } from "./thinking-level-menu.js";
 import { ToolCardRenderer } from "./tool-card.js";
+import { resolveTranscriptOpenAction } from "./transcript-open.js";
 import { createTranscriptView } from "./transcript-view.js";
 import { initTransport } from "./transport.js";
 import { createForkActions, FORK_ICON_SVG, UIRequestManager } from "./ui-requests.js";
@@ -621,27 +622,55 @@ async function showAgentTranscript(sessionFile) {
   renderSessionHistory(entries);
 }
 
+/**
+ * Agent Hub "view transcript" — always a view, never a session switch.
+ *
+ * The roster's `main` entry carries the process's own session file, so routing
+ * this through the session-selection flow (`handleSessionSelect`, which the
+ * sidebar rows use) turned "show me that transcript" into a real switch: it
+ * cleared the composer queue, reset the transcript state — dropping the running
+ * mark the sidebar's green dot is derived from — re-fetched history, and, when
+ * the session was streaming and its registry entry was missed by the 5s poll,
+ * spawned a *second* omp process for the session that was already running and
+ * re-routed the window to it. That is how a click on "view transcript" landed
+ * the window on a different session than the one it was viewing.
+ *
+ * Rules now:
+ * - the session this window is already live on → hand the transcript back to
+ *   the live view (no switch, no state reset);
+ * - anything else → read-only peek through `get_agent_transcript`.
+ */
 function openSessionFromFile(sessionFile) {
   if (!sessionFile) return;
-  for (const project of Array.isArray(sidebar.projects) ? sidebar.projects : []) {
-    const session = (project.sessions || []).find((s) => s.filePath === sessionFile);
-    if (session) {
-      handleSessionSelect(session, project);
-      return;
-    }
-  }
-  if (isNestedAgentTranscriptPath(sessionFile)) {
+  const action = resolveTranscriptOpenAction({ sessionFile }, [
+    mirrorActiveSessionFile,
+    sidebar.activeSessionFile,
+    getCurrentLiveSessionFile(),
+  ]);
+  if (action === "peek") {
     showAgentTranscript(sessionFile).catch((err) => {
       console.error("[AgentHub] transcript load failed:", err);
       showTransientStatus(t("session.loadFailed"));
     });
     return;
   }
-  const segments = String(sessionFile).split(/[\\/]/);
-  handleSessionSelect(
-    { filePath: sessionFile, file: segments[segments.length - 1] },
-    { dirName: segments[segments.length - 2] || "", path: getCurrentWorkspacePath() },
-  );
+  // Nothing to do while the live transcript is already on screen: repainting
+  // from a snapshot mid-run would detach the streaming element.
+  if (transcriptView.active) returnToLiveTranscript(sessionFile);
+}
+
+/** Drop the read-only peek and let the runtime repaint its own transcript. */
+function returnToLiveTranscript(sessionFile = null) {
+  const file = sessionFile || mirrorActiveSessionFile || sidebar.activeSessionFile || null;
+  transcriptView.claimLive(file);
+  try {
+    // The runtime answers with its authoritative snapshot, which repaints
+    // through the shared mirror_sync path; live frames resume painting too
+    // because the peek no longer owns the surface.
+    wsClient.send({ type: "mirror_sync_request" });
+  } catch (err) {
+    console.error("[AgentHub] mirror sync request failed:", err);
+  }
 }
 
 const agentHub = createAgentHub({
@@ -1055,8 +1084,13 @@ function handleRPCEvent(event) {
 
   // While the user is previewing a different session, suppress all live
   // rendering so the history view isn't overwritten by streaming output.
-  // agent_end still needs to fire so we can complete the deferred switch.
-  if (pendingSessionSwitchPath && event.type !== "agent_end") return;
+  // agent_end still needs to fire so we can complete the deferred switch; tool
+  // frames still update the state map, or a call that finishes in the meantime
+  // stays "Working…" in every later repaint.
+  if (pendingSessionSwitchPath && event.type !== "agent_end") {
+    recordToolExecution(event);
+    return;
+  }
 
   // A read-only agent transcript owns the transcript: the foreground session's
   // live frames must not paint into it (see showAgentTranscript). `agent_end`
@@ -1068,6 +1102,7 @@ function handleRPCEvent(event) {
     if (event.type === "extension_error") {
       console.error("[Agent transcript peek] suppressed live error:", event.error);
     }
+    recordToolExecution(event);
     return;
   }
 
@@ -1279,6 +1314,12 @@ function handleAgentEnd(event = null) {
   // chain's text.
   currentStreamingThinking = [];
   currentStreamingEntryId = null;
+  // Nothing can still be running now, so nothing may keep pulsing: a call whose
+  // end frame never arrived (suppressed by a peek, dropped on a saturated
+  // client, lost with a dead process) would otherwise show "Working…" for good,
+  // and cards deferred behind a message that never finalized would never be
+  // drawn at all.
+  settleOpenToolCalls();
   // The run is over: whatever this window marked as streaming for the
   // foreground process must stop reporting "running", including a file whose
   // path drifted from the one we marked at agent_start.
@@ -1436,8 +1477,13 @@ function ensureStreamingAssistantElement(message = null) {
  * still completes it in place.
  */
 function finishStreamingElement(element) {
-  if (!element?.isConnected) return;
-  if (element.dataset.finalized === "true") return;
+  // Cards that waited for this message must appear even when the live element
+  // is already gone (a re-render detached it) or was finalized elsewhere: the
+  // flush is the only path that creates them, and the set is never retried.
+  if (!element?.isConnected || element.dataset.finalized === "true") {
+    flushDeferredToolCards();
+    return;
+  }
   const message = currentStreamingMessage;
   if (!message) {
     messageRenderer.stopStreaming(element);
@@ -1584,51 +1630,98 @@ function flushDeferredToolCards() {
   }
 }
 
-function handleToolExecutionStart(event) {
-  const { toolCallId, toolName, args } = event;
+/**
+ * Close out every tool call that is still open when the run ends.
+ *
+ * A tool call is only settled by its own `tool_execution_end`. That frame can
+ * be suppressed (a peek owned the transcript, a deferred switch was pending) or
+ * lost (saturated client, dead process), and then the call stays `pending` /
+ * `streaming` forever — every transcript repaint draws its pill from that state
+ * and the badge pulses without end. The end of the run is the last moment any
+ * of it can still be true, so settle what is left and release the deferred
+ * cards (`clearForegroundStreaming` and the queue flush that follow depend on
+ * the transcript being final).
+ */
+function settleOpenToolCalls() {
+  flushDeferredToolCards();
+  deferredToolCards.clear();
+  for (const execution of state.getAllToolExecutions()) {
+    if (execution.status !== "pending" && execution.status !== "streaming") continue;
+    // Keep whatever output the last update delivered; only the status is a lie
+    // once the run is over.
+    state.addToolExecution(execution.toolCallId, {
+      status: execution.isError ? "error" : "complete",
+    });
+    toolCardRenderer.finalizeToolCard(execution.toolCallId, null, Boolean(execution.isError));
+  }
+}
 
-  state.addToolExecution(toolCallId, {
-    toolName,
-    args,
-    status: "pending",
-  });
+function handleToolExecutionStart(event) {
+  recordToolExecution(event);
 
   if (messageStillStreaming()) {
-    deferredToolCards.add(toolCallId);
+    deferredToolCards.add(event.toolCallId);
     return;
   }
 
-  // `updateToolCard` creates the card when it is missing and reuses the
-  // existing one otherwise, so a replayed start frame cannot add a second card
-  // for the same tool call.
-  toolCardRenderer.updateToolCard(state.getToolExecution(toolCallId));
+  const execution = state.getToolExecution(event.toolCallId);
+  if (execution) toolCardRenderer.updateToolCard(execution);
 }
 
 function handleToolExecutionUpdate(event) {
-  const { toolCallId, partialResult } = event;
-  const output = formatToolOutput(partialResult);
+  recordToolExecution(event);
 
-  state.updateToolExecution(toolCallId, {
-    status: "streaming",
-    output,
-  });
-
-  if (deferredToolCards.has(toolCallId)) return; // card comes with the flush
-  toolCardRenderer.updateToolCard(state.getToolExecution(toolCallId));
+  if (deferredToolCards.has(event.toolCallId)) return; // card comes with the flush
+  const execution = state.getToolExecution(event.toolCallId);
+  if (execution) toolCardRenderer.updateToolCard(execution);
 }
 
 function handleToolExecutionEnd(event) {
-  const { toolCallId, result, isError } = event;
-  const output = formatToolOutput(result);
+  recordToolExecution(event);
 
-  state.updateToolExecution(toolCallId, {
-    status: isError ? "error" : "complete",
-    output,
-    isError,
-  });
+  if (deferredToolCards.has(event.toolCallId)) return; // card comes with the flush
+  toolCardRenderer.finalizeToolCard(event.toolCallId, event.result, event.isError);
+}
 
-  if (deferredToolCards.has(toolCallId)) return; // card comes with the flush
-  toolCardRenderer.finalizeToolCard(toolCallId, result, isError);
+/**
+ * Fold one tool frame into the state map — the half of handling a tool event
+ * that must run even when the paint half is skipped.
+ *
+ * Frames are dropped for three reasons: a read-only agent transcript owns the
+ * surface (peek), a deferred session switch is pending, or the frame belongs to
+ * another session. Only the last one's state is irrelevant here; in the first
+ * two the frame is this session's, and skipping the state write left the live
+ * lookup saying `streaming` for a call that had finished — so the next
+ * re-render (peek exit, resync, snapshot) drew its pill as "Working…" and it
+ * never settled.
+ *
+ * @returns {boolean} true when the event was a tool frame
+ */
+function recordToolExecution(event) {
+  switch (event?.type) {
+    case "tool_execution_start":
+      state.addToolExecution(event.toolCallId, {
+        toolName: event.toolName,
+        args: event.args,
+        status: "pending",
+      });
+      return true;
+    case "tool_execution_update":
+      state.updateToolExecution(event.toolCallId, {
+        status: "streaming",
+        output: formatToolOutput(event.partialResult),
+      });
+      return true;
+    case "tool_execution_end":
+      state.updateToolExecution(event.toolCallId, {
+        status: event.isError ? "error" : "complete",
+        output: formatToolOutput(event.result),
+        isError: Boolean(event.isError),
+      });
+      return true;
+    default:
+      return false;
+  }
 }
 
 function handleExtensionUIRequest(event) {
@@ -3446,7 +3539,12 @@ function handleMirrorSync(data) {
     });
     const bgFile = data.sessionFile || data.sessionId;
     if (bgFile) {
-      const bgStreaming = Boolean(data.isStreaming);
+      // `isStreaming` is the process's instantaneous `!ctx.isIdle()` and reads
+      // false between messages/tool calls of a live run, so a stray snapshot
+      // must not clear a mark the session's own `agent_start` set. OR it with
+      // what the sidebar already knows; `agent_end` and the activity reconcile
+      // are the authorities that clear it.
+      const bgStreaming = Boolean(data.isStreaming) || sidebar.isStreaming(bgFile);
       sidebar.setStreaming(bgFile, bgStreaming);
       updateMirrorLiveIndicator();
     }
@@ -3477,7 +3575,13 @@ function handleMirrorSync(data) {
       pendingSwitch: sessionSwitchGate.pending,
     });
     if (snapshotSessionFile) {
-      sidebar.setStreaming(snapshotSessionFile, Boolean(data.isStreaming));
+      // Same momentary-flag caveat as the background branch: this snapshot is
+      // for the session we are leaving while a switch is in flight, so it may
+      // never clear a running mark on its own.
+      sidebar.setStreaming(
+        snapshotSessionFile,
+        Boolean(data.isStreaming) || sidebar.isStreaming(snapshotSessionFile),
+      );
       updateMirrorLiveIndicator();
     }
     return;
@@ -3597,6 +3701,10 @@ function reconcileSidebarStreaming() {
     // the registry's flag, so a finished run can never be resurrected here.
     port: foregroundPort,
     streaming: state.isStreaming,
+    // Which file that flag describes — the mark for it survives a registry
+    // entry that is missing, clobbered or momentarily idle while the event
+    // stream still says the run is going.
+    file: mirrorActiveSessionFile || sidebar.activeSessionFile || null,
   });
   for (const filePath of stop) {
     // Drop the bookkeeping too: a mark that no longer reflects reality must not

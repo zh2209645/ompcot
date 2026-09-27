@@ -100,12 +100,7 @@ export class ToolCardRenderer {
   }
 
   updateToolCard(toolExecution) {
-    let card = this.toolCards.get(toolExecution.toolCallId);
-    // A card that a transcript re-render removed is no longer a valid target:
-    // writing into it would keep the output off-screen. Treat it as missing so
-    // the card is rebuilt inside the current transcript.
-    if (card && !this.container.contains(card)) card = null;
-
+    let card = this.resolveCard(toolExecution.toolCallId);
     if (!card) {
       card = this.createToolCard(toolExecution);
     }
@@ -146,8 +141,35 @@ export class ToolCardRenderer {
     return card;
   }
 
+  /**
+   * The card a tool call is drawn by right now.
+   *
+   * `this.toolCards` goes stale whenever a transcript re-render replaces the
+   * DOM (peek, resync, mirror snapshot): the renderer drops the index but the
+   * container already holds rebuilt cards. Every later write — a late
+   * `tool_execution_end`, the end-of-run sweep — must land on the element the
+   * user can see; writing into the orphan instead left the visible card
+   * pulsing "Working…" for good.
+   */
+  resolveCard(toolCallId) {
+    const mapped = this.toolCards.get(toolCallId);
+    if (mapped && this.container.contains(mapped)) return mapped;
+    const found = this.findCardElement(toolCallId);
+    if (found) this.toolCards.set(toolCallId, found);
+    return found;
+  }
+
+  /** DOM lookup by `data-tool-call-id` (a scan: card counts per transcript are small). */
+  findCardElement(toolCallId) {
+    if (typeof toolCallId !== "string" || !toolCallId) return null;
+    for (const el of this.container.querySelectorAll(".tool-card[data-tool-call-id]")) {
+      if (el.dataset.toolCallId === toolCallId) return el;
+    }
+    return null;
+  }
+
   finalizeToolCard(toolCallId, result, isError) {
-    const card = this.toolCards.get(toolCallId);
+    const card = this.resolveCard(toolCallId);
     if (!card) return;
 
     // Update status
@@ -312,15 +334,21 @@ export class ToolCardRenderer {
    * Add result to a history card (stays collapsed)
    */
   addHistoryResult(toolCallId, result, isError) {
-    const card = this.toolCards.get(toolCallId);
+    const card = this.resolveCard(toolCallId);
     if (!card) return;
 
-    if (isError) {
+    // The session file knows this call finished — the live lookup may still say
+    // `streaming` (its end frame was suppressed while a read-only agent
+    // transcript owned the surface, or lost on a saturated client), and a card
+    // drawn "Working…" from that lookup never settles. So the result settles the
+    // pill for BOTH outcomes, not just errors.
+    const status = isError ? "error" : "complete";
+    if (card.dataset.toolStatus !== status) {
+      card.dataset.toolStatus = status;
       const statusEl = card.querySelector(".tool-status");
       if (statusEl) {
-        card.dataset.toolStatus = "error";
-        statusEl.className = "tool-status error";
-        statusEl.textContent = t("status.error");
+        statusEl.className = `tool-status ${status}`;
+        statusEl.textContent = toolStatusLabel(status);
       }
     }
 

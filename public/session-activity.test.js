@@ -76,13 +76,51 @@ describe("reconcileSessionActivity", () => {
     expect(stop).toEqual([]);
   });
 
-  test("a mark on the window's own session is dropped once it reports idle", () => {
+  test("a momentary idle sample does not drop the mark on the window's own session", () => {
+    // The registry flag is an instantaneous `!ctx.isIdle()` sample — false
+    // between messages and tool calls of a run that is still going — and the
+    // window's own flag can be behind too (a selection reset it, an
+    // `agent_start` was suppressed by a peek). Neither side may unmark the
+    // other's run: the mark survives until both agree the session is idle.
     const { start, stop } = reconcileSessionActivity([RUNNING], [instance(RUNNING, true)], {
       port: 47821,
       streaming: false,
     });
 
     expect(start).toEqual([]);
+    expect(stop).toEqual([]);
+  });
+
+  test("drops the window's own mark once the flag and the registry agree it is idle", () => {
+    const { stop } = reconcileSessionActivity([RUNNING], [instance(RUNNING, false)], {
+      port: 47821,
+      streaming: false,
+    });
+
+    expect(stop).toEqual([RUNNING]);
+  });
+
+  test("keeps the foreground file marked while the window streams, with no registry entry", () => {
+    // The entry can be missing (never re-created after a delete, or pruned by a
+    // torn read in another process) or clobbered; for the session this window
+    // is running, the event stream is the better evidence.
+    const { start, stop } = reconcileSessionActivity([RUNNING], [], {
+      port: 47821,
+      streaming: true,
+      file: RUNNING,
+    });
+
+    expect(start).toEqual([]);
+    expect(stop).toEqual([]);
+  });
+
+  test("the foreground file is not immune once the window reports idle", () => {
+    const { stop } = reconcileSessionActivity([RUNNING], [], {
+      port: 47821,
+      streaming: false,
+      file: RUNNING,
+    });
+
     expect(stop).toEqual([RUNNING]);
   });
 

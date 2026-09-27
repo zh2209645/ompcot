@@ -7,7 +7,6 @@ const SESSION_FILE = "C:/omp/sessions/p/root/session.jsonl";
 describe("isTranscriptEvent", () => {
   test("marks the events that draw into the transcript", () => {
     for (const type of [
-      "agent_start",
       "message_start",
       "message_update",
       "message_end",
@@ -24,6 +23,11 @@ describe("isTranscriptEvent", () => {
 
   test("leaves everything that is not transcript content alone", () => {
     for (const type of [
+      // `agent_start`/`agent_end` carry no transcript content: they maintain
+      // the streaming flag, the typing indicator and the sidebar's running
+      // mark. Suppressing `agent_start` during a peek left the sidebar dot off
+      // for a run that started while the user was reading a subagent.
+      "agent_start",
       "agent_end",
       "extension_ui_request",
       "session_branch",
