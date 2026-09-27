@@ -296,6 +296,20 @@ describe("thinking blocks are rendered identically live and from history", () =>
     expect(el.querySelectorAll(".streaming-thinking")).toHaveLength(0);
     expect(el.querySelectorAll(".thinking-content.expanded")).toHaveLength(0);
   });
+
+  it("drops blocks the current message no longer reports", () => {
+    // Reported symptom: a thinking block showed the previous reasoning chain.
+    // An element can be adopted across messages (a dropped `message_start`, a
+    // message that ends without one), and the incoming reply reported fewer
+    // segments — the leftovers stayed on screen.
+    const el = renderer.renderAssistantMessage({ content: "" }, true);
+    renderer.updateStreamingThinking(el, ["first chain, part one", "first chain, part two"]);
+    expect(blockTexts(el)).toEqual(["first chain, part one", "first chain, part two"]);
+
+    renderer.updateStreamingThinking(el, ["the new chain"]);
+
+    expect(blockTexts(el)).toEqual(["the new chain"]);
+  });
 });
 
 describe("rendering is keyed on message identity (no duplicate elements)", () => {
@@ -400,5 +414,51 @@ describe("rendering is keyed on message identity (no duplicate elements)", () =>
     expect(streamed).toBe(el);
     expect(el.querySelector(".message-copy-btn")).toBeNull();
     expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+  });
+});
+
+describe("duplicate transcript detection (debug capture)", () => {
+  it("reports two elements claiming the same session-entry id", () => {
+    // How the bug looks once the runtime resolves an id late: the history copy
+    // already carries it, and the live continuation that could not adopt the
+    // element is stamped with the same id when it finalizes.
+    const container = document.createElement("div");
+    const renderer = new MessageRenderer(container);
+    const reply = "A reply long enough to be compared against its twin element.";
+    renderer.renderAssistantMessage({ content: reply, id: "entry_1" }, false, true);
+    const live = renderer.renderAssistantMessage({ content: "", id: null }, true);
+    renderer.finalizeStreamingMessage(live, null, reply, "entry_1");
+    const findings = renderer.reportDuplicateMessages();
+    expect(findings).toEqual([{ id: "entry_1", count: 2, reason: "same-entry-id" }]);
+  });
+
+  it("reports the same reply rendered once from history and once live", () => {
+    // The reported symptom: a history copy carries the real entry id while the
+    // live copy still carries the "streaming" placeholder, so only the content
+    // can identify them as one message.
+    const container = document.createElement("div");
+    const renderer = new MessageRenderer(container);
+    const long = "六个问题全部定位、修复并在真实 omp 18.3.4 上验证，下面是逐条的证据与修复位置。";
+    renderer.renderAssistantMessage({ content: long, id: "entry_9" }, false, true);
+    renderer.renderAssistantMessage({ content: long, id: null }, true);
+    const findings = renderer.reportDuplicateMessages();
+    expect(findings.map((finding) => finding.reason)).toEqual(["same-content"]);
+    expect(findings[0].count).toBe(2);
+  });
+
+  it("stays quiet for a transcript with distinct turns", () => {
+    const container = document.createElement("div");
+    const renderer = new MessageRenderer(container);
+    renderer.renderAssistantMessage(
+      { content: "first reply, long enough to be compared", id: "a" },
+      false,
+      true,
+    );
+    renderer.renderAssistantMessage(
+      { content: "second reply, a different message entirely", id: "b" },
+      false,
+      true,
+    );
+    expect(renderer.reportDuplicateMessages()).toEqual([]);
   });
 });

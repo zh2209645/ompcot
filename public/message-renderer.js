@@ -2,24 +2,91 @@
  * Message Renderer - Renders chat messages with markdown support
  */
 
+import { logDebug } from "./debug-log.js";
 import { t } from "./i18n.js";
 import { renderMarkdown, renderStreamingMarkdown, renderUserMarkdown } from "./markdown.js";
+import { ScrollFollow } from "./scroll-follow.js";
 
 export class MessageRenderer {
-  constructor(container) {
+  constructor(container, { follow = null } = {}) {
     this.container = container;
-    this.isNearBottom = true;
+    // The follow policy (pinned state, self-heal, instant jumps) lives in
+    // scroll-follow.js: a guard recomputed at call time skipped the follow
+    // exactly when content growth had just pushed the newest block away, and a
+    // flag latched on scroll events alone stayed false after a re-render
+    // replaced a long transcript with a short one. The app passes the same
+    // instance to the tool-card renderer — both draw into one scroller.
+    this.follow = follow ?? new ScrollFollow(container);
+  }
 
-    // Track scroll position for smart auto-scroll
-    this.container.addEventListener("scroll", () => {
-      const threshold = 100;
-      this.isNearBottom =
-        this.container.scrollHeight - this.container.scrollTop - this.container.clientHeight <
-        threshold;
+  /** Whether the feed is following the newest content (see ScrollFollow). */
+  get isNearBottom() {
+    return this.follow.isPinned;
+  }
+
+  set isNearBottom(value) {
+    this.follow.isPinned = value;
+  }
+
+  /** Element census recorded with every transcript operation (see debug-log.js). */
+  transcriptState(op, extra = {}) {
+    const assistants = Array.from(this.container.querySelectorAll(".message.assistant"));
+    logDebug("transcript", {
+      op,
+      assistants: assistants.length,
+      users: this.container.querySelectorAll(".message.user").length,
+      ids: assistants.map((el) => el.dataset.messageId || null),
+      streaming: assistants.map((el) => el.dataset.finalized !== "true"),
+      ...extra,
     });
+    this.reportDuplicateMessages(assistants);
+  }
+
+  /**
+   * Detect the transcript drawing one message twice.
+   *
+   * This is the reported symptom that leaves no trace in the session file (one
+   * entry, two elements), and it is invisible to a user's screenshot: two
+   * elements can carry the same session-entry id (a history render plus a live
+   * copy) or one real id plus the live placeholder. Both cases are recorded, so
+   * an exported debug bundle proves the mechanism instead of describing it.
+   *
+   * @returns {Array<{id: string|null, count: number, reason: string}>} findings
+   */
+  reportDuplicateMessages(assistants = null) {
+    const elements =
+      assistants ?? Array.from(this.container.querySelectorAll(".message.assistant"));
+    const byId = new Map();
+    const byText = new Map();
+    for (const el of elements) {
+      const id = el.dataset.messageId || null;
+      if (id && id !== "streaming") byId.set(id, (byId.get(id) || 0) + 1);
+      const text = (el.querySelector(".message-content")?.textContent || "").trim().slice(0, 120);
+      if (text.length < 40) continue;
+      byText.set(text, (byText.get(text) || 0) + 1);
+    }
+    const findings = [
+      ...Array.from(byId.entries())
+        .filter(([, count]) => count > 1)
+        .map(([id, count]) => ({ id, count, reason: "same-entry-id" })),
+      ...Array.from(byText.entries())
+        .filter(([, count]) => count > 1)
+        .map(([text, count]) => ({ id: null, count, reason: "same-content", text })),
+    ];
+    if (findings.length > 0) {
+      logDebug("transcript.duplicate", { assistants: elements.length, findings });
+    }
+    return findings;
   }
 
   clear() {
+    logDebug("transcript", {
+      op: "clear",
+      removed: this.container.querySelectorAll(".message").length,
+      ids: Array.from(this.container.querySelectorAll(".message.assistant")).map(
+        (el) => el.dataset.messageId || null,
+      ),
+    });
     this.container.innerHTML = "";
     // Session switches reuse the same renderer instance. If the previous session
     // left the viewport away from bottom, keep new renders from inheriting that
@@ -256,6 +323,12 @@ export class MessageRenderer {
     // An adopted element already sits in the right place: only a fresh one is
     // appended, so a repeated frame can never add a second copy.
     if (!adopted) this.container.appendChild(div);
+    this.transcriptState("assistant", {
+      adopted: Boolean(adopted),
+      streaming: isStreaming,
+      history: isHistory,
+      messageId: div.dataset.messageId || null,
+    });
     if (!isHistory) this.scrollToBottom();
 
     return div;
@@ -316,6 +389,14 @@ export class MessageRenderer {
         this.scrollToBottom();
       }
     }
+    // Blocks past the reported segments are stale: an element can be adopted
+    // across messages when a `message_start` frame was dropped (or the message
+    // ended without one), and a reply whose reasoning has fewer segments than
+    // the one before it kept the old chain's remaining blocks on screen.
+    for (let i = segments.length; i < existing.length; i++) {
+      existing[i].remove();
+      this.scrollToBottom();
+    }
   }
 
   updateStreamingMessage(messageElement, content) {
@@ -347,6 +428,7 @@ export class MessageRenderer {
   stopStreaming(messageElement) {
     const contentDiv = messageElement?.querySelector(".message-content");
     if (!contentDiv?.classList.contains("streaming")) return;
+    this.transcriptState("stop", { messageId: messageElement.dataset.messageId || null });
     contentDiv.classList.remove("streaming");
     for (const thinkingDiv of contentDiv.querySelectorAll(".streaming-thinking")) {
       thinkingDiv.classList.remove("streaming-thinking");
@@ -423,6 +505,7 @@ export class MessageRenderer {
 
     // Add copy button after streaming finishes
     this._ensureCopyButton(messageElement);
+    this.transcriptState("finalize", { messageId: messageElement.dataset.messageId || null });
 
     // The finalized markdown can be taller than the streamed preview (code
     // blocks, lists, tables all expand), so re-anchor when we were following —
@@ -544,7 +627,7 @@ export class MessageRenderer {
   }
 
   scrollToBottom() {
-    if (this.isNearBottom) {
+    if (this.follow.isPinned) {
       requestAnimationFrame(() => {
         this.jumpToBottom();
       });
@@ -557,16 +640,12 @@ export class MessageRenderer {
    *
    * A smooth follow cannot keep up with a stream (or with a block that lands in
    * one big delta): while the animation runs, the geometry still reports "far
-   * from the bottom", which flips `isNearBottom` false and silently stops every
-   * later follow — the feed froze while the run was still going, and the
+   * from the bottom", which flips the follow policy unpinned and silently stops
+   * every later follow — the feed froze while the run was still going, and the
    * newest block stayed under the composer. An instant jump lands on the
-   * bottom in the same frame, so the guard stays truthful.
+   * bottom in the same frame, so the state stays truthful.
    */
   jumpToBottom() {
-    const el = this.container;
-    const previousBehavior = el.style.scrollBehavior;
-    el.style.scrollBehavior = "auto";
-    el.scrollTop = el.scrollHeight;
-    el.style.scrollBehavior = previousBehavior;
+    this.follow.jump();
   }
 }

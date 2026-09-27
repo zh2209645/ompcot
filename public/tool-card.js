@@ -3,6 +3,8 @@
  */
 
 import { t } from "./i18n.js";
+import { ScrollFollow } from "./scroll-follow.js";
+import { nextToolStatus } from "./state.js";
 
 // Raw statuses stay as CSS classes (`.tool-status.${status}`); only the
 // visible label is translated. Unknown statuses render as-is.
@@ -21,9 +23,14 @@ function toolStatusLabel(status) {
 }
 
 export class ToolCardRenderer {
-  constructor(container, { statusLookup = null } = {}) {
+  constructor(container, { statusLookup = null, follow = null } = {}) {
     this.container = container;
     this.toolCards = new Map(); // toolCallId -> element
+    // Follow policy shared with the message renderer when the app passes one
+    // (both render into the same scroller); a private instance keeps the
+    // renderer usable on its own. See scroll-follow.js for why the decision is
+    // state-based rather than recomputed at call time.
+    this.follow = follow ?? new ScrollFollow(container);
     // Live status of a tool call, when the app knows one. A transcript
     // re-render (snapshot mid-run) draws history cards for calls that are
     // still executing; without this they were painted as "Done" and then
@@ -108,16 +115,19 @@ export class ToolCardRenderer {
     // status TRANSITION may touch the status pill, and only the first update of
     // a live run may force the body open — doing either on every update made a
     // card the user collapsed pop back open, and re-wrote the same DOM
-    // thousands of times while a command streamed.
-    if (card.dataset.toolStatus !== status) {
-      card.dataset.toolStatus = status;
+    // thousands of times while a command streamed. The transition is also
+    // ordered: a late/replayed frame must not walk a finished pill back to
+    // "Working…" and restart its pulse (see state.js nextToolStatus).
+    const nextStatus = nextToolStatus(card.dataset.toolStatus, status);
+    if (nextStatus !== card.dataset.toolStatus) {
+      card.dataset.toolStatus = nextStatus;
       const statusElement = card.querySelector(".tool-status");
       if (statusElement) {
-        statusElement.className = `tool-status ${status}`;
-        statusElement.textContent = toolStatusLabel(status);
+        statusElement.className = `tool-status ${nextStatus}`;
+        statusElement.textContent = toolStatusLabel(nextStatus);
       }
       // Auto-expand once, when the tool starts producing.
-      if (status === "streaming") {
+      if (nextStatus === "streaming") {
         const body = card.querySelector(".tool-card-body");
         const chevron = card.querySelector(".tool-card-chevron");
         if (body) body.classList.add("expanded");
@@ -399,19 +409,12 @@ export class ToolCardRenderer {
 
   scrollToBottom() {
     if (!this.container) return;
-    const threshold = 100;
-    const isNear =
-      this.container.scrollHeight - this.container.scrollTop - this.container.clientHeight <
-      threshold;
-    if (!isNear) return;
+    // Instant, not the transcript's `scroll-behavior: smooth`: a smooth follow
+    // lags a fast-growing card, and the lagging geometry is what used to stop
+    // the auto-follow for good (see ScrollFollow).
+    if (!this.follow.isPinned) return;
     requestAnimationFrame(() => {
-      // Instant, not the transcript's `scroll-behavior: smooth`: a smooth
-      // follow lags a fast-growing card, and the lagging geometry is what
-      // stops the auto-follow for good (see MessageRenderer.jumpToBottom).
-      const previousBehavior = this.container.style.scrollBehavior;
-      this.container.style.scrollBehavior = "auto";
-      this.container.scrollTop = this.container.scrollHeight;
-      this.container.style.scrollBehavior = previousBehavior;
+      this.follow.jump();
     });
   }
 

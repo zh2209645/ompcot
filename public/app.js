@@ -17,6 +17,14 @@ import {
   isSlashCommand,
   isSlashStreamRejection,
 } from "./composer-commands.js";
+import { setComposerText, syncComposerHeight } from "./composer-input.js";
+import {
+  debugLog,
+  installConsoleCapture,
+  installErrorCapture,
+  summarizeWsFrame,
+} from "./debug-log.js";
+import { createDebugPanel } from "./debug-panel.js";
 import { FileBrowser } from "./file-browser.js";
 import { setupFontSettings } from "./font-settings.js";
 import { anchorHistoryToBottom } from "./history-scroll-anchor.js";
@@ -44,6 +52,7 @@ import {
   resetRegistryBase,
   setRegistryBase,
 } from "./pkg-registry.js";
+import { ScrollFollow } from "./scroll-follow.js";
 import { reconcileSessionActivity } from "./session-activity.js";
 import { renderTranscriptFromEntries, resyncTranscript } from "./session-resync.js";
 import { findPortForSession, getWorkspacePathForPort } from "./session-routing.js";
@@ -62,6 +71,7 @@ import { loadImportedThemes, removeImportedTheme, setupThemeImport } from "./the
 import { applyTheme, getCurrentTheme, registerImportedThemes, themes } from "./themes.js";
 import { setupThinkingLevelMenu } from "./thinking-level-menu.js";
 import { ToolCardRenderer } from "./tool-card.js";
+import { createTranscriptView } from "./transcript-view.js";
 import { initTransport } from "./transport.js";
 import { createForkActions, FORK_ICON_SVG, UIRequestManager } from "./ui-requests.js";
 import { resolveWebSocketUrl, WebSocketClient } from "./websocket-client.js";
@@ -193,15 +203,45 @@ const transport = initTransport({ wsClient, env: window });
 // false and flips when the `capabilities` frame arrives (see listener below).
 // `?mobile=1` is a browser client even if it reaches the desktop broker, so it
 // must not use native workspace/window controls.
+// Debug capture goes in before anything else logs: the frontend buffer has to
+// contain the startup sequence too (see public/debug-log.js).
+installConsoleCapture();
+installErrorCapture();
+
 const nativeAvailable = () => !mobileClientMode && transport.capabilities.native;
 const canUseSessionControl = () => transport.capabilities.native;
 const state = new StateManager();
-const messageRenderer = new MessageRenderer(document.getElementById("messages"));
+// One follow policy for the transcript scroller, shared by the message and
+// tool-card renderers (see scroll-follow.js).
+const transcriptFollow = new ScrollFollow(document.getElementById("messages"));
+const messageRenderer = new MessageRenderer(document.getElementById("messages"), {
+  follow: transcriptFollow,
+});
 const toolCardRenderer = new ToolCardRenderer(document.getElementById("messages"), {
   // A re-render must draw a still-running call with its live status, not as
   // "Done" (see ToolCardRenderer#statusLookup).
   statusLookup: (toolCallId) => state.getToolExecution(toolCallId)?.status ?? null,
+  follow: transcriptFollow,
 });
+// Every WebSocket frame in both directions feeds the debug buffer (summarized:
+// a streaming reply is thousands of near-identical frames, and they are folded
+// into one counted entry per message/tool call).
+wsClient.debugSink = (direction, payload) => {
+  const summary = summarizeWsFrame(direction, payload);
+  const identity =
+    payload?.type === "event"
+      ? (payload?.event?.message?.timestamp ??
+        payload?.event?.entryId ??
+        payload?.event?.toolCallId ??
+        null)
+      : null;
+  const coalesceKey =
+    payload?.type === "event" && identity !== null
+      ? `ws.${direction}:${payload.event.type}:${identity}`
+      : null;
+  debugLog.log(`ws.${direction}`, summary, coalesceKey);
+};
+
 // Extension UI request dialogs (select/confirm/input): queueing, deadline
 // countdown and the ui_response/ui_cancel wire contract live in ui-requests.js.
 // This is the single path for `extension_ui_request` events (it reuses the
@@ -301,7 +341,7 @@ let foregroundPort = getCurrentPort();
 let foregroundWorkspacePath = "";
 const getActivePort = () => foregroundPort;
 function logSessionRoute(label, details = {}) {
-  console.debug(`[Session route] ${label}`, {
+  const context = {
     foregroundPort,
     activeSessionFile: sidebar?.activeSessionFile || null,
     mirrorActiveSessionFile,
@@ -310,7 +350,12 @@ function logSessionRoute(label, details = {}) {
     wsSessionId: wsClient?.sessionId || null,
     wsSourcePort: wsClient?.sourcePort || null,
     ...details,
-  });
+  };
+  // console.debug prints and (through the console capture) records too, but the
+  // structured copy keeps the routing decisions readable in the export without
+  // parsing console strings.
+  debugLog.log("route", { label, ...context });
+  console.debug(`[Session route] ${label}`, context);
 }
 wsClient.setRoutingContext({
   workspaceId: `workspace:${getCurrentWorkspacePath() || "unknown"}`,
@@ -530,11 +575,22 @@ function isNestedAgentTranscriptPath(sessionFile) {
 }
 
 /**
+ * Which view owns the transcript (Agent Hub "view transcript" → read-only
+ * subagent view). Live frames from the foreground session and snapshot
+ * repaints are held back while an agent transcript is on screen — see
+ * transcript-view.js for what used to leak in.
+ */
+const transcriptView = createTranscriptView();
+
+/**
  * Render a subagent transcript read-only via the get_agent_transcript RPC.
  * The active session, process routing and input state are untouched — this
  * is a peek, not a switch (F20).
  */
 async function showAgentTranscript(sessionFile) {
+  // Claim the transcript before the first repaint: frames that arrive while
+  // the transcript loads must not paint into the view being replaced.
+  const token = transcriptView.claimAgent(sessionFile);
   messageRenderer.clear();
   toolCardRenderer.clear();
   resetTranscriptTotals();
@@ -544,15 +600,21 @@ async function showAgentTranscript(sessionFile) {
     { type: "get_agent_transcript", sessionPath: sessionFile },
     { timeoutMs: 15000 },
   );
+  // Superseded by a newer peek (or by a session selection): that request owns
+  // the transcript now, and painting this — older — response would show the
+  // agent the user already navigated away from.
+  if (!transcriptView.isCurrent(token)) return;
   messageRenderer.clear();
   toolCardRenderer.clear();
   if (!result.ok) {
+    transcriptView.end();
     showTransientStatus(t("session.loadFailed"));
     renderWorkspaceWelcome({ force: true });
     return;
   }
   const entries = Array.isArray(result.data?.entries) ? result.data.entries : [];
   if (entries.length === 0) {
+    transcriptView.end();
     renderWorkspaceWelcome({ force: true });
     return;
   }
@@ -921,8 +983,7 @@ wsClient.addEventListener("commandUndeliverable", (e) => {
     `Message not delivered (${detail}). The session may have closed — start a new chat or try again.`,
   );
   if (pending.message && !messageInput.value.trim()) {
-    messageInput.value = pending.message;
-    messageInput.style.height = "auto";
+    setComposerText(messageInput, pending.message);
   }
 });
 
@@ -996,6 +1057,19 @@ function handleRPCEvent(event) {
   // rendering so the history view isn't overwritten by streaming output.
   // agent_end still needs to fire so we can complete the deferred switch.
   if (pendingSessionSwitchPath && event.type !== "agent_end") return;
+
+  // A read-only agent transcript owns the transcript: the foreground session's
+  // live frames must not paint into it (see showAgentTranscript). `agent_end`
+  // still runs — it maintains the sidebar/streaming state and cannot repaint
+  // the transcript (the live element it would finish was detached by the peek).
+  if (transcriptView.suppresses(event.type)) {
+    // The read-only view stays intact, but an extension error must not vanish
+    // silently — it is the only feedback that surface would have carried.
+    if (event.type === "extension_error") {
+      console.error("[Agent transcript peek] suppressed live error:", event.error);
+    }
+    return;
+  }
 
   switch (event.type) {
     case "agent_start":
@@ -1085,7 +1159,10 @@ function handleCompactionStart() {
   el.id = "compaction-indicator";
   el.innerHTML = '<span class="compaction-spinner">⟳</span> Compacting context…';
   messagesContainer.appendChild(el);
-  scrollToBottom();
+  // The compaction indicator is the newest item: keep it in view the same way
+  // every other append does (the previous bare `scrollToBottom()` was an
+  // undefined reference — the handler threw and never scrolled).
+  messageRenderer.scrollToBottom();
 }
 
 function handleCompactionEnd(event) {
@@ -1196,6 +1273,12 @@ function handleAgentEnd(event = null) {
   currentStreamingElement = null;
   currentStreamingText = "";
   currentStreamingMessage = null;
+  // The thinking accumulator and the entry id belong to the message that just
+  // finished: keeping them let a later delta (a message whose frames arrived
+  // without their own `message_start`) append to — and render — the previous
+  // chain's text.
+  currentStreamingThinking = [];
+  currentStreamingEntryId = null;
   // The run is over: whatever this window marked as streaming for the
   // foreground process must stop reporting "running", including a file whose
   // path drifted from the one we marked at agent_start.
@@ -1634,8 +1717,7 @@ const composerCommands = createComposerCommands({
 
 // Auto-resize textarea
 messageInput.addEventListener("input", () => {
-  messageInput.style.height = "auto";
-  messageInput.style.height = `${Math.min(messageInput.scrollHeight, 160)}px`;
+  syncComposerHeight(messageInput);
 });
 
 // ═══════════════════════════════════════
@@ -1966,6 +2048,10 @@ const resyncIconSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="non
 // (get_messages) and re-render #messages from them. Empty or failed syncs
 // keep the current transcript; only the status line changes.
 async function resyncTranscriptFromAgent() {
+  // "Resync transcript" asks for the live session's own entries: it claims the
+  // transcript rather than leaving a read-only agent view claiming to be
+  // resynced (and invalidates a peek still loading).
+  const resyncToken = transcriptView.claimLive(null);
   // Never re-render mid-run: clearing the transcript would orphan the live
   // streaming node and remaining deltas would target a detached element.
   // Defer to agent_end instead (F22).
@@ -1977,6 +2063,9 @@ async function resyncTranscriptFromAgent() {
   await resyncTranscript({
     wsClient,
     renderEntries: (entries) => {
+      // A claim made while the resync was in flight (Agent Hub transcript,
+      // another session) owns the transcript now: drop this repaint.
+      if (!transcriptView.isCurrent(resyncToken)) return;
       // Totals are recomputed from the fresh transcript — without the reset
       // a resync would double-count every historic usage (F21).
       resetTranscriptTotals();
@@ -2838,6 +2927,8 @@ async function resetUiForNewSession() {
     liveInstances.find((i) => i?.port === foregroundPort)?.sessionFile ||
     null;
   cancelPendingPromptRefreshes();
+  // A new chat is a live session view: drop any read-only agent transcript.
+  transcriptView.end();
   state.reset();
   messageRenderer.clear();
   toolCardRenderer.clear();
@@ -3034,6 +3125,11 @@ async function handleSessionSelectImpl(session, project) {
     projectDir: project?.dirName,
     liveInstances,
   });
+  // Selecting a session hands the transcript back to the live view — a
+  // read-only agent transcript from the Agent Hub must not survive it. The
+  // claim also invalidates a history fetch or peek still in flight, so the
+  // slower response cannot paint over the session the user picked.
+  const viewToken = transcriptView.claimLive(session?.filePath ?? null);
   // Pending prompt-refresh timers belong to the previously viewed session.
   cancelPendingPromptRefreshes();
   // An explicit session selection supersedes any pending deferred switch.
@@ -3080,7 +3176,7 @@ async function handleSessionSelectImpl(session, project) {
       showTypingIndicator(false);
     }
     updateUI();
-    await renderSelectedSessionHistory(session, project);
+    await renderSelectedSessionHistory(session, project, viewToken);
 
     if (targetLiveInstance) {
       logSessionRoute("select:target-live-sync", {
@@ -3181,7 +3277,8 @@ async function handleSessionSelectImpl(session, project) {
   }
 }
 
-async function renderSelectedSessionHistory(session, project) {
+async function renderSelectedSessionHistory(session, project, viewToken = null) {
+  if (viewToken !== null && !transcriptView.isCurrent(viewToken)) return;
   messageRenderer.clear();
   toolCardRenderer.clear();
   if (!session || !project) {
@@ -3215,6 +3312,10 @@ async function renderSelectedSessionHistory(session, project) {
       status: res.status,
       ok: res.ok,
     });
+    // Another view claimed the transcript while this fetch was in flight (a
+    // subagent transcript opened from the Agent Hub, another session selected):
+    // painting now would show the session the user left.
+    if (viewToken !== null && !transcriptView.isCurrent(viewToken)) return;
     const data = await res.json();
     messageRenderer.clear();
     logSessionRoute("history:render", {
@@ -3233,6 +3334,7 @@ async function renderSelectedSessionHistory(session, project) {
 
 async function switchSession(sessionFile, session = null, project = null) {
   try {
+    const viewToken = transcriptView.claimLive(sessionFile ?? null);
     state.reset();
     messageRenderer.clear();
     toolCardRenderer.clear();
@@ -3251,6 +3353,9 @@ async function switchSession(sessionFile, session = null, project = null) {
           const data = await res.json();
           console.log("[App] History entries:", data.entries?.length || 0);
 
+          // The transcript may have been claimed while this fetch was in
+          // flight (a subagent transcript, another selection).
+          if (!transcriptView.isCurrent(viewToken)) return;
           messageRenderer.clear();
           renderSessionHistory(data.entries || [], { searchQuery: sidebar.searchQuery });
         } catch (e) {
@@ -3430,6 +3535,21 @@ function handleMirrorSync(data) {
     setSupportedThinkingLevels(data.thinkingLevels);
   }
 
+  // A read-only agent transcript is on screen: this snapshot describes the
+  // foreground session, and repainting the transcript with it is exactly the
+  // "view transcript switched me to the wrong session" the Agent Hub used to
+  // show. Routing/model/streaming state above still applies — only the
+  // transcript repaint is skipped.
+  if (transcriptView.active) {
+    logSessionRoute("mirrorSync:keep-agent-peek", {
+      peeked: transcriptView.file,
+      snapshot: data.sessionFile || null,
+    });
+    updateCostDisplay();
+    updateTokenUsage();
+    return;
+  }
+
   // Clear and render message history
   messageRenderer.clear();
   resetTranscriptTotals();
@@ -3552,6 +3672,18 @@ function entriesWithMessageIds(entries) {
 
 function renderSessionHistory(entries, { searchQuery = "" } = {}) {
   console.log(`[History] Rendering ${entries.length} entries`);
+  // The id/role sequence of a render is what tells a duplicated draw (one entry,
+  // two elements) from a duplicated entry (two entries, two elements).
+  debugLog.log("transcript.render", {
+    entries: entries.length,
+    ids: (Array.isArray(entries) ? entries : []).slice(-12).map((entry) => ({
+      id: entry?.id ?? null,
+      type: entry?.type ?? null,
+      role: entry?.message?.role ?? null,
+      ts: entry?.message?.timestamp ?? null,
+    })),
+    peeking: transcriptView.active ? transcriptView.file : null,
+  });
   // Entry→renderer mapping lives in session-resync.js so the palette
   // "Resync transcript" action re-renders exactly like history loads.
   const counts = renderTranscriptFromEntries(entriesWithMessageIds(entries), {
@@ -4793,10 +4925,40 @@ createOAuthLogin({
 // Settings → Configuration sub-pages (see settings-config-subnav.js). Each
 // page's loaders run once, on its first visit; the agent-settings catalog is
 // fetched once and shared across the catalog-backed pages.
+// Settings → Debug: capture counts + bundle export (public/debug-panel.js).
+// The window metadata in the bundle is what makes an exported dump actionable
+// (which workspace, port and session it describes).
+const debugPanel = createDebugPanel({
+  root: document.querySelector('[data-settings-panel="configuration"]'),
+  meta: () => ({
+    app: "ompcot",
+    workspacePath: getCurrentWorkspacePath() || null,
+    foregroundPort: typeof foregroundPort === "number" ? foregroundPort : null,
+    activeSessionFile: sidebar?.activeSessionFile || null,
+    mirrorActiveSessionFile,
+    isStreaming: Boolean(state?.isStreaming),
+    language: getLanguage?.() ?? null,
+    userAgent: globalThis.navigator?.userAgent ?? null,
+    peekingAgentTranscript: transcriptView.active ? transcriptView.file : null,
+  }),
+});
+
+// Devtools/console escape hatch: the same buffer and export the Debug page uses.
+window.ompcotDebug = {
+  snapshot: () => debugLog.snapshot(),
+  size: () => debugLog.size(),
+  enable: () => debugLog.setEnabled(true),
+  disable: () => debugLog.setEnabled(false),
+  export: () => debugPanel.export(),
+};
+
 configSubnav = createConfigSubnav({
   root: document.querySelector('[data-settings-panel="configuration"]'),
   catalog: agentSettings,
   loaders: {
+    debug: () => {
+      debugPanel.refresh().catch(() => {});
+    },
     providers: () => {
       loadApiKeysPanel();
       loadInlineModelsEditor();

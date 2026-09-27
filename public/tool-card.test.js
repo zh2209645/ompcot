@@ -98,6 +98,27 @@ describe("ToolCardRenderer streaming updates", () => {
     expect(container.querySelector(".tool-output").textContent).toContain("final");
     expect(container.querySelector(".tool-card-body").classList.contains("expanded")).toBe(false);
   });
+
+  it("keeps a finished pill finished when a late update arrives", () => {
+    // Reported symptom: a running `wait` card kept flipping back to
+    // "Working…", restarting its pulse animation. A frame that lands after the
+    // end (duplicate, replayed, out-of-order) must not move the pill
+    // backwards.
+    renderer.createToolCard(streamingExecution({ toolName: "wait", status: "streaming" }));
+    const statusElement = container.querySelector(".tool-status");
+    renderer.finalizeToolCard("call_1", { content: [{ type: "text", text: "ready" }] }, false);
+
+    renderer.updateToolCard(
+      streamingExecution({ toolName: "wait", status: "streaming", output: "ready" }),
+    );
+    renderer.updateToolCard(
+      streamingExecution({ toolName: "wait", status: "pending", output: "ready" }),
+    );
+
+    expect(statusElement.className).toBe("tool-status complete");
+    expect(statusElement.textContent).toBe("Done");
+    expect(container.querySelector(".tool-output").textContent).toBe("ready");
+  });
 });
 
 describe("ToolCardRenderer follow behavior", () => {

@@ -24,6 +24,7 @@
  * supplies callbacks for the queue list and submit path).
  */
 
+import { syncComposerHeight } from "./composer-input.js";
 import { onLanguageChanged, t } from "./i18n.js";
 
 /** Exact error the server returns when a slash command is steered mid-run. */
@@ -337,6 +338,9 @@ export function createComposerCommands(deps) {
     input.value = `/${name} ${rest}`;
     const caret = name.length + 2; // after "/name "
     input.setSelectionRange(caret, caret);
+    // A longer command turns a one-line draft into a wrapped one: re-measure so
+    // the caret line is inside the box instead of clipped below it.
+    syncComposerHeight(input);
     closePopup();
     renderToggle();
   }
