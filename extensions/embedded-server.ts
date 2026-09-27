@@ -2364,7 +2364,7 @@ export default function (omp: ExtensionAPI) {
     "auto_compaction_end",
     "auto_retry_start",
     "auto_retry_end",
-    "model_select",
+    "session_branch",
   ] as const;
 
   // Cache the process-scoped ModelRegistry the first time we see any ctx.

@@ -1015,6 +1015,9 @@ function handleRPCEvent(event) {
     case "auto_compaction_end":
       handleCompactionEnd(event);
       break;
+    case "session_branch":
+      handleSessionBranch(event);
+      break;
     case "extension_ui_request":
       handleExtensionUIRequest(event);
       break;
@@ -1875,9 +1878,74 @@ function startForkAvailabilityObserver() {
   forkAvailabilityObserver.observe(messagesContainer, { childList: true, subtree: true });
 }
 
+// omp ≥18.3.1 performs forks through its native RPC `branch` (the extension
+// event context never carries ctx.branch), so the desktop broker forwards the
+// frame over the omp stdin pipe — fire-and-forget, since omp's RPC responses
+// land on a stdout the broker drops. Completion is confirmed by the forwarded
+// `session_branch` extension event instead; these waiters bridge the two.
+const sessionBranchWaiters = new Set();
+
+/**
+ * Resolve once a `session_branch` event arrives (true) or `timeoutMs` passes
+ * (false). Fork actions use this to turn the fire-and-forget broker control
+ * into an awaited outcome.
+ */
+function waitForSessionBranchEvent(timeoutMs) {
+  return new Promise((resolve) => {
+    const waiter = { resolve };
+    sessionBranchWaiters.add(waiter);
+    setTimeout(() => {
+      if (sessionBranchWaiters.delete(waiter)) resolve(false);
+    }, timeoutMs);
+  });
+}
+
+function handleSessionBranch() {
+  for (const waiter of sessionBranchWaiters) waiter.resolve(true);
+  sessionBranchWaiters.clear();
+}
+
+/**
+ * Fork via the broker's native `branch` RPC (omp ≥18.3.1). Resolves when the
+ * `session_branch` event confirms the new session; times out honestly if the
+ * embedded omp can't branch (frame silently rejected — its reply goes to the
+ * dropped stdout).
+ */
+async function forkViaBroker(entryId) {
+  if (!canUseSessionControl()) {
+    // No native broker handler (browser/LAN client): keep the server-side
+    // feature-missing vocabulary so the shared onError degrade maps it.
+    return Promise.reject(new Error("Fork unavailable in this build"));
+  }
+  const resolvedEntryId = entryId || latestRealEntryId();
+  if (!resolvedEntryId) {
+    messageRenderer.renderError(t("fork.failed"));
+    return false;
+  }
+  try {
+    await transport.forkSession(resolvedEntryId);
+  } catch (error) {
+    messageRenderer.renderError(String(error ?? t("fork.failed")));
+    return false;
+  }
+  const landed = await waitForSessionBranchEvent(10000);
+  if (!landed) {
+    messageRenderer.renderError(t("fork.failed"));
+    return false;
+  }
+  showTransientStatus(t("status.forked"));
+  sidebar.loadSessions({ quiet: true }).catch(() => {});
+  pollInstances().catch(() => {});
+  return true;
+}
 const forkActions = createForkActions({
   wsClient,
   messagesContainer,
+  // Desktop-only path (omp native `branch` via the broker). Evaluated at call
+  // time — broker capabilities arrive after module init. Non-native clients
+  // reject with the server's feature-missing vocabulary, which onError maps
+  // to the per-session "Fork unavailable" degrade.
+  sendForkViaBroker: forkViaBroker,
   onStatus: (message) => showTransientStatus(message),
   onError: (message) => {
     if (String(message ?? "").includes("Fork unavailable")) {

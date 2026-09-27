@@ -37,6 +37,10 @@
 //    id comes from the message element's `data-message-id` when it carries a
 //    real id (streaming placeholders and history renders without ids simply
 //    omit it, which the server treats as "fork from the latest entry").
+//    When that WS reply is "Fork unavailable" (omp keeps `branch` off the
+//    extension event context) and the caller injected `sendForkViaBroker`,
+//    the fork retries through omp's native RPC `branch` via the desktop
+//    broker instead.
 
 import { DialogHandler } from "./dialogs.js";
 import { onLanguageChanged, t } from "./i18n.js";
@@ -427,6 +431,7 @@ export const FORK_ICON_SVG =
 export function createForkActions({
   wsClient,
   messagesContainer,
+  sendForkViaBroker = null,
   onStatus = () => {},
   onError = () => {},
   onRefresh = () => {},
@@ -487,6 +492,22 @@ export function createForkActions({
     onStatus(t("status.forking"));
     const result = await wsRpc(wsClient, command, { timeoutMs: 20000 });
     if (!result.ok) {
+      // omp ≥18.3.1 keeps `branch` off the extension event context, so this
+      // WS path answers "Fork unavailable in this build" even though omp's
+      // native RPC can fork. The desktop broker injects `sendForkViaBroker`
+      // (omp's native `branch` over stdin, confirmed via `session_branch`);
+      // only the feature-missing error falls through — real failures stay
+      // failures. Clients without a native broker keep today's degrade.
+      if (sendForkViaBroker && String(result.error || "").includes("Fork unavailable")) {
+        // The injected path resolves false after surfacing its own error and
+        // only rejects with feature-missing vocabulary (non-native client).
+        try {
+          return await sendForkViaBroker(entryId);
+        } catch (e) {
+          onError(String(e?.message ?? e ?? t("fork.failed")));
+          return false;
+        }
+      }
       onError(result.error || t("fork.failed"));
       return false;
     }

@@ -36,7 +36,7 @@ Tauri IPC commands (invoked via `window.tauriNative` in `public/tauri-bridge.js`
 
 - Chat: streaming, tool cards, thinking blocks, abort, queued messages with Queue/Steer-now delivery, queued slash commands (composer `/` autocomplete backed by `list_commands`; slash prompts execute when omp is idle, auto-queue while streaming)
 - Model & reasoning: model dropdown, per-model thinking-depth menu (levels resolved from `ctx.model.thinking.efforts`; non-controllable models disable the controls), Configuration → Models & Reasoning page (default model + default thinking depth, 15 model roles, task-agent model overrides/disable — selectors composed as `provider/model:effort`)
-- Sessions: history/search/favourites/archive/rename/batch-delete, export HTML, fork (`ctx.branch` — wired, awaiting upstream availability on 18.3.0), transcript re-sync, external import entry points (honest interactive-only guidance)
+- Sessions: history/search/favourites/archive/rename/batch-delete, export HTML, fork (works on omp ≥18.3.1: broker native RPC `branch` + `session_branch` event ack; WS `ctx.branch` path kept for future builds), transcript re-sync, external import entry points (honest interactive-only guidance)
 - Agent Hub: right-dock panel with live agent roster (`AgentRegistry`), status, and read-only nested transcript viewing
 - MCP management: Configuration → MCP page — server cards, add/edit (stdio/http/sse) via omp's own validators/writers (file-URL import of the `/mcp` module), enable/disable with persistence; live connection status honestly degraded when the bundled omp build can't expose it
 - Interactive UI requests: omp's `extension_ui_request` loop (select/confirm/input) fully interactive — replayable pending dialogs, absolute deadlines, cancel frames

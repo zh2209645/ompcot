@@ -471,4 +471,46 @@ describe("fork actions", () => {
     await tick();
     expect(onError).toHaveBeenCalledWith("cannot fork a running session");
   });
+
+  test("WS 'Fork unavailable' retries through the injected broker path", async () => {
+    assistantMessage("entry-9");
+    const sendForkViaBroker = vi.fn().mockResolvedValue(true);
+    const ctx = createActions(new MockWsClient(), { sendForkViaBroker });
+
+    const forked = ctx.actions.forkFromElement(document.querySelector(".message.assistant"));
+    await tick();
+    ctx.ws.respond(undefined, { success: false, error: "Fork unavailable in this build" });
+    await forked;
+    expect(sendForkViaBroker).toHaveBeenCalledWith("entry-9");
+  });
+
+  test("broker path rejection with feature-missing vocabulary hits onError", async () => {
+    assistantMessage("entry-9");
+    const onError = vi.fn();
+    const sendForkViaBroker = vi
+      .fn()
+      .mockRejectedValue(new Error("Fork unavailable in this build"));
+    const ctx = createActions(new MockWsClient(), { sendForkViaBroker, onError });
+
+    const forked = ctx.actions.forkFromElement(document.querySelector(".message.assistant"));
+    await tick();
+    ctx.ws.respond(undefined, { success: false, error: "Fork unavailable in this build" });
+    await forked;
+    expect(sendForkViaBroker).toHaveBeenCalledWith("entry-9");
+    expect(onError).toHaveBeenCalledWith("Fork unavailable in this build");
+  });
+
+  test("real WS failures never reach the broker path", async () => {
+    assistantMessage("entry-1");
+    const onError = vi.fn();
+    const sendForkViaBroker = vi.fn();
+    const ctx = createActions(new MockWsClient(), { sendForkViaBroker, onError });
+
+    document.querySelector(".message-fork-btn").click();
+    await tick();
+    ctx.ws.respond(undefined, { success: false, error: "cannot fork a running session" });
+    await tick();
+    expect(sendForkViaBroker).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith("cannot fork a running session");
+  });
 });

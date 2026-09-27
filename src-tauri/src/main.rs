@@ -51,6 +51,20 @@ fn switch_session_core(
     result
 }
 
+/// Fork (branch) the current session of the omp instance on `port` from a
+/// transcript entry, using omp's native RPC `branch` command (available since
+/// omp 18.3.1). Like `switch_session_core` this is fire-and-forget on purpose:
+/// omp's RPC responses go to a stdout we deliberately drop, so the WebView
+/// confirms completion via the `session_branch` extension event instead. The
+/// branched session file is unknown here — the embedded server's instance
+/// registry picks it up when the session reloads.
+fn fork_session_core(port: u16, entry_id: &str, manager: &OmpManager) -> Result<(), String> {
+    manager.send_rpc(
+        port,
+        serde_json::json!({ "type": "branch", "entryId": entry_id }),
+    )
+}
+
 /// Open a workspace directory by spawning a separate omp process.
 /// When `open_window` is true (default) a new OS window is opened for the new omp.
 /// When false, the omp process is spawned headlessly and the caller is expected to
@@ -902,6 +916,12 @@ fn install_control_handler(broker: &Arc<BrokerWs>, manager: Arc<OmpManager>, app
                             arg_str("sessionPath").ok_or("sessionPath is required")?;
                         let port = resolve_control_port(arg_u16("port"), &broker)?;
                         switch_session_core(port, &session_path, &manager, &broker)?;
+                        Ok(Value::Null)
+                    }
+                    "fork_session" => {
+                        let entry_id = arg_str("entryId").ok_or("entryId is required")?;
+                        let port = resolve_control_port(arg_u16("port"), &broker)?;
+                        fork_session_core(port, &entry_id, &manager)?;
                         Ok(Value::Null)
                     }
                     "stop_instance" => {
