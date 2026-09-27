@@ -3634,6 +3634,21 @@ body {
   min-width: 0;
 }
 
+/* Assistant messages take the full text column instead of shrinking to their
+   content. The blocks inside them (thinking blocks, code, tables) size
+   themselves off `.message-content`, so a shrink-to-fit message made the same
+   block render at wildly different widths: a thinking-only turn collapsed to
+   the width of its "Thinking" label while the identical block under a
+   paragraph spanned the column. `width` mirrors the `max-width` cap so every
+   assistant message — and every block inside it — is one uniform width. */
+.message.assistant {
+  width: 85%;
+}
+
+.message.assistant .message-content {
+  flex: 1 1 auto;
+}
+
 .message.history {
   animation: none;
 }
