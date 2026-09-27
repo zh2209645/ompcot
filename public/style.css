@@ -5353,6 +5353,51 @@ body.hide-thinking .thinking-block {
   white-space: pre-line;
 }
 
+/* Session notices (displayable `custom_message` entries): a distinct, dimmer
+   block than a message — omp writes them itself (background-job delivery,
+   launch completion, late diagnostics), not the model. Long job payloads are
+   clamped like a thinking block instead of flooding the feed. */
+.notice-block {
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 6px 0;
+  backdrop-filter: blur(8px);
+}
+
+.notice-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.notice-label {
+  font-size: calc(10px * var(--font-scale));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.notice-type {
+  font-family: var(--font-mono);
+  font-size: calc(10px * var(--font-scale));
+  color: var(--text-ghost);
+}
+
+.notice-body {
+  font-size: calc(12px * var(--font-scale));
+  color: var(--text-secondary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 /* ═══════════════════════════════════════════════════════
    File Browser — right sidebar
    ═══════════════════════════════════════════════════════ */
@@ -6144,6 +6189,12 @@ body.hide-thinking .thinking-block {
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    /* …and the iteration count, or every `infinite` animation (the streaming
+       status pill's pulse, the sidebar/Agent-Hub dots, the streaming caret)
+       becomes a 0.01ms loop: a ~100 kHz strobe instead of "no motion". With
+       the count capped each of them runs once, instantly, and rests at its
+       base style. */
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
 }

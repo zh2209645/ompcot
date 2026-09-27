@@ -461,6 +461,10 @@ export const zhCN = {
   // ── tool cards ──
   "tool.copyOutput": "复制输出",
 
+  // ── session notices (displayable `custom_message` entries) ──
+  "notice.label": "通知",
+  "notice.typeTitle": "来自 {type} 的通知",
+
   // ── chat messages / markdown chrome ──
   "msg.copy": "复制",
   "msg.copied": "已复制！",

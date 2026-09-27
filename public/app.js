@@ -66,7 +66,7 @@ import {
   showSettingsSaveSuccess,
 } from "./settings-save-status.js";
 import { setupSidebarSearchControl } from "./sidebar-search-control.js";
-import { StateManager } from "./state.js";
+import { agentEndContinues, StateManager } from "./state.js";
 import { loadImportedThemes, removeImportedTheme, setupThemeImport } from "./theme-import.js";
 import { applyTheme, getCurrentTheme, registerImportedThemes, themes } from "./themes.js";
 import { setupThinkingLevelMenu } from "./thinking-level-menu.js";
@@ -640,9 +640,9 @@ async function showAgentTranscript(sessionFile) {
  *   the live view (no switch, no state reset);
  * - anything else → read-only peek through `get_agent_transcript`.
  */
-function openSessionFromFile(sessionFile) {
+function openSessionFromFile(sessionFile, kind = null) {
   if (!sessionFile) return;
-  const action = resolveTranscriptOpenAction({ sessionFile }, [
+  const action = resolveTranscriptOpenAction({ sessionFile, kind }, [
     mirrorActiveSessionFile,
     sidebar.activeSessionFile,
     getCurrentLiveSessionFile(),
@@ -1136,6 +1136,17 @@ function handleRPCEvent(event) {
         refreshSidebarForNewSession(event).catch(() => {});
       }
       break;
+    case "session_notice":
+      // A displayable `custom_message` entry (background-job delivery, launch
+      // completion, late diagnostics) the extension diffed off the session.
+      // Appended like any other transcript item; `renderNotice` drops an entry
+      // a snapshot already drew.
+      messageRenderer.renderNotice({
+        id: event.entryId,
+        customType: event.customType,
+        content: event.content,
+      });
+      break;
     case "tool_execution_start":
       handleToolExecutionStart(event);
       break;
@@ -1176,6 +1187,10 @@ function handleBackgroundRPCEvent(sessionFile, event) {
       sidebar.setStreaming(sessionFile, true);
       break;
     case "agent_end":
+      // A continuing end (`willContinue`) is not the end of that session's run:
+      // clearing the mark and marking it unread there flickered the dot and the
+      // unread badge for a run that resumes on its own.
+      if (agentEndContinues(event)) break;
       sidebar.setStreaming(sessionFile, false);
       foregroundStreamingFiles.delete(sessionFile);
       sidebar.markUnread(sessionFile);
@@ -1295,15 +1310,21 @@ function handleAgentStart(event = null) {
 }
 
 function handleAgentEnd(event = null) {
-  state.setStreaming(false);
-  showTypingIndicator(false);
-  // The run is over. Finish the live element here rather than only settling it:
-  // when its `message_end` never arrives (a frame dropped by a saturated
-  // client, a process that died mid-run) the settled element kept its partial
-  // content for good — and the next render of the same message (a snapshot or
-  // a resync) then showed the reply a second time, complete. Finalizing from
-  // the last cumulative frame marks the element done, so any later frame for
-  // that message is a no-op instead of a second copy.
+  // A `willContinue` end is not the end of the run: the session has already
+  // scheduled its own continuation (auto-retry, empty-stop retry, compaction
+  // continuation, or — 18.3.3 — a pause awaiting background work). The host's
+  // contract says subscribers must not treat it as a terminal settle, so only
+  // the turn's message element is finished here; everything that says "the run
+  // is over" waits for the terminal end (see state.agentEndContinues).
+  const willContinue = agentEndContinues(event);
+
+  // Finish the live element either way: when its `message_end` never arrives (a
+  // frame dropped by a saturated client, a process that died mid-run) the
+  // settled element kept its partial content for good — and the next render of
+  // the same message (a snapshot or a resync) then showed the reply a second
+  // time, complete. Finalizing from the last cumulative frame marks the element
+  // done, so any later frame for that message is a no-op instead of a second
+  // copy.
   finishStreamingElement(currentStreamingElement);
   currentStreamingElement = null;
   currentStreamingText = "";
@@ -1314,6 +1335,18 @@ function handleAgentEnd(event = null) {
   // chain's text.
   currentStreamingThinking = [];
   currentStreamingEntryId = null;
+
+  if (willContinue) {
+    // The run keeps going: leave the streaming state, the sidebar mark, the
+    // unread flag and the composer queue alone. The cards that were waiting for
+    // this message are released (the message is finalized), but the calls
+    // themselves stay open — the continuation can still end them.
+    flushDeferredToolCards();
+    return;
+  }
+
+  state.setStreaming(false);
+  showTypingIndicator(false);
   // Nothing can still be running now, so nothing may keep pulsing: a call whose
   // end frame never arrived (suppressed by a peek, dropped on a saturated
   // client, lost with a dead process) would otherwise show "Working…" for good,

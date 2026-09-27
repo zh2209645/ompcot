@@ -6,6 +6,7 @@ import {
   type InstanceEntry,
   mergeInstanceEntry,
   parseInstanceEntry,
+  runStateHintForEvent,
 } from "./embedded-server.ts";
 
 const base: InstanceEntry = {
@@ -95,5 +96,31 @@ describe("parseInstanceEntry", () => {
     );
     expect(parsed).not.toBeNull();
     expect(parsed?.isStreaming).toBeUndefined();
+  });
+});
+
+describe("runStateHintForEvent", () => {
+  it("marks the run as going on agent_start", () => {
+    expect(runStateHintForEvent("agent_start", { type: "agent_start" })).toBe(true);
+  });
+
+  it("keeps a non-terminal agent_end marked as running", () => {
+    // `willContinue` means the session already scheduled its own continuation
+    // (auto-retry, stop-retry, compaction continuation), and omp 18.3.3 added a
+    // background-work pause on top. Publishing `false` there cleared the
+    // sidebar mark and every other window's view of this process mid-run.
+    expect(runStateHintForEvent("agent_end", { type: "agent_end", willContinue: true })).toBe(true);
+  });
+
+  it("clears the run on a terminal agent_end", () => {
+    expect(runStateHintForEvent("agent_end", { type: "agent_end" })).toBe(false);
+    expect(runStateHintForEvent("agent_end", { willContinue: false })).toBe(false);
+    // Only a literal true continues (a stray string must not pin the mark on).
+    expect(runStateHintForEvent("agent_end", { willContinue: "true" })).toBe(false);
+  });
+
+  it("leaves the published flag alone for every other event", () => {
+    expect(runStateHintForEvent("message_end", { willContinue: true })).toBeUndefined();
+    expect(runStateHintForEvent("tool_execution_end", {})).toBeUndefined();
   });
 });

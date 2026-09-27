@@ -41,6 +41,7 @@ const TRANSCRIPT_EVENTS = new Set([
   "auto_compaction_start",
   "auto_compaction_end",
   "extension_error",
+  "session_notice",
 ]);
 
 /** True when `type` is an event that renders into the transcript. */

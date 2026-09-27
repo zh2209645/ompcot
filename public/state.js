@@ -28,6 +28,27 @@ export function nextToolStatus(current, next) {
 }
 
 /**
+ * Whether an `agent_end` frame ends the RUN or only the turn.
+ *
+ * The host's contract for `AgentEndEvent.willContinue`: "When true, the session
+ * has already scheduled an automatic continuation (auto-retry,
+ * empty/unexpected-stop retry, etc.). Subscribers must not treat this as a
+ * user-visible terminal settle." omp 18.3.3 added a second non-terminal case —
+ * a run handing control back to await background work — which the extension
+ * cannot see from this frame (the host keeps `isTerminal`/`awaitingAsyncWork`
+ * to itself), so `willContinue` is the only signal the GUI has.
+ *
+ * Treating a continuing end as terminal cleared the streaming state and the
+ * sidebar mark, marked the session unread, flushed the composer queue and ran a
+ * deferred `switch_session` — all while the run was still going, and the next
+ * `agent_start` re-lit the UI ("the run ended, then resurrected"). Exported for
+ * tests.
+ */
+export function agentEndContinues(event) {
+  return event?.willContinue === true;
+}
+
+/**
  * Fold an incoming tool update into the known state of that call.
  *
  * Monotonic in both directions that matter to the UI: the status never moves

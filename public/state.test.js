@@ -1,5 +1,27 @@
 import { describe, expect, test } from "vitest";
-import { mergeToolExecution, nextToolStatus, StateManager } from "./state.js";
+import { agentEndContinues, mergeToolExecution, nextToolStatus, StateManager } from "./state.js";
+
+describe("agentEndContinues", () => {
+  test("a scheduled continuation is not the end of the run", () => {
+    // `willContinue: true` means omp already queued its own continuation
+    // (auto-retry, empty-stop retry, compaction) — the host's contract says
+    // subscribers must not treat it as a terminal settle.
+    expect(agentEndContinues({ type: "agent_end", willContinue: true })).toBe(true);
+  });
+
+  test("a plain end is terminal", () => {
+    expect(agentEndContinues({ type: "agent_end" })).toBe(false);
+    expect(agentEndContinues({ type: "agent_end", willContinue: false })).toBe(false);
+    // Absent event object (defensive call sites pass null) is terminal.
+    expect(agentEndContinues(null)).toBe(false);
+    expect(agentEndContinues(undefined)).toBe(false);
+  });
+
+  test("only a literal true continues", () => {
+    expect(agentEndContinues({ willContinue: "true" })).toBe(false);
+    expect(agentEndContinues({ willContinue: 1 })).toBe(false);
+  });
+});
 
 describe("nextToolStatus", () => {
   test("only moves forward through the lifecycle", () => {

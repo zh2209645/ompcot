@@ -64,7 +64,7 @@ describe("renderTranscriptFromEntries", () => {
     const onAssistantUsage = vi.fn();
     const counts = renderTranscriptFromEntries(fixture, { ...renderers, onAssistantUsage });
 
-    expect(counts).toEqual({ user: 1, assistant: 1, toolCards: 1, toolResults: 1 });
+    expect(counts).toEqual({ user: 1, assistant: 1, toolCards: 1, toolResults: 1, notices: 0 });
 
     // User message: text + extracted image, rendered in history mode.
     expect(renderers.messageRenderer.renderUserMessage).toHaveBeenCalledTimes(1);
@@ -100,6 +100,59 @@ describe("renderTranscriptFromEntries", () => {
     );
   });
 
+  test("renders displayable notices and skips the hidden ones", () => {
+    const renderers = makeRenderers();
+    renderers.messageRenderer.renderNotice = vi.fn(() => document.createElement("div"));
+    const counts = renderTranscriptFromEntries(
+      [
+        {
+          type: "custom_message",
+          id: "n1",
+          customType: "async-result",
+          display: true,
+          content: "Background job done",
+        },
+        // Hidden by design (`mid-run-todo-nudge` and friends).
+        {
+          type: "custom_message",
+          id: "n2",
+          customType: "mid-run-todo-nudge",
+          display: false,
+          content: "nudge",
+        },
+        { type: "message", message: { role: "user", content: "after" } },
+      ],
+      renderers,
+    );
+
+    expect(renderers.messageRenderer.renderNotice).toHaveBeenCalledTimes(1);
+    expect(renderers.messageRenderer.renderNotice).toHaveBeenCalledWith({
+      id: "n1",
+      customType: "async-result",
+      content: "Background job done",
+    });
+    expect(counts.notices).toBe(1);
+    // The notice does not break the walk: entries after it still render.
+    expect(counts.user).toBe(1);
+  });
+
+  test("tolerates a renderer without notice support", () => {
+    const renderers = makeRenderers(); // no renderNotice on the mock
+    const counts = renderTranscriptFromEntries(
+      [
+        {
+          type: "custom_message",
+          id: "n1",
+          customType: "async-result",
+          display: true,
+          content: "x",
+        },
+      ],
+      renderers,
+    );
+    expect(counts.notices).toBe(0);
+  });
+
   test("renders a plain string user message without image extraction", () => {
     const renderers = makeRenderers();
     renderTranscriptFromEntries(
@@ -126,7 +179,7 @@ describe("renderTranscriptFromEntries", () => {
       ],
       renderers,
     );
-    expect(counts).toEqual({ user: 0, assistant: 0, toolCards: 1, toolResults: 0 });
+    expect(counts).toEqual({ user: 0, assistant: 0, toolCards: 1, toolResults: 0, notices: 0 });
     expect(renderers.messageRenderer.renderAssistantMessage).not.toHaveBeenCalled();
     expect(renderers.toolCardRenderer.createHistoryCard).toHaveBeenCalledTimes(1);
   });
@@ -138,12 +191,14 @@ describe("renderTranscriptFromEntries", () => {
       assistant: 0,
       toolCards: 0,
       toolResults: 0,
+      notices: 0,
     });
     expect(renderTranscriptFromEntries([], renderers)).toEqual({
       user: 0,
       assistant: 0,
       toolCards: 0,
       toolResults: 0,
+      notices: 0,
     });
     expect(renderers.messageRenderer.renderUserMessage).not.toHaveBeenCalled();
   });

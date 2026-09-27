@@ -472,6 +472,10 @@ export const en = {
   // ── tool cards ──
   "tool.copyOutput": "Copy output",
 
+  // ── session notices (displayable `custom_message` entries) ──
+  "notice.label": "Notice",
+  "notice.typeTitle": "Notice from {type}",
+
   // ── chat messages / markdown chrome ──
   "msg.copy": "Copy",
   "msg.copied": "Copied!",

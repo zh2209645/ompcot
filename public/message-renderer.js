@@ -545,6 +545,63 @@ export class MessageRenderer {
     this.scrollToBottom();
   }
 
+  /**
+   * Append a displayable session notice.
+   *
+   * omp persists notices the TUI renders as `custom_message` entries with
+   * `display: true` (background-job delivery `async-result`, `launch-completion`,
+   * late diagnostics). They are ordinary transcript items — the same reply can
+   * be re-read from the session file — so the element is keyed on the entry id
+   * and an entry that is already on screen (a snapshot repaint drew it, then
+   * the extension forwarded it, or a resync replayed it) is not drawn twice.
+   *
+   * @param {{id?: string|null, customType?: string, content?: unknown}} notice
+   * @returns {HTMLElement|null} the appended element, or null when skipped
+   */
+  renderNotice({ id = null, customType = "", content = null } = {}) {
+    const text = noticeText(content);
+    if (!text) return null;
+    if (typeof id === "string" && id && this.findNoticeElement(id)) return null;
+
+    const block = document.createElement("div");
+    block.className = "notice-block";
+    if (typeof id === "string" && id) block.dataset.noticeId = id;
+
+    const head = document.createElement("div");
+    head.className = "notice-head";
+    const label = document.createElement("span");
+    label.className = "notice-label";
+    label.textContent = t("notice.label");
+    head.appendChild(label);
+    if (customType) {
+      // The producer's identifier (omp's own or an extension's) is data, not a
+      // translatable label — shown as written, like a tool name.
+      const type = document.createElement("span");
+      type.className = "notice-type";
+      type.textContent = customType;
+      type.title = t("notice.typeTitle", { type: customType });
+      head.appendChild(type);
+    }
+    block.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "notice-body";
+    body.textContent = text;
+    block.appendChild(body);
+
+    this.container.appendChild(block);
+    this.scrollToBottom();
+    return block;
+  }
+
+  /** The notice element for a session-entry id, if it is on screen. */
+  findNoticeElement(entryId) {
+    for (const el of this.container.querySelectorAll("[data-notice-id]")) {
+      if (el.dataset.noticeId === entryId) return el;
+    }
+    return null;
+  }
+
   renderError(errorMessage) {
     const div = document.createElement("div");
     div.className = "error-message";
@@ -648,4 +705,29 @@ export class MessageRenderer {
   jumpToBottom() {
     this.follow.jump();
   }
+}
+
+/**
+ * Plain text of a notice entry's `content` (a string, or content blocks).
+ *
+ * omp ships some notices wrapped in a `<system-notice>` envelope — markup the
+ * model is meant to see, not the reader; the block already carries a notice
+ * label, so a wrapper around the whole payload is unwrapped. Anything else is
+ * rendered verbatim (textContent, so no markup is interpreted).
+ */
+function noticeText(content) {
+  const raw =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .filter((block) => block && block.type === "text" && typeof block.text === "string")
+            .map((block) => block.text)
+            .join("\n")
+        : "";
+  const text = raw.trim();
+  const opened = /^<system-notice>\s*/i.exec(text);
+  if (!opened) return text;
+  const rest = text.slice(opened[0].length);
+  return rest.replace(/\s*<\/system-notice>$/i, "").trim();
 }

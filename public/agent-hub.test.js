@@ -165,7 +165,30 @@ describe("agent hub panel", () => {
     await openRostered(ctx);
 
     rows()[0].querySelector(".agent-hub-open").click();
-    expect(ctx.onOpenSession).toHaveBeenCalledWith(ROSTER[0].sessionFile);
+    // The row's kind travels with the click: `main` is this process's own
+    // session and must be handed back to the live view, never peeked.
+    expect(ctx.onOpenSession).toHaveBeenCalledWith(ROSTER[0].sessionFile, "sub");
+  });
+
+  test("the main row opens as `main`, so a stale roster path cannot be peeked", async () => {
+    const ctx = createHub();
+    await openRostered(ctx, {
+      agents: [
+        {
+          id: "main-1",
+          name: "Main session",
+          kind: "main",
+          parentId: null,
+          status: "running",
+          running: true,
+          sessionFile: "/ws/.omp/sessions/proj/stale.jsonl",
+        },
+      ],
+      available: true,
+    });
+
+    rows()[0].querySelector(".agent-hub-open").click();
+    expect(ctx.onOpenSession).toHaveBeenCalledWith("/ws/.omp/sessions/proj/stale.jsonl", "main");
   });
 
   test("available:false shows the unavailable note while open and hides the toggle once closed", async () => {

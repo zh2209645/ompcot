@@ -450,6 +450,134 @@ export function mergeInstanceEntry(
   };
 }
 
+/**
+ * Run-state hint an event publishes to the instance registry (`undefined` =
+ * leave the published flag alone).
+ *
+ * A lifecycle pair is not symmetric: `agent_start` always means a run is going,
+ * but `agent_end` only means one when it is terminal. The host's contract for
+ * `AgentEndEvent.willContinue` is explicit — "the session has already scheduled
+ * an automatic continuation (auto-retry, empty/unexpected-stop retry, etc.);
+ * subscribers must not treat this as a user-visible terminal settle" — and omp
+ * 18.3.3 added a second non-terminal case (a run yielding to background work).
+ * Publishing `false` there cleared the sidebar's running mark and every other
+ * window's view of this process while the run was still going, and the deduped
+ * pair kept it wrong until the next lifecycle frame. Exported for tests.
+ */
+export function runStateHintForEvent(eventType: string, event: unknown): boolean | undefined {
+  if (eventType === "agent_start") return true;
+  if (eventType !== "agent_end") return undefined;
+  const willContinue =
+    (event as { willContinue?: unknown } | null | undefined)?.willContinue === true;
+  return willContinue;
+}
+
+/**
+ * One row of the Agent Hub roster, as sent to the GUI (`list_agents`).
+ *
+ * Frozen shape: `advisor` refs are observability-only and excluded; `main` and
+ * `sub` are included.
+ */
+export type AgentRosterRow = {
+  id: string;
+  name: string;
+  kind: string;
+  parentId: string | null;
+  status: string;
+  running: boolean;
+  sessionFile: string | null;
+};
+
+/**
+ * Point the `main` row at the session this process is driving right now.
+ *
+ * omp's agent registry registers the main agent once, at process start, and the
+ * ref keeps that registration's session file — after `new_session`, a switch or
+ * a fork it still names the session the process was born with. The GUI's "view
+ * transcript" on that row compares it against the window's live session, so a
+ * stale value missed the comparison and the click peeked a *different*
+ * session's transcript while the window was already on the live one. Subagent
+ * rows are untouched (their files live in their own session tree). Exported for
+ * tests.
+ */
+export function applyLiveMainSession(
+  agents: AgentRosterRow[],
+  liveSessionFile: string | null,
+): AgentRosterRow[] {
+  if (!liveSessionFile) return agents;
+  return agents.map((agent) =>
+    agent.kind === "main" ? { ...agent, sessionFile: liveSessionFile } : agent,
+  );
+}
+
+/**
+ * One displayable session notice, as forwarded to the GUI (`session_notice`).
+ *
+ * `content` is the entry's raw payload (a string or content blocks); the GUI
+ * renders the text blocks. `customType` identifies who wrote it
+ * (`async-result`, `launch-completion`, …).
+ */
+export type SessionNotice = {
+  entryId: string;
+  customType: string;
+  content: unknown;
+};
+
+/**
+ * Events after which a notice may have been appended: job delivery lands
+ * between turns, late diagnostics during one. Checking only here keeps the
+ * entry diff off the streaming hot path. Module-scope literal table rather
+ * than a `Set` because membership is static.
+ */
+export const NOTICE_CHECK_EVENTS: Record<string, true> = {
+  turn_end: true,
+  message_end: true,
+  tool_execution_end: true,
+  agent_end: true,
+};
+
+/**
+ * Bounded memory for forwarded notice ids. Notices are rare (tens per
+ * session), so clearing at the cap can only re-offer very old entries — which
+ * the frontend's own dedupe drops.
+ */
+export const NOTICE_ID_MEMORY = 200;
+
+/**
+ * Displayable `custom_message` entries that have not been forwarded yet.
+ *
+ * `display: false` notices are hidden by design and stay hidden here; entries
+ * without an id cannot be deduped, so they are left to the snapshot path.
+ * Exported for tests.
+ */
+export function newDisplayableNotices(
+  entries: unknown,
+  forwardedIds: Set<string>,
+): SessionNotice[] {
+  if (!Array.isArray(entries)) return [];
+  const notices: SessionNotice[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as {
+      type?: unknown;
+      id?: unknown;
+      display?: unknown;
+      customType?: unknown;
+      content?: unknown;
+    };
+    if (record.type !== "custom_message") continue;
+    if (record.display === false) continue;
+    if (typeof record.id !== "string" || !record.id) continue;
+    if (forwardedIds.has(record.id)) continue;
+    notices.push({
+      entryId: record.id,
+      customType: typeof record.customType === "string" ? record.customType : "",
+      content: record.content,
+    });
+  }
+  return notices;
+}
+
 /** Apply one patch to the published entry (a missing flag keeps its last value). */
 export function applyInstancePatch(
   entry: InstanceEntry,
@@ -2321,6 +2449,36 @@ export default function (omp: ExtensionAPI) {
     }
   }
 
+  // ═══════════════════════════════════════
+  // Session notices (displayable `custom_message` entries)
+  // ═══════════════════════════════════════
+  //
+  // omp persists notices as `custom_message` entries: `display: true` ones are
+  // meant to be shown (`async-result` for a delivered background-job result,
+  // `launch-completion`, `lsp-late-diagnostic`), `display: false` ones stay
+  // hidden (`mid-run-todo-nudge`, tool-roster notices). Both transcript paths
+  // are entry-driven — a snapshot/resync renders the entries, a fresh notice
+  // has no extension event at all — so a notice written mid-run was invisible
+  // until the next resync. This diffs the session's entries on the quiet
+  // lifecycle frames and forwards the new ones; the frontend appends them in
+  // order and skips an entry it already drew from a snapshot.
+  const forwardedNoticeIds = new Set<string>();
+
+  function forwardSessionNotices(ctx: ExtensionContext | null) {
+    if (!ctx) return;
+    let notices: SessionNotice[];
+    try {
+      notices = newDisplayableNotices(ctx.sessionManager.getEntries(), forwardedNoticeIds);
+    } catch {
+      return; // a session mid-swap is not an error worth surfacing
+    }
+    for (const notice of notices) {
+      if (forwardedNoticeIds.size >= NOTICE_ID_MEMORY) forwardedNoticeIds.clear();
+      forwardedNoticeIds.add(notice.entryId);
+      broadcast({ type: "event", event: { type: "session_notice", ...notice } });
+    }
+  }
+
   // NOTE: we intentionally do NOT close the HTTP/WS server on
   // `session_shutdown`. The server is owned by `globalState` and lives for
   // the whole omp process lifetime — see the comment on `EmbeddedServerGlobal`
@@ -2870,10 +3028,16 @@ export default function (omp: ExtensionAPI) {
         // The lifecycle pair is authoritative for its own transition; every
         // other event re-reads the runtime's idle flag, so a lost or
         // mis-tagged lifecycle frame cannot leave a session marked as running.
-        syncInstanceActivity(
-          ctx,
-          eventType === "agent_start" ? true : eventType === "agent_end" ? false : undefined,
-        );
+        // A non-terminal `agent_end` (`willContinue`) keeps the run marked:
+        // the session resumes itself without a fresh `agent_start` only for
+        // some of its continuations (see runStateHintForEvent).
+        syncInstanceActivity(ctx, runStateHintForEvent(eventType, event));
+
+        // A notice written since the last frame (`async-result` delivery,
+        // launch completion, late diagnostics) has no event of its own; the
+        // quiet lifecycle frames are where it is picked up (see
+        // forwardSessionNotices).
+        if (NOTICE_CHECK_EVENTS[eventType]) forwardSessionNotices(ctx);
 
         // Forward event to all connected browser clients
         // Wrap in { type: "event", event: ... } to match the existing frontend
@@ -5132,18 +5296,7 @@ export default function (omp: ExtensionAPI) {
   // Frozen sanitize: EXACTLY {id, name, kind, parentId, status, running,
   // sessionFile}. `advisor` refs are observability-only and excluded; `main`
   // refs are included (the GUI shows main + subs).
-  function sanitizeAgentRef(
-    ref: AgentRefLike,
-    registry: AgentRegistryLike,
-  ): {
-    id: string;
-    name: string;
-    kind: string;
-    parentId: string | null;
-    status: string;
-    running: boolean;
-    sessionFile: string | null;
-  } | null {
+  function sanitizeAgentRef(ref: AgentRefLike, registry: AgentRegistryLike): AgentRosterRow | null {
     if (!ref || typeof ref !== "object") return null;
     const kind = typeof ref.kind === "string" ? ref.kind : "sub";
     if (kind === "advisor") return null;
@@ -5163,9 +5316,7 @@ export default function (omp: ExtensionAPI) {
     };
   }
 
-  type SanitizedAgent = NonNullable<ReturnType<typeof sanitizeAgentRef>>;
-
-  function listSanitizedAgents(): { agents: SanitizedAgent[]; available: boolean } {
+  function listSanitizedAgents(): { agents: AgentRosterRow[]; available: boolean } {
     const registry = resolveAgentRegistry();
     if (!registry) return { agents: [], available: false };
     try {
@@ -5176,7 +5327,16 @@ export default function (omp: ExtensionAPI) {
         const sanitized = sanitizeAgentRef(ref as AgentRefLike, registry);
         if (sanitized) agents.push(sanitized);
       }
-      return { agents, available: true };
+      // omp registers the main agent once, at process start, and its ref keeps
+      // that registration's session file — after `new_session`, a switch or a
+      // fork the row still named the session the process was born with. The
+      // roster's `main` row is the "go back to the live session" affordance, so
+      // it must carry the session this process is driving *now*: the published
+      // ctx is that source of truth (the same one the instance registry
+      // mirrors), and a stale value made a click on it peek a different
+      // session's transcript while the window was already on the live one.
+      const liveSessionFile = currentSessionIdFromCtx(globalState.getLatestCtx?.() ?? latestCtx);
+      return { agents: applyLiveMainSession(agents, liveSessionFile), available: true };
     } catch (err: unknown) {
       console.error("[Embedded] list_agents failed:", errMessage(err));
       return { agents: [], available: false };

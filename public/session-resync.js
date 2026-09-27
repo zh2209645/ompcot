@@ -28,10 +28,24 @@ export function renderTranscriptFromEntries(
   entries,
   { messageRenderer, toolCardRenderer, searchQuery = "", onAssistantUsage = null } = {},
 ) {
-  const counts = { user: 0, assistant: 0, toolCards: 0, toolResults: 0 };
+  const counts = { user: 0, assistant: 0, toolCards: 0, toolResults: 0, notices: 0 };
   if (!Array.isArray(entries)) return counts;
 
   for (const entry of entries) {
+    // Displayable session notices (`async-result` for a delivered background
+    // job, `launch-completion`, late diagnostics) are entries of their own kind
+    // and part of the transcript; `display: false` ones are hidden by design.
+    if (entry?.type === "custom_message") {
+      if (entry.display !== false && typeof messageRenderer.renderNotice === "function") {
+        const drawn = messageRenderer.renderNotice({
+          id: entry.id,
+          customType: entry.customType,
+          content: entry.content,
+        });
+        if (drawn) counts.notices++;
+      }
+      continue;
+    }
     if (entry?.type !== "message") continue;
     const msg = entry.message;
     if (!msg) continue;

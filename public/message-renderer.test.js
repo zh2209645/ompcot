@@ -462,3 +462,60 @@ describe("duplicate transcript detection (debug capture)", () => {
     expect(renderer.reportDuplicateMessages()).toEqual([]);
   });
 });
+
+describe("MessageRenderer session notices", () => {
+  let container;
+  let renderer;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    renderer = new MessageRenderer(container);
+  });
+
+  it("renders the notice type and unwraps the system-notice envelope", () => {
+    const el = renderer.renderNotice({
+      id: "entry_n1",
+      customType: "async-result",
+      content: "<system-notice>\nBackground job ScoutX has completed.\n</system-notice>",
+    });
+
+    expect(el).not.toBeNull();
+    expect(el.dataset.noticeId).toBe("entry_n1");
+    expect(el.querySelector(".notice-type").textContent).toBe("async-result");
+    // The envelope is markup for the model; the block itself says "Notice".
+    expect(el.querySelector(".notice-body").textContent).toBe(
+      "Background job ScoutX has completed.",
+    );
+  });
+
+  it("accepts content blocks and renders them as text, never as markup", () => {
+    const el = renderer.renderNotice({
+      id: "entry_n2",
+      customType: "launch-completion",
+      content: [{ type: "text", text: "<img src=x onerror=alert(1)> done" }],
+    });
+    const body = el.querySelector(".notice-body");
+    expect(body.textContent).toContain("<img src=x onerror=alert(1)> done");
+    expect(body.querySelector("img")).toBeNull();
+  });
+
+  it("draws an entry once, so a snapshot plus a live frame cannot double it", () => {
+    const first = renderer.renderNotice({ id: "entry_n3", content: "one" });
+    const second = renderer.renderNotice({ id: "entry_n3", content: "one" });
+
+    expect(first).not.toBeNull();
+    expect(second).toBeNull();
+    expect(container.querySelectorAll("[data-notice-id]")).toHaveLength(1);
+  });
+
+  it("skips entries with no text and keeps notice ordering stable", () => {
+    expect(renderer.renderNotice({ id: "entry_n4", content: "   " })).toBeNull();
+
+    renderer.renderNotice({ id: "entry_n5", content: "first" });
+    renderer.renderNotice({ id: "entry_n6", content: "second" });
+    const bodies = Array.from(container.querySelectorAll(".notice-body")).map(
+      (el) => el.textContent,
+    );
+    expect(bodies).toEqual(["first", "second"]);
+  });
+});

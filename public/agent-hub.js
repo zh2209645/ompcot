@@ -13,7 +13,8 @@
 // brokerEvent payload — without owning the WebSocket client's dispatch table.
 //
 // "View transcript" reuses the app's existing session-selection flow via the
-// `onOpenSession(sessionFile)` callback; this module never renders transcripts
+// `onOpenSession(sessionFile, kind)` callback; this module never renders
+// transcripts
 // itself.
 
 import { onLanguageChanged, t } from "./i18n.js";
@@ -205,12 +206,17 @@ export function createAgentHub({
     setStatusLabel(status, agent.status);
     bottom.append(status);
 
+    // `main` is passed through: that row is this process's own session, and
+    // the caller decides "hand back the live view" vs "peek another transcript"
+    // from the kind as well as the path (a stale main row must never peek).
     if (agent.sessionFile && typeof onOpenSession === "function") {
       const openBtn = document.createElement("button");
       openBtn.type = "button";
       openBtn.className = "agent-hub-open";
       openBtn.textContent = t("agents.viewTranscript");
-      openBtn.addEventListener("click", () => onOpenSession(agent.sessionFile));
+      openBtn.addEventListener("click", () =>
+        onOpenSession(agent.sessionFile, agent.kind === "main" ? "main" : "sub"),
+      );
       bottom.append(openBtn);
     }
 
