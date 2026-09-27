@@ -132,6 +132,34 @@ describe("ToolCardRenderer follow behavior", () => {
   });
 });
 
+describe("ToolCardRenderer history cards use the live status", () => {
+  it("draws a still-running call as Working…, not Done", () => {
+    const container = document.createElement("div");
+    const renderer = new ToolCardRenderer(container, {
+      statusLookup: (toolCallId) => (toolCallId === "call_live" ? "streaming" : null),
+    });
+
+    renderer.createHistoryCard({ toolCallId: "call_live", toolName: "eval", args: {} });
+    const running = container.querySelector(".tool-card[data-tool-call-id='call_live']");
+    expect(running.dataset.toolStatus).toBe("streaming");
+    expect(running.querySelector(".tool-status").className).toBe("tool-status streaming");
+
+    renderer.createHistoryCard({ toolCallId: "call_done", toolName: "bash", args: {} });
+    const finished = container.querySelector(".tool-card[data-tool-call-id='call_done']");
+    expect(finished.dataset.toolStatus).toBe("complete");
+    expect(finished.querySelector(".tool-status").className).toBe("tool-status complete");
+  });
+
+  it("falls back to Done without a status source", () => {
+    const container = document.createElement("div");
+    const renderer = new ToolCardRenderer(container);
+
+    renderer.createHistoryCard({ toolCallId: "call_1", toolName: "bash", args: {} });
+
+    expect(container.querySelector(".tool-status").className).toBe("tool-status complete");
+  });
+});
+
 describe("ToolCardRenderer identity (one card per tool call)", () => {
   let container;
   let renderer;

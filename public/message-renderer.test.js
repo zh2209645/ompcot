@@ -346,6 +346,51 @@ describe("rendering is keyed on message identity (no duplicate elements)", () =>
     expect(container.querySelectorAll(".message-copy-btn")).toHaveLength(1);
   });
 
+  it("a settled element is still unfinished: the copy button is not the state marker", () => {
+    const el = renderer.renderAssistantMessage({ content: "" }, true);
+    renderer.updateStreamingMessage(el, "partial answer");
+    // stopStreaming (agent_end before message_end, user abort) settles the
+    // element and adds the copy button as a visual affordance only.
+    renderer.stopStreaming(el);
+    expect(el.querySelector(".message-copy-btn")).not.toBeNull();
+
+    // A late message_end must find THAT element — not append a second copy.
+    expect(renderer.findUnfinishedAssistantElement(null)).toBe(el);
+  });
+
+  it("finalize marks the element done so later frames cannot duplicate it", () => {
+    const el = renderer.renderAssistantMessage({ content: "" }, true);
+    renderer.updateStreamingMessage(el, "the answer");
+    renderer.finalizeStreamingMessage(el);
+
+    expect(el.dataset.finalized).toBe("true");
+    expect(renderer.findUnfinishedAssistantElement(null)).toBeNull();
+    expect(renderer.findUnfinishedAssistantElement(el.dataset.messageId)).toBeNull();
+  });
+
+  it("a live render adopts the element a snapshot already rendered for its entry id", () => {
+    // A re-render mid-run (snapshot from the session file) holds the message
+    // under its real entry id while the live path only knows the placeholder.
+    const snapshot = renderer.renderAssistantMessage(
+      {
+        content: [
+          { type: "thinking", thinking: "pondering" },
+          { type: "text", text: "half" },
+        ],
+        id: "msg_77",
+      },
+      false,
+      true,
+    );
+    const live = renderer.renderAssistantMessage({ content: "", id: "msg_77" }, true);
+
+    expect(live).toBe(snapshot);
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+    expect(snapshot.dataset.finalized).toBeUndefined();
+    renderer.updateStreamingMessage(live, "half of the answer");
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+  });
+
   it("drops the finished affordances when a finalized element goes back to streaming", () => {
     const el = renderer.renderAssistantMessage({ content: "old answer", id: "msg_9" }, false, true);
     expect(el.querySelector(".message-copy-btn")).not.toBeNull();

@@ -197,7 +197,11 @@ const nativeAvailable = () => !mobileClientMode && transport.capabilities.native
 const canUseSessionControl = () => transport.capabilities.native;
 const state = new StateManager();
 const messageRenderer = new MessageRenderer(document.getElementById("messages"));
-const toolCardRenderer = new ToolCardRenderer(document.getElementById("messages"));
+const toolCardRenderer = new ToolCardRenderer(document.getElementById("messages"), {
+  // A re-render must draw a still-running call with its live status, not as
+  // "Done" (see ToolCardRenderer#statusLookup).
+  statusLookup: (toolCallId) => state.getToolExecution(toolCallId)?.status ?? null,
+});
 // Extension UI request dialogs (select/confirm/input): queueing, deadline
 // countdown and the ui_response/ui_cancel wire contract live in ui-requests.js.
 // This is the single path for `extension_ui_request` events (it reuses the
@@ -1004,7 +1008,7 @@ function handleRPCEvent(event) {
       }
       break;
     case "message_start":
-      handleMessageStart(event.message);
+      handleMessageStart(event.message, event.entryId || event.messageId);
       // Refresh the sidebar as soon as the new session is persisted. OMP writes
       // the brand-new session's .jsonl on the first user message round-trip, so
       // refreshing on the user message (not just the assistant turn) makes the
@@ -1018,7 +1022,7 @@ function handleRPCEvent(event) {
       handleMessageUpdate(event);
       break;
     case "message_end":
-      handleMessageEnd(event.message);
+      handleMessageEnd(event.message, event.entryId || event.messageId);
       if (pendingNewSessionRefresh) {
         refreshSidebarForNewSession(event).catch(() => {});
       }
@@ -1181,13 +1185,17 @@ function handleAgentStart(event = null) {
 function handleAgentEnd(event = null) {
   state.setStreaming(false);
   showTypingIndicator(false);
-  // A run can end without a message_end for the live element (dropped frames,
-  // a process that died mid-run): settle it so the transcript never keeps the
-  // caret blinking or a thinking block stuck open. A late message_end still
-  // finalizes that element in place.
-  messageRenderer.stopStreaming(currentStreamingElement);
+  // The run is over. Finish the live element here rather than only settling it:
+  // when its `message_end` never arrives (a frame dropped by a saturated
+  // client, a process that died mid-run) the settled element kept its partial
+  // content for good — and the next render of the same message (a snapshot or
+  // a resync) then showed the reply a second time, complete. Finalizing from
+  // the last cumulative frame marks the element done, so any later frame for
+  // that message is a no-op instead of a second copy.
+  finishStreamingElement(currentStreamingElement);
   currentStreamingElement = null;
   currentStreamingText = "";
+  currentStreamingMessage = null;
   // The run is over: whatever this window marked as streaming for the
   // foreground process must stop reporting "running", including a file whose
   // path drifted from the one we marked at agent_start.
@@ -1245,15 +1253,25 @@ function handleAgentEnd(event = null) {
 // counted twice, and content that arrived only in `thinking_start` /
 // `thinking_end` (no delta) would never render at all.
 let currentStreamingThinking = [];
+// Last cumulative message the runtime reported for the live element (used to
+// finish it at agent_end when its message_end never arrives) and the entry id
+// the runtime assigned to that message, when known.
+let currentStreamingMessage = null;
+let currentStreamingEntryId = null;
 
-function handleMessageStart(message) {
+function handleMessageStart(message, entryId = null) {
   if (message.role === "assistant") {
     currentStreamingText = "";
     currentStreamingThinking = [];
+    currentStreamingMessage = null;
+    currentStreamingEntryId = entryId || null;
     // Carry the real entry id when the event provides one; the renderer
-    // falls back to the "streaming" placeholder until finalize (F2).
+    // falls back to the "streaming" placeholder until finalize (F2). The id
+    // is what lets a re-render (snapshot mid-run, replayed frame) adopt the
+    // element that already exists for this message instead of appending a
+    // second copy of it.
     currentStreamingElement = messageRenderer.renderAssistantMessage(
-      { content: "", id: message.id },
+      { content: "", id: entryId || message.id },
       true,
     );
   } else if (message.role === "user") {
@@ -1324,10 +1342,47 @@ function ensureStreamingAssistantElement(message = null) {
   return currentStreamingElement;
 }
 
+/**
+ * Finish the live element at the end of a run.
+ *
+ * Uses the last cumulative frame the runtime sent, so the element is finalized
+ * through the same content-block path a `message_end` would use (thinking
+ * segments, markdown, usage) instead of being left settled with whatever the
+ * DOM happened to hold. Falls back to `stopStreaming` when there is nothing to
+ * finalize from — the element then stays unfinished, so a late `message_end`
+ * still completes it in place.
+ */
+function finishStreamingElement(element) {
+  if (!element?.isConnected) return;
+  if (element.dataset.finalized === "true") return;
+  const message = currentStreamingMessage;
+  if (!message) {
+    messageRenderer.stopStreaming(element);
+    flushDeferredToolCards();
+    return;
+  }
+  messageRenderer.finalizeStreamingMessage(
+    element,
+    message.usage || null,
+    Array.isArray(message.content) ? message.content : getAssistantThinkingSegments(message),
+    currentStreamingEntryId,
+  );
+  flushDeferredToolCards();
+}
+
 function handleMessageUpdate(event) {
   const { assistantMessageEvent, message } = event;
+  const entryId = event.entryId || event.messageId;
   if (message?.role === "assistant") {
+    currentStreamingMessage = message;
+    if (typeof entryId === "string" && entryId) currentStreamingEntryId = entryId;
     ensureStreamingAssistantElement(message);
+    // Stamp the entry id the moment the runtime reports it: a re-render that
+    // lands mid-run (snapshot, replayed frame) then finds this element by id
+    // instead of starting a second copy of the same message.
+    if (typeof entryId === "string" && entryId && currentStreamingElement) {
+      currentStreamingElement.dataset.messageId = entryId;
+    }
     // The partial message is cumulative, so it is the single source of truth
     // for both the text and the thinking segments. The delta is only a
     // fallback for a frame that arrives without the block it belongs to.
@@ -1359,8 +1414,14 @@ function handleMessageUpdate(event) {
   }
 }
 
-function handleMessageEnd(message) {
+function handleMessageEnd(message, entryId = null) {
   if (message?.role !== "assistant") return;
+  const entry = entryId || message?.id || null;
+  // Already rendered and finalized for this entry (a replayed/duplicate
+  // message_end, or a snapshot that rendered it first): there is nothing left
+  // to finish — creating anything here would append a second copy of the turn.
+  const rendered = messageRenderer.findAssistantElement(entry);
+  if (rendered && rendered.dataset.finalized === "true") return;
   if (message?.stopReason === "error") {
     const provider = message?.provider ? String(message.provider) : "unknown";
     const model = message?.model ? String(message.model) : "unknown";
@@ -1374,9 +1435,13 @@ function handleMessageEnd(message) {
     // reconnect, out-of-order frames). Finish THAT element when it is still in
     // the transcript — creating a new one would append a second copy of the
     // same assistant turn.
-    currentStreamingElement = messageRenderer.findUnfinishedAssistantElement(message?.id);
+    currentStreamingElement = messageRenderer.findUnfinishedAssistantElement(entry);
     if (currentStreamingElement) {
       currentStreamingThinking = getAssistantThinkingSegments(message);
+    } else if (rendered) {
+      // A re-render (snapshot mid-run) already holds this message: finish it
+      // in place instead of streaming a second copy of it.
+      currentStreamingElement = rendered;
     } else {
       ensureStreamingAssistantElement(message);
     }
@@ -1392,10 +1457,13 @@ function handleMessageEnd(message) {
       currentStreamingElement,
       usage,
       Array.isArray(message?.content) ? message.content : currentStreamingThinking.join("\n"),
-      typeof message?.id === "string" ? message.id : null,
+      entry,
     );
     currentStreamingElement = null;
     currentStreamingThinking = [];
+    currentStreamingMessage = null;
+    currentStreamingEntryId = null;
+    flushDeferredToolCards();
 
     // Track session cost and tokens
     if (usage?.cost?.total) {
@@ -1411,6 +1479,28 @@ function handleMessageEnd(message) {
   }
 }
 
+// Tool calls belong to the assistant message that emitted them. While that
+// message is still streaming (its thinking block may still be growing), its
+// card must not pop in below it — the turn's own content finishes first, then
+// its cards. Cards whose message already finished are appended immediately.
+const deferredToolCards = new Set();
+
+function messageStillStreaming() {
+  const element = currentStreamingElement;
+  return Boolean(element?.isConnected) && element.dataset.finalized !== "true";
+}
+
+/** Append the cards that were waiting for their assistant message to finish. */
+function flushDeferredToolCards() {
+  if (deferredToolCards.size === 0) return;
+  const pending = [...deferredToolCards];
+  deferredToolCards.clear();
+  for (const toolCallId of pending) {
+    const execution = state.getToolExecution(toolCallId);
+    if (execution) toolCardRenderer.updateToolCard(execution);
+  }
+}
+
 function handleToolExecutionStart(event) {
   const { toolCallId, toolName, args } = event;
 
@@ -1419,6 +1509,11 @@ function handleToolExecutionStart(event) {
     args,
     status: "pending",
   });
+
+  if (messageStillStreaming()) {
+    deferredToolCards.add(toolCallId);
+    return;
+  }
 
   // `updateToolCard` creates the card when it is missing and reuses the
   // existing one otherwise, so a replayed start frame cannot add a second card
@@ -1435,6 +1530,7 @@ function handleToolExecutionUpdate(event) {
     output,
   });
 
+  if (deferredToolCards.has(toolCallId)) return; // card comes with the flush
   toolCardRenderer.updateToolCard(state.getToolExecution(toolCallId));
 }
 
@@ -1448,6 +1544,7 @@ function handleToolExecutionEnd(event) {
     isError,
   });
 
+  if (deferredToolCards.has(toolCallId)) return; // card comes with the flush
   toolCardRenderer.finalizeToolCard(toolCallId, result, isError);
 }
 

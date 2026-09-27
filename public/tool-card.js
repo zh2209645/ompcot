@@ -21,9 +21,15 @@ function toolStatusLabel(status) {
 }
 
 export class ToolCardRenderer {
-  constructor(container) {
+  constructor(container, { statusLookup = null } = {}) {
     this.container = container;
     this.toolCards = new Map(); // toolCallId -> element
+    // Live status of a tool call, when the app knows one. A transcript
+    // re-render (snapshot mid-run) draws history cards for calls that are
+    // still executing; without this they were painted as "Done" and then
+    // flipped back to "Working…" by the next live frame — the status badge
+    // blinked, and kept blinking on every re-render.
+    this.statusLookup = typeof statusLookup === "function" ? statusLookup : null;
   }
 
   createToolCard(toolExecution) {
@@ -237,9 +243,10 @@ export class ToolCardRenderer {
     });
     headerRight.appendChild(copyBtn);
 
+    const liveStatus = this.statusLookup?.(toolCallId) || "complete";
     const status = document.createElement("div");
-    status.className = "tool-status complete";
-    status.textContent = t("status.done");
+    status.className = `tool-status ${liveStatus}`;
+    status.textContent = toolStatusLabel(liveStatus);
     headerRight.appendChild(status);
 
     header.appendChild(headerRight);
@@ -284,7 +291,9 @@ export class ToolCardRenderer {
 
     this.container.appendChild(card);
     this.toolCards.set(toolCallId, card);
-    card.dataset.toolStatus = "complete";
+    // Keep the pill and the dataset in step with what was just rendered, so
+    // the next live update only writes on a real transition.
+    card.dataset.toolStatus = liveStatus;
 
     return card;
   }

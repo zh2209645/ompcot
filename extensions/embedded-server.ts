@@ -2038,6 +2038,43 @@ export default function (omp: ExtensionAPI) {
     patchInstanceEntry(isStreaming === undefined ? { sessionFile } : { sessionFile, isStreaming });
   }
 
+  /**
+   * Entry id of the message an event belongs to, when the session already
+   * holds that entry.
+   *
+   * The runtime event object carries no identity (`{ role, content, ... }`,
+   * no id), while re-renders draw the same message under its session-entry id
+   * — so without this the GUI has no way to tell a live message from a copy a
+   * snapshot already rendered and appended both. Matching is by role +
+   * timestamp (both come from the same message object), scanning from the end
+   * since the entry is normally the newest one.
+   */
+  function resolveMessageEntryId(
+    ctx: ExtensionContext | null,
+    event: Record<string, unknown>,
+  ): string | null {
+    const message = event.message as Record<string, unknown> | undefined;
+    if (!ctx || !message || typeof message.timestamp !== "number") return null;
+    try {
+      const entries = ctx.sessionManager.getEntries();
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i] as {
+          type?: string;
+          id?: unknown;
+          message?: { role?: string; timestamp?: number };
+        };
+        if (entry?.type !== "message" || typeof entry.id !== "string") continue;
+        const candidate = entry.message;
+        if (candidate?.role !== message.role) continue;
+        if (candidate?.timestamp !== message.timestamp) continue;
+        return entry.id;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
   function withRouteMeta(data: unknown) {
     const currentCtx = globalState.getLatestCtx?.() ?? latestCtx;
     const sessionId = currentSessionIdFromCtx(currentCtx);
@@ -2628,10 +2665,21 @@ export default function (omp: ExtensionAPI) {
         );
 
         // Forward event to all connected browser clients
-        // Wrap in { type: "event", event: ... } to match the existing frontend protocol
+        // Wrap in { type: "event", event: ... } to match the existing frontend
+        // protocol. Message events additionally carry `entryId`, resolved from
+        // the session's own entries: the runtime event object has no identity
+        // for the message it belongs to (no id field at all), so without this
+        // the GUI cannot tell a live message apart from the entry a re-render
+        // already drew for it — and appended both (same reply, thinking block
+        // and tool call twice).
+        const entryId = resolveMessageEntryId(ctx, event as Record<string, unknown>);
         broadcast({
           type: "event",
-          event: { type: eventType, ...(event as Record<string, unknown>) },
+          event: {
+            type: eventType,
+            ...(event as Record<string, unknown>),
+            ...(entryId ? { entryId } : {}),
+          },
         });
       },
     );

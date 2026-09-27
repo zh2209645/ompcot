@@ -243,9 +243,14 @@ export class MessageRenderer {
 
     if (isStreaming) {
       // An adopted element may still carry the previous view's "finished"
-      // affordance; the copy button is also the "this turn is done" marker.
+      // affordance and lifecycle flag; the copy button is also the "this turn
+      // is done" marker, so both must go when the element goes back to live.
       div.querySelector(".message-copy-btn")?.remove();
+      delete div.dataset.finalized;
     } else {
+      // A history render is complete content: it must never be picked up as
+      // "the element to finish" by a late message_end.
+      div.dataset.finalized = "true";
       this._ensureCopyButton(div);
     }
     // An adopted element already sits in the right place: only a fresh one is
@@ -353,10 +358,15 @@ export class MessageRenderer {
   }
 
   /**
-   * Last assistant element that never finished streaming — identified by the
-   * missing copy button, which is only added at finalize. A message_end that
-   * lands after the live element was released completes THAT element instead
-   * of appending a second copy of the same assistant turn.
+   * Last assistant element that never finished streaming.
+   *
+   * Matched by the `finalized` flag rather than the copy button: `stopStreaming`
+   * (user abort, agent_end before message_end) settles the element and adds the
+   * copy button as a *visual* affordance, and history renders carry one from
+   * the start — "has a copy button" said nothing about whether the element had
+   * been through `finalizeStreamingMessage`, so a late `message_end` for a
+   * settled element created a second copy of the same message. `messageId`
+   * narrows the match when the runtime provides the entry id.
    */
   findUnfinishedAssistantElement(messageId = null) {
     const wanted = typeof messageId === "string" && messageId ? messageId : null;
@@ -364,7 +374,7 @@ export class MessageRenderer {
     for (let i = candidates.length - 1; i >= 0; i--) {
       const element = candidates[i];
       if (wanted && element.dataset.messageId !== wanted) continue;
-      if (!element.querySelector(".message-copy-btn")) return element;
+      if (element.dataset.finalized !== "true") return element;
     }
     return null;
   }
@@ -386,6 +396,11 @@ export class MessageRenderer {
     if (typeof id === "string" && id) {
       messageElement.dataset.messageId = id;
     }
+    // Lifecycle flag: this element is done, so `findUnfinishedAssistantElement`
+    // stops matching it and a replayed/duplicate frame can never append a
+    // second copy of the same turn (the copy button alone is not a state
+    // marker — `stopStreaming` adds one too).
+    messageElement.dataset.finalized = "true";
     const contentDiv = messageElement.querySelector(".message-content");
     if (contentDiv) {
       contentDiv.classList.remove("streaming");
