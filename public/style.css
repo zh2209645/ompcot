@@ -3877,8 +3877,14 @@ code {
   color: var(--accent-text);
 }
 
-/* Streaming cursor */
-.message-content.streaming::after {
+/* Streaming cursor — the caret belongs at the END of the streamed text, so it
+   is drawn by the last block inside `.streaming-text` (the markdown renderer
+   wraps text in <p>/<pre>/… blocks; a ::after on .message-content itself is
+   laid out as its own line box below those blocks, which left the caret
+   floating on a line of its own instead of trailing the text). The :empty
+   variant covers "message started, nothing streamed yet". */
+.message-content.streaming .streaming-text:empty::after,
+.message-content.streaming .streaming-text > :last-child::after {
   content: "▋";
   animation: blink 1s infinite;
   margin-left: 1px;

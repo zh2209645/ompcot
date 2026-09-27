@@ -832,6 +832,7 @@ wsClient.addEventListener("disconnected", () => {
     connectDeferredTimer = null;
   }
   sidebar.clearStreaming();
+  foregroundStreamingFiles.clear();
 
   // Deferred session switch requires agent_end to complete, which won't fire
   // after a crash/disconnect. Unblock input immediately so the user isn't stuck.
@@ -846,12 +847,15 @@ wsClient.addEventListener("disconnected", () => {
   // crashed — agent_end won't re-fire after reconnect), unlock the UI.
   // Brief intentional reconnects (Case 1 session switch) complete in < 100 ms
   // so they are unaffected by the 3-second gate.
-  if (disconnectDeferredTimer) clearTimeout(disconnectDeferredTimer);
+  clearTimeout(disconnectDeferredTimer);
   disconnectDeferredTimer = setTimeout(() => {
     disconnectDeferredTimer = null;
     if (wsClient.connectionState !== "open" && state.isStreaming) {
       state.setStreaming(false);
       showTypingIndicator(false);
+      // omp is gone (or unreachable): settle the live element so the transcript
+      // does not keep a caret blinking on a run that will never report back.
+      messageRenderer.stopStreaming(currentStreamingElement);
       updateUI();
     }
   }, 3000);
@@ -1042,6 +1046,7 @@ function handleBackgroundRPCEvent(sessionFile, event) {
       break;
     case "agent_end":
       sidebar.setStreaming(sessionFile, false);
+      foregroundStreamingFiles.delete(sessionFile);
       sidebar.markUnread(sessionFile);
       sidebar.loadSessions({ quiet: true }).catch(() => {});
       pollInstances().catch(() => {});
@@ -1119,19 +1124,56 @@ function getCurrentLiveSessionFile(event = null) {
   });
 }
 
+// Files this window marked as streaming on behalf of the FOREGROUND omp
+// process. The live-file resolution is not stable across a run: a brand-new
+// session only gets its real path once the first message round-trips, and a
+// mirror snapshot can rebind the view mid-run. When agent_start and agent_end
+// resolved different paths, the file marked at the start kept its "streaming"
+// status in the sidebar for good. Tracking the marks lets the end of the run
+// clear exactly what it (or a foreground snapshot) set, while marks that
+// belong to background instances — other workspaces broadcasting their own
+// events — stay untouched.
+const foregroundStreamingFiles = new Set();
+
+function setForegroundStreaming(filePath, streaming) {
+  if (!filePath) return;
+  if (streaming) {
+    foregroundStreamingFiles.add(filePath);
+  } else {
+    foregroundStreamingFiles.delete(filePath);
+  }
+  sidebar.setStreaming(filePath, streaming);
+}
+
+function clearForegroundStreaming() {
+  for (const filePath of foregroundStreamingFiles) {
+    sidebar.setStreaming(filePath, false);
+  }
+  foregroundStreamingFiles.clear();
+}
+
 function handleAgentStart(event = null) {
   state.setStreaming(true);
   showTypingIndicator(true);
   updateUI();
   const live = getCurrentLiveSessionFile(event);
-  if (live) sidebar.setStreaming(live, true);
+  setForegroundStreaming(live, true);
 }
 
 function handleAgentEnd(event = null) {
   state.setStreaming(false);
   showTypingIndicator(false);
+  // A run can end without a message_end for the live element (dropped frames,
+  // a process that died mid-run): settle it so the transcript never keeps the
+  // caret blinking or a thinking block stuck open. A late message_end still
+  // finalizes that element in place.
+  messageRenderer.stopStreaming(currentStreamingElement);
   currentStreamingElement = null;
   currentStreamingText = "";
+  // The run is over: whatever this window marked as streaming for the
+  // foreground process must stop reporting "running", including a file whose
+  // path drifted from the one we marked at agent_start.
+  clearForegroundStreaming();
   updateUI();
 
   // A resync requested mid-run runs now that the agent is idle (F22) — unless
@@ -1147,8 +1189,9 @@ function handleAgentEnd(event = null) {
   if (pendingSessionSwitchPath) {
     const targetPath = pendingSessionSwitchPath;
     pendingSessionSwitchPath = null;
-    const live = getCurrentLiveSessionFile();
-    if (live) sidebar.setStreaming(live, false);
+    // Unmark the session we are leaving even if its mark came from a snapshot
+    // rather than this window's agent_start (tracking misses it in that case).
+    setForegroundStreaming(getCurrentLiveSessionFile(), false);
     foregroundPort = findPortForSession(liveInstances, targetPath, foregroundPort);
     syncWorkspaceIndicatorFromInstances();
     transport
@@ -1161,13 +1204,13 @@ function handleAgentEnd(event = null) {
   }
 
   const live = getCurrentLiveSessionFile(event);
-  if (live) {
-    sidebar.setStreaming(live, false);
+  // Also unmark the resolved file directly: a mark set by a snapshot for the
+  // session we are now viewing is not necessarily in the tracked set.
+  setForegroundStreaming(live, false);
+  if (live && live !== sidebar.activeSessionFile) {
     // If user is not currently viewing this session in the sidebar,
     // mark it as unread so they see a blue dot when they look back.
-    if (live !== sidebar.activeSessionFile) {
-      sidebar.markUnread(live);
-    }
+    sidebar.markUnread(live);
   }
 
   // Notify via tab title if unfocused
@@ -1280,7 +1323,16 @@ function handleMessageEnd(message) {
     messageRenderer.renderError(`[${provider}/${model}] ${errorMessage}`);
   }
   if (!currentStreamingElement && message?.role === "assistant") {
-    ensureStreamingAssistantElement(message);
+    // The live element may already have been released for this message (abort,
+    // reconnect, out-of-order frames). Finish THAT element when it is still in
+    // the transcript — creating a new one would append a second copy of the
+    // same assistant turn.
+    currentStreamingElement = messageRenderer.findUnfinishedAssistantElement(message?.id);
+    if (currentStreamingElement) {
+      currentStreamingThinking = getAssistantThinking(message) || currentStreamingThinking;
+    } else {
+      ensureStreamingAssistantElement(message);
+    }
   }
   if (currentStreamingElement) {
     // Pass usage info for cost display
@@ -3205,7 +3257,7 @@ function handleMirrorSync(data) {
   const isStreaming = Boolean(data.isStreaming) || sidebarStreaming;
   state.setStreaming(isStreaming);
   showTypingIndicator(isStreaming);
-  if (liveFile) sidebar.setStreaming(liveFile, isStreaming);
+  setForegroundStreaming(liveFile, isStreaming);
   updateMirrorInputState();
   updateMirrorLiveIndicator();
   updateUI();
@@ -3371,13 +3423,16 @@ function abortCurrentRun() {
   messageRenderer.renderError("Aborted by user");
   showTypingIndicator(false);
 
+  // Freeze the partial answer where it is. Clearing the element without
+  // settling it left the blinking caret (and the auto-expanded thinking block)
+  // in the transcript for good; keeping the element lets a late message_end
+  // still finalize it in place (see findUnfinishedAssistantElement).
+  messageRenderer.stopStreaming(currentStreamingElement);
+
   // In some abort paths, backend agent_end can be delayed or missing.
   // Optimistically unlock input so users can continue immediately.
   if (state.isStreaming) {
     state.setStreaming(false);
-    currentStreamingElement = null;
-    currentStreamingText = "";
-    currentStreamingThinking = "";
     updateUI();
   }
 }

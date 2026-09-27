@@ -124,7 +124,7 @@ export class MessageRenderer {
 
     div.innerHTML = `
       <div class="message-content">${imagesHtml}${renderUserMarkdown(message.content)}</div>
-      <button class="message-copy-btn" aria-label="${t("msg.copyMessage")}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+      ${this._copyButtonHtml()}
     `;
     this._setupCopyBtn(div);
     this.container.appendChild(div);
@@ -140,24 +140,25 @@ export class MessageRenderer {
     div.className = `message assistant${isHistory ? " history" : ""}`;
     div.dataset.messageId = message.id || "streaming";
 
-    let contentHtml = "";
+    let textHtml = "";
+    let thinkingHtml = "";
     let usageHtml = "";
     let rawStreamingText = "";
 
     if (typeof message.content === "string") {
       rawStreamingText = message.content;
-      contentHtml = isStreaming
+      textHtml = isStreaming
         ? renderStreamingMarkdown(message.content)
         : renderMarkdown(message.content);
     } else if (Array.isArray(message.content)) {
       for (const block of message.content) {
         if (block.type === "text") {
           rawStreamingText += block.text;
-          contentHtml += isStreaming
+          textHtml += isStreaming
             ? renderStreamingMarkdown(block.text)
             : renderMarkdown(block.text);
         } else if (block.type === "thinking") {
-          contentHtml += this.renderThinkingBlock(block.thinking);
+          thinkingHtml += this.renderThinkingBlock(block.thinking);
         }
       }
     }
@@ -175,12 +176,18 @@ export class MessageRenderer {
       }
     }
 
+    // Thinking blocks stay siblings of the text. The text gets its own block
+    // while streaming so the "still writing" caret can be drawn at the end of
+    // its last line (see the .streaming-text rules in style.css) instead of
+    // floating on a line of its own below the content.
+    const contentHtml =
+      thinkingHtml + (isStreaming ? `<div class="streaming-text">${textHtml}</div>` : textHtml);
     const streamingClass = isStreaming ? " streaming" : "";
 
     div.innerHTML = `
       <div class="message-content${streamingClass}">${contentHtml}</div>
       ${usageHtml}
-      ${!isStreaming ? `<button class="message-copy-btn" aria-label="${t("msg.copyMessage")}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ""}
+      ${!isStreaming ? this._copyButtonHtml() : ""}
     `;
 
     if (!isStreaming) this._setupCopyBtn(div);
@@ -202,10 +209,14 @@ export class MessageRenderer {
   }
 
   updateStreamingThinking(messageElement, thinking) {
+    const contentDiv = messageElement?.querySelector(".message-content");
+    if (!contentDiv) return;
+    // A settled element (the run was stopped via stopStreaming) is no longer a
+    // live target: late deltas must not resurrect the caret or re-expand the
+    // thinking block.
+    if (!contentDiv.classList.contains("streaming")) return;
     let thinkingDiv = messageElement.querySelector(".streaming-thinking");
     if (!thinkingDiv) {
-      const contentDiv = messageElement.querySelector(".message-content");
-      if (!contentDiv) return;
       thinkingDiv = document.createElement("div");
       thinkingDiv.className = "thinking-block streaming-thinking";
       thinkingDiv.innerHTML = `
@@ -224,26 +235,60 @@ export class MessageRenderer {
   }
 
   updateStreamingMessage(messageElement, content) {
-    const contentDiv = messageElement.querySelector(".message-content");
-    if (contentDiv) {
-      messageElement._streamingRawText = content;
-      // Keep any thinking block, update only the text part
-      const thinkingBlock = contentDiv.querySelector(".streaming-thinking");
-      const rendered = renderStreamingMarkdown(content);
-      if (thinkingBlock) {
-        // Remove everything after the thinking block and re-add text
-        let textNode = contentDiv.querySelector(".streaming-text");
-        if (!textNode) {
-          textNode = document.createElement("div");
-          textNode.className = "streaming-text";
-          contentDiv.appendChild(textNode);
-        }
-        textNode.innerHTML = rendered;
-      } else {
-        contentDiv.innerHTML = rendered;
-      }
-      this.scrollToBottom();
+    const contentDiv = messageElement?.querySelector(".message-content");
+    if (!contentDiv) return;
+    // See updateStreamingThinking: never write into a settled element.
+    if (!contentDiv.classList.contains("streaming")) return;
+    messageElement._streamingRawText = content;
+    let textDiv = contentDiv.querySelector(".streaming-text");
+    if (!textDiv) {
+      textDiv = document.createElement("div");
+      textDiv.className = "streaming-text";
+      contentDiv.appendChild(textDiv);
     }
+    textDiv.innerHTML = renderStreamingMarkdown(content);
+    this.scrollToBottom();
+  }
+
+  /**
+   * Release the live-streaming affordances without finalizing the content.
+   *
+   * Called when a run stops without its message_end (user abort, dropped
+   * connection, out-of-order frames). Without this the element kept
+   * `.streaming` — a caret blinking in the transcript forever — and its
+   * thinking block stayed auto-expanded, so that block looked long next to
+   * every collapsed one. The element keeps `_streamingRawText`, so a late
+   * message_end still finalizes it (see findUnfinishedAssistantElement).
+   */
+  stopStreaming(messageElement) {
+    const contentDiv = messageElement?.querySelector(".message-content");
+    if (!contentDiv?.classList.contains("streaming")) return;
+    contentDiv.classList.remove("streaming");
+    const thinkingDiv = contentDiv.querySelector(".streaming-thinking");
+    if (thinkingDiv) {
+      thinkingDiv.classList.remove("streaming-thinking");
+      thinkingDiv.querySelector(".thinking-toggle")?.classList.remove("expanded");
+      thinkingDiv.querySelector(".thinking-content")?.classList.remove("expanded");
+    }
+    this._ensureCopyButton(messageElement);
+    this.scrollToBottom();
+  }
+
+  /**
+   * Last assistant element that never finished streaming — identified by the
+   * missing copy button, which is only added at finalize. A message_end that
+   * lands after the live element was released completes THAT element instead
+   * of appending a second copy of the same assistant turn.
+   */
+  findUnfinishedAssistantElement(messageId = null) {
+    const wanted = typeof messageId === "string" && messageId ? messageId : null;
+    const candidates = Array.from(this.container.querySelectorAll(".message.assistant"));
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const element = candidates[i];
+      if (wanted && element.dataset.messageId !== wanted) continue;
+      if (!element.querySelector(".message-copy-btn")) return element;
+    }
+    return null;
   }
 
   finalizeStreamingMessage(messageElement, usage = null, thinking = "", id = null) {
@@ -256,34 +301,34 @@ export class MessageRenderer {
     const contentDiv = messageElement.querySelector(".message-content");
     if (contentDiv) {
       contentDiv.classList.remove("streaming");
-      // Prefer the raw text stashed during streaming — the DOM now holds
-      // rendered markdown, so textContent has lost the syntax markers.
+      // Rebuild only for an element that still holds streamed content: a
+      // duplicate message_end must not re-render an already finalized message
+      // from its DOM text (which has lost the markdown syntax markers).
+      const hasRawText = typeof messageElement._streamingRawText === "string";
       const streamingText = contentDiv.querySelector(".streaming-text");
-      const domText = streamingText ? streamingText.textContent : contentDiv.textContent;
-      const rawText =
-        typeof messageElement._streamingRawText === "string"
-          ? messageElement._streamingRawText
-          : domText;
-      messageElement._streamingRawText = null;
+      if (hasRawText || streamingText) {
+        // Prefer the raw text stashed during streaming — the DOM now holds
+        // rendered markdown, so textContent has lost the syntax markers.
+        const rawText = hasRawText ? messageElement._streamingRawText : streamingText.textContent;
+        messageElement._streamingRawText = null;
 
-      // Rebuild with thinking block (if any) + markdown text
-      let html = "";
-      if (thinking) {
-        html += this.renderThinkingBlock(thinking);
+        // Rebuild with thinking block (if any) + markdown text
+        let html = "";
+        if (thinking) {
+          html += this.renderThinkingBlock(thinking);
+        }
+        html += renderMarkdown(rawText);
+        contentDiv.innerHTML = html;
       }
-      html += renderMarkdown(rawText);
-      contentDiv.innerHTML = html;
     }
 
     // Add copy button after streaming finishes
-    if (!messageElement.querySelector(".message-copy-btn")) {
-      const btn = document.createElement("button");
-      btn.className = "message-copy-btn";
-      btn.innerHTML =
-        '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-      messageElement.appendChild(btn);
-      this._setupCopyBtn(messageElement);
-    }
+    this._ensureCopyButton(messageElement);
+
+    // The finalized markdown can be taller than the streamed preview (code
+    // blocks, lists, tables all expand), so re-anchor when we were following —
+    // otherwise the last block ends up below the fold, behind the composer.
+    this.scrollToBottom();
 
     // Add usage info if available
     if (usage?.cost && usage.cost.total > 0) {
@@ -294,6 +339,20 @@ export class MessageRenderer {
         messageElement.appendChild(span);
       }
     }
+  }
+
+  _copyButtonHtml() {
+    return `<button class="message-copy-btn" aria-label="${t("msg.copyMessage")}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>`;
+  }
+
+  /**
+   * The copy button doubles as the "this message is finished" marker: unfinished
+   * elements are exactly the ones without it (see findUnfinishedAssistantElement).
+   */
+  _ensureCopyButton(messageElement) {
+    if (messageElement.querySelector(".message-copy-btn")) return;
+    messageElement.insertAdjacentHTML("beforeend", this._copyButtonHtml());
+    this._setupCopyBtn(messageElement);
   }
 
   renderSystemMessage(text) {
@@ -388,8 +447,27 @@ export class MessageRenderer {
   scrollToBottom() {
     if (this.isNearBottom) {
       requestAnimationFrame(() => {
-        this.container.scrollTop = this.container.scrollHeight;
+        this.jumpToBottom();
       });
     }
+  }
+
+  /**
+   * Pin the viewport to the newest content, bypassing the container's
+   * `scroll-behavior: smooth`.
+   *
+   * A smooth follow cannot keep up with a stream (or with a block that lands in
+   * one big delta): while the animation runs, the geometry still reports "far
+   * from the bottom", which flips `isNearBottom` false and silently stops every
+   * later follow — the feed froze while the run was still going, and the
+   * newest block stayed under the composer. An instant jump lands on the
+   * bottom in the same frame, so the guard stays truthful.
+   */
+  jumpToBottom() {
+    const el = this.container;
+    const previousBehavior = el.style.scrollBehavior;
+    el.style.scrollBehavior = "auto";
+    el.scrollTop = el.scrollHeight;
+    el.style.scrollBehavior = previousBehavior;
   }
 }
