@@ -29,6 +29,12 @@ export class ToolCardRenderer {
   createToolCard(toolExecution) {
     const { toolCallId, toolName, args, status } = toolExecution;
 
+    // One call, one card: a replayed `tool_execution_start` (provider retry,
+    // re-delivered frame) or a live start for a tool call a snapshot already
+    // rendered must update the existing card, never append a second one.
+    const existing = this.toolCards.get(toolCallId);
+    if (existing && this.container.contains(existing)) return existing;
+
     const card = document.createElement("div");
     card.className = "tool-card";
     card.dataset.toolCallId = toolCallId;
@@ -82,6 +88,10 @@ export class ToolCardRenderer {
 
   updateToolCard(toolExecution) {
     let card = this.toolCards.get(toolExecution.toolCallId);
+    // A card that a transcript re-render removed is no longer a valid target:
+    // writing into it would keep the output off-screen. Treat it as missing so
+    // the card is rebuilt inside the current transcript.
+    if (card && !this.container.contains(card)) card = null;
 
     if (!card) {
       card = this.createToolCard(toolExecution);
@@ -116,6 +126,8 @@ export class ToolCardRenderer {
       outputElement.textContent = output;
       this.scrollToBottom();
     }
+
+    return card;
   }
 
   finalizeToolCard(toolCallId, result, isError) {
@@ -154,6 +166,11 @@ export class ToolCardRenderer {
    */
   createHistoryCard(toolExecution) {
     const { toolCallId, toolName, args } = toolExecution;
+
+    // Same identity rule as createToolCard: an already rendered (connected)
+    // card for this call is reused instead of duplicated.
+    const existing = this.toolCards.get(toolCallId);
+    if (existing && this.container.contains(existing)) return existing;
 
     const card = document.createElement("div");
     card.className = "tool-card";

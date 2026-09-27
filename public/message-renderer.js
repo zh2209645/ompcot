@@ -131,35 +131,88 @@ export class MessageRenderer {
     if (!isHistory) this.scrollToBottom();
   }
 
+  /**
+   * HTML for an assistant message's content blocks: every thinking block
+   * (collapsed) first, then the text.
+   *
+   * Shared by the history renderer (`renderAssistantMessage`) and the live
+   * finalize (`finalizeStreamingMessage`) so the same message can never come
+   * out with different thinking blocks depending on how it was rendered: the
+   * live path used to merge every thinking segment into one "\n"-joined block
+   * while a reload rendered one block per segment, so the same reasoning
+   * showed up as one long block right after the run and as several short ones
+   * after re-opening the session.
+   */
+  assistantContentHtml(content, { isStreaming = false, rawText = "" } = {}) {
+    let textHtml = "";
+    let thinkingHtml = "";
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block?.type === "text") {
+          textHtml += isStreaming
+            ? renderStreamingMarkdown(block.text || "")
+            : renderMarkdown(block.text || "");
+        } else if (block?.type === "thinking" && block.thinking) {
+          thinkingHtml += this.renderThinkingBlock(block.thinking);
+        }
+      }
+    }
+    // Non-block content (or a message whose blocks carry no text) falls back to
+    // the raw text streamed into `_streamingRawText`.
+    if (!textHtml && rawText) {
+      textHtml = isStreaming ? renderStreamingMarkdown(rawText) : renderMarkdown(rawText);
+    }
+    // Thinking blocks stay siblings of the text. The text gets its own block
+    // while streaming so the "still writing" caret can be drawn at the end of
+    // its last line (see the .streaming-text rules in style.css) instead of
+    // floating on a line of its own below the content.
+    return (
+      thinkingHtml + (isStreaming ? `<div class="streaming-text">${textHtml}</div>` : textHtml)
+    );
+  }
+
+  /**
+   * Existing assistant element for a message id, ignoring detached nodes.
+   *
+   * Frames can repeat: a replayed/retried turn re-sends the same `message_start`
+   * (or a snapshot render lands around it), and appending a second element for
+   * the same message showed the same reply — and its thinking blocks — twice.
+   * Rendering is therefore keyed on identity: the element that already carries
+   * the id is updated in place.
+   */
+  findAssistantElement(messageId) {
+    const wanted = typeof messageId === "string" && messageId ? messageId : null;
+    if (!wanted) return null;
+    for (const el of this.container.querySelectorAll(".message.assistant")) {
+      if (el.dataset.messageId === wanted) return el;
+    }
+    return null;
+  }
+
   renderAssistantMessage(message, isStreaming = false, isHistory = false) {
     // Remove welcome message if present
     const welcome = this.container.querySelector(".welcome");
     if (welcome) welcome.remove();
 
-    const div = document.createElement("div");
+    // Reuse the element this message already has, when there is one:
+    // - a known id is authoritative: a replayed or retried frame for that entry
+    //   updates its element (never a second copy, never a detached leftover),
+    // - without an id (the live streaming placeholder) the newest unfinished
+    //   element is adopted; `findUnfinishedAssistantElement` ignores finalized
+    //   turns, so distinct turns never merge into one element.
+    const adopted = isStreaming
+      ? (this.findAssistantElement(message.id) ?? this.findUnfinishedAssistantElement(null))
+      : this.findAssistantElement(message.id);
+    const div = adopted ?? document.createElement("div");
     div.className = `message assistant${isHistory ? " history" : ""}`;
     div.dataset.messageId = message.id || "streaming";
 
-    let textHtml = "";
-    let thinkingHtml = "";
-    let usageHtml = "";
     let rawStreamingText = "";
-
     if (typeof message.content === "string") {
       rawStreamingText = message.content;
-      textHtml = isStreaming
-        ? renderStreamingMarkdown(message.content)
-        : renderMarkdown(message.content);
     } else if (Array.isArray(message.content)) {
       for (const block of message.content) {
-        if (block.type === "text") {
-          rawStreamingText += block.text;
-          textHtml += isStreaming
-            ? renderStreamingMarkdown(block.text)
-            : renderMarkdown(block.text);
-        } else if (block.type === "thinking") {
-          thinkingHtml += this.renderThinkingBlock(block.thinking);
-        }
+        if (block?.type === "text") rawStreamingText += block.text || "";
       }
     }
     // Markdown is rendered live during streaming, so the raw text (with its
@@ -169,6 +222,7 @@ export class MessageRenderer {
     }
 
     // Usage/cost info
+    let usageHtml = "";
     if (message.usage?.cost) {
       const cost = message.usage.cost.total;
       if (cost > 0) {
@@ -176,22 +230,27 @@ export class MessageRenderer {
       }
     }
 
-    // Thinking blocks stay siblings of the text. The text gets its own block
-    // while streaming so the "still writing" caret can be drawn at the end of
-    // its last line (see the .streaming-text rules in style.css) instead of
-    // floating on a line of its own below the content.
-    const contentHtml =
-      thinkingHtml + (isStreaming ? `<div class="streaming-text">${textHtml}</div>` : textHtml);
+    const contentHtml = this.assistantContentHtml(message.content, {
+      isStreaming,
+      rawText: rawStreamingText,
+    });
     const streamingClass = isStreaming ? " streaming" : "";
 
     div.innerHTML = `
       <div class="message-content${streamingClass}">${contentHtml}</div>
       ${usageHtml}
-      ${!isStreaming ? this._copyButtonHtml() : ""}
     `;
 
-    if (!isStreaming) this._setupCopyBtn(div);
-    this.container.appendChild(div);
+    if (isStreaming) {
+      // An adopted element may still carry the previous view's "finished"
+      // affordance; the copy button is also the "this turn is done" marker.
+      div.querySelector(".message-copy-btn")?.remove();
+    } else {
+      this._ensureCopyButton(div);
+    }
+    // An adopted element already sits in the right place: only a fresh one is
+    // appended, so a repeated frame can never add a second copy.
+    if (!adopted) this.container.appendChild(div);
     if (!isHistory) this.scrollToBottom();
 
     return div;
@@ -208,6 +267,16 @@ export class MessageRenderer {
 </div>`;
   }
 
+  /**
+   * Render the thinking segments of the in-flight message.
+   *
+   * `thinking` is the list of thinking-block texts the runtime reports (one
+   * entry per segment; a bare string is accepted for a single segment). Each
+   * segment gets its own block so the live view already has the same block
+   * shape the finalized/history view will show, and a segment's text is only
+   * written when it actually changed — rewriting identical text re-ran the
+   * block's transitions on every delta.
+   */
   updateStreamingThinking(messageElement, thinking) {
     const contentDiv = messageElement?.querySelector(".message-content");
     if (!contentDiv) return;
@@ -215,22 +284,32 @@ export class MessageRenderer {
     // live target: late deltas must not resurrect the caret or re-expand the
     // thinking block.
     if (!contentDiv.classList.contains("streaming")) return;
-    let thinkingDiv = messageElement.querySelector(".streaming-thinking");
-    if (!thinkingDiv) {
-      thinkingDiv = document.createElement("div");
-      thinkingDiv.className = "thinking-block streaming-thinking";
-      thinkingDiv.innerHTML = `
+    const segments = (Array.isArray(thinking) ? thinking : [thinking]).filter(
+      (value) => typeof value === "string" && value.length > 0,
+    );
+    if (segments.length === 0) return;
+
+    const existing = Array.from(contentDiv.querySelectorAll(".streaming-thinking"));
+    // Thinking blocks stay ahead of the text block, in segment order.
+    const textAnchor = contentDiv.querySelector(".streaming-text");
+    for (let i = 0; i < segments.length; i++) {
+      let thinkingDiv = existing[i];
+      if (!thinkingDiv) {
+        thinkingDiv = document.createElement("div");
+        thinkingDiv.className = "thinking-block streaming-thinking";
+        thinkingDiv.innerHTML = `
         <div class="thinking-toggle expanded" onclick="var c=this.nextElementSibling;c.classList.toggle('expanded');this.classList.toggle('expanded')">
           <span class="chevron"><svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg></span>
           <span class="thinking-label"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v13"/><path d="M6.5 9h11"/><path d="M7 13h10"/></svg> ${t("msg.thinking")}</span>
         </div>
         <div class="thinking-content expanded"></div>`;
-      contentDiv.prepend(thinkingDiv);
-    }
-    const contentEl = thinkingDiv.querySelector(".thinking-content");
-    if (contentEl) {
-      contentEl.textContent = thinking;
-      this.scrollToBottom();
+        contentDiv.insertBefore(thinkingDiv, textAnchor);
+      }
+      const contentEl = thinkingDiv.querySelector(".thinking-content");
+      if (contentEl && contentEl.textContent !== segments[i]) {
+        contentEl.textContent = segments[i];
+        this.scrollToBottom();
+      }
     }
   }
 
@@ -264,8 +343,7 @@ export class MessageRenderer {
     const contentDiv = messageElement?.querySelector(".message-content");
     if (!contentDiv?.classList.contains("streaming")) return;
     contentDiv.classList.remove("streaming");
-    const thinkingDiv = contentDiv.querySelector(".streaming-thinking");
-    if (thinkingDiv) {
+    for (const thinkingDiv of contentDiv.querySelectorAll(".streaming-thinking")) {
       thinkingDiv.classList.remove("streaming-thinking");
       thinkingDiv.querySelector(".thinking-toggle")?.classList.remove("expanded");
       thinkingDiv.querySelector(".thinking-content")?.classList.remove("expanded");
@@ -291,6 +369,16 @@ export class MessageRenderer {
     return null;
   }
 
+  /**
+   * Rebuild the streamed element from the message the runtime reported.
+   *
+   * `thinking` is either the message's content blocks (preferred: thinking and
+   * text are then laid out exactly like the history renderer lays them out) or
+   * the accumulated thinking text for callers that only have that. Passing the
+   * blocks keeps the finalized transcript identical to a reloaded one — the
+   * merged-string form used to collapse several thinking segments into a
+   * single longer block.
+   */
   finalizeStreamingMessage(messageElement, usage = null, thinking = "", id = null) {
     // Stamp the real session-entry id once known — the element carried the
     // "streaming" placeholder until now, and fork actions need the real id
@@ -312,13 +400,9 @@ export class MessageRenderer {
         const rawText = hasRawText ? messageElement._streamingRawText : streamingText.textContent;
         messageElement._streamingRawText = null;
 
-        // Rebuild with thinking block (if any) + markdown text
-        let html = "";
-        if (thinking) {
-          html += this.renderThinkingBlock(thinking);
-        }
-        html += renderMarkdown(rawText);
-        contentDiv.innerHTML = html;
+        contentDiv.innerHTML = Array.isArray(thinking)
+          ? this.assistantContentHtml(thinking, { rawText })
+          : (thinking ? this.renderThinkingBlock(thinking) : "") + renderMarkdown(rawText);
       }
     }
 

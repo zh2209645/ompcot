@@ -370,28 +370,54 @@ const INSTANCES_DIR = path.join(path.dirname(OMP_AGENT_ROOT), "ompcot-instances"
 // manages all omp processes it spawns.
 function registerInstance(port: number, sessionFile: string, cwd: string) {
   fs.mkdirSync(INSTANCES_DIR, { recursive: true });
-  const info = { port, pid: process.pid, sessionFile, cwd, startedAt: new Date().toISOString() };
+  const info = {
+    port,
+    pid: process.pid,
+    sessionFile,
+    cwd,
+    // Live per-process run state, kept fresh by `syncInstanceActivity` on every
+    // forwarded event. Every GUI window reads it (`/api/instances`) to mark the
+    // sidebar from real session state instead of trusting that one specific
+    // `agent_start` / `agent_end` frame pair arrived intact.
+    isStreaming: false,
+    startedAt: new Date().toISOString(),
+  };
   fs.writeFileSync(path.join(INSTANCES_DIR, `${process.pid}.json`), JSON.stringify(info));
 }
 
-function updateInstanceSession(sessionFile: string) {
+function patchInstanceEntry(patch: { sessionFile?: string; isStreaming?: boolean }) {
   const file = path.join(INSTANCES_DIR, `${process.pid}.json`);
   if (!fs.existsSync(file)) return;
   try {
     const info = JSON.parse(fs.readFileSync(file, "utf8"));
-    info.sessionFile = sessionFile;
-    fs.writeFileSync(file, JSON.stringify(info));
+    fs.writeFileSync(file, JSON.stringify({ ...info, ...patch }));
   } catch {}
 }
+
+function updateInstanceSession(sessionFile: string) {
+  patchInstanceEntry({ sessionFile });
+}
+
+// Last (sessionFile, isStreaming) pair mirrored into our instance entry. The
+// write is skipped while the pair is unchanged, so a run costs at most two
+// registry writes (start + end) plus one per session swap.
+let instanceActivityPair = "";
 
 function getRunningInstances(): Array<{
   port: number;
   pid: number;
   sessionFile: string;
   cwd: string;
+  isStreaming?: boolean;
 }> {
   if (!fs.existsSync(INSTANCES_DIR)) return [];
-  const instances: Array<{ port: number; pid: number; sessionFile: string; cwd: string }> = [];
+  const instances: Array<{
+    port: number;
+    pid: number;
+    sessionFile: string;
+    cwd: string;
+    isStreaming?: boolean;
+  }> = [];
   for (const file of fs.readdirSync(INSTANCES_DIR)) {
     if (!file.endsWith(".json")) continue;
     try {
@@ -1924,6 +1950,40 @@ export default function (omp: ExtensionAPI) {
     return null;
   }
 
+  /**
+   * Mirror this process's live session and streaming flag into the shared
+   * instance registry.
+   *
+   * The registry is the only cross-process view of "which session is running
+   * where": `/api/instances` prunes dead pids, so a session with no entry is
+   * provably not mid-run. Updated on every event this instance forwards (they
+   * are frequent during a run, so a lost lifecycle frame self-heals), with
+   * `isStreaming` read from the runtime (`ctx.isIdle()`) rather than assumed
+   * from the event type alone.
+   *
+   * `streamingHint` pins the value for the two transition events, where the
+   * runtime flag may not have flipped yet when the handler runs.
+   */
+  function syncInstanceActivity(ctx: ExtensionContext | null, streamingHint?: boolean) {
+    if (!ctx) return;
+    const sessionFile = currentSessionIdFromCtx(ctx) || "";
+    let isStreaming = streamingHint;
+    if (isStreaming === undefined) {
+      try {
+        isStreaming = !ctx.isIdle();
+      } catch {
+        isStreaming = undefined;
+      }
+    }
+    const pair = `${sessionFile}|${isStreaming}`;
+    if (pair === instanceActivityPair) return;
+    instanceActivityPair = pair;
+    // Without a trustworthy value, leave the stored flag untouched rather than
+    // blanking it: the frontend treats a missing flag as "unknown" and falls
+    // back to the event-driven marks for that session.
+    patchInstanceEntry(isStreaming === undefined ? { sessionFile } : { sessionFile, isStreaming });
+  }
+
   function withRouteMeta(data: unknown) {
     const currentCtx = globalState.getLatestCtx?.() ?? latestCtx;
     const sessionId = currentSessionIdFromCtx(currentCtx);
@@ -2504,6 +2564,15 @@ export default function (omp: ExtensionAPI) {
         // via list_agents instead.
         if (childAgentInstance) return;
 
+        // Keep the process's registry entry (session file + run state) honest.
+        // The lifecycle pair is authoritative for its own transition; every
+        // other event re-reads the runtime's idle flag, so a lost or
+        // mis-tagged lifecycle frame cannot leave a session marked as running.
+        syncInstanceActivity(
+          ctx,
+          eventType === "agent_start" ? true : eventType === "agent_end" ? false : undefined,
+        );
+
         // Forward event to all connected browser clients
         // Wrap in { type: "event", event: ... } to match the existing frontend protocol
         broadcast({
@@ -2540,6 +2609,7 @@ export default function (omp: ExtensionAPI) {
     userMessages = [];
     // Update instance registry with new session file
     updateInstanceSession(ctx.sessionManager.getSessionFile() || "");
+    syncInstanceActivity(ctx);
   });
   omp.on("turn_start", async (_event, _ctx) => {
     turnCount++;
@@ -7494,6 +7564,7 @@ export default function (omp: ExtensionAPI) {
     // reload) a stale instance's ctx is the previous session.
     if (globalState.buildStateSnapshot !== buildStateSnapshot) return;
     updateInstanceSession(ctx.sessionManager.getSessionFile() || "");
+    syncInstanceActivity(ctx);
     if (globalState.clients.size === 0) return;
     try {
       const snapshot = await buildStateSnapshot(ctx);

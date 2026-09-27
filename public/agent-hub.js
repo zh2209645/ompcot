@@ -50,9 +50,22 @@ export function createAgentHub({
   let fetchSeq = 0; // latest fetch wins; stale responses are dropped
   let pollTimer = null;
   let destroyed = false;
+  // Signature of what the DOM currently shows (see `structureSignature` /
+  // `statusSignature`): the poll refetches every 10 s while the panel is open
+  // and the roster is usually identical, and rebuilding the rows anyway tore
+  // down and re-created every status label (with its pulsing dot) on each
+  // tick, which read as a flicker.
+  let renderedStructure = null;
+  let renderedStatuses = null;
+  // Rows by agent id, so a status-only change updates the label in place
+  // instead of rebuilding the list.
+  const rowEls = new Map();
 
   const unsubscribeLanguage = onLanguageChanged(() => {
-    if (isOpen()) render();
+    // Labels (group headers, kind, status title) are translated at render
+    // time, so a language switch must rebuild even though the roster did not
+    // change.
+    if (isOpen()) render({ force: true });
   });
 
   // ── Open / close ────────────────────────────────────────────────────────
@@ -110,8 +123,9 @@ export function createAgentHub({
   async function refresh() {
     if (destroyed) return;
     const seq = ++fetchSeq;
-    contentState = agents.length > 0 ? "ready" : "loading";
-    if (isOpen()) render();
+    // No render before the response: it could only repaint the previous state
+    // (and flashed "Loading…" for an empty roster on every poll). The panel
+    // repaints below, and only when the roster actually changed.
     const result = await wsRpc(wsClient, { type: "list_agents" });
     if (destroyed || seq !== fetchSeq) return;
     if (!result.ok) {
@@ -126,6 +140,30 @@ export function createAgentHub({
   }
 
   // ── Rendering ───────────────────────────────────────────────────────────
+
+  /**
+   * Everything the DOM shows except the status text: content state plus each
+   * row's identity, grouping and whether it is running. Only a change here
+   * requires rebuilding rows.
+   */
+  function structureSignature() {
+    return JSON.stringify([
+      contentState,
+      agents.map((agent) => [
+        agent.id ?? agent.name,
+        String(agent.name),
+        agent.kind === "main" ? "main" : "sub",
+        isRunning(agent),
+        agent.sessionFile ?? null,
+        typeof onOpenSession === "function" && Boolean(agent.sessionFile),
+      ]),
+    ]);
+  }
+
+  /** Status labels as currently reported by the roster. */
+  function statusSignature() {
+    return JSON.stringify(agents.map((agent) => [agent.id ?? agent.name, agent.status ?? null]));
+  }
 
   function note(text) {
     const el = document.createElement("div");
@@ -164,9 +202,7 @@ export function createAgentHub({
     bottom.className = "agent-hub-row-bottom";
     const status = document.createElement("span");
     status.className = "agent-hub-status";
-    const statusText = agent.status == null ? "" : String(agent.status);
-    status.textContent = statusText;
-    status.title = `${t("agents.status")}: ${statusText}`;
+    setStatusLabel(status, agent.status);
     bottom.append(status);
 
     if (agent.sessionFile && typeof onOpenSession === "function") {
@@ -179,11 +215,39 @@ export function createAgentHub({
     }
 
     el.append(top, bottom);
+    rowEls.set(agent.id ?? agent.name, status);
     return el;
   }
 
-  function render() {
+  /** Write a roster status only when it differs from what the label shows. */
+  function setStatusLabel(statusEl, status) {
+    const statusText = status == null ? "" : String(status);
+    if (statusEl.textContent === statusText) return;
+    statusEl.textContent = statusText;
+    statusEl.title = `${t("agents.status")}: ${statusText}`;
+  }
+
+  function render({ force = false } = {}) {
+    const structure = structureSignature();
+    // Same rows: refresh only the status labels that actually changed, so the
+    // poll never tears down a row (and with it the pulsing live dot) for an
+    // unchanged roster.
+    if (!force && structure === renderedStructure && renderedStructure !== null) {
+      const statuses = statusSignature();
+      if (statuses === renderedStatuses) return;
+      renderedStatuses = statuses;
+      for (const agent of agents) {
+        const statusEl = rowEls.get(agent.id ?? agent.name);
+        if (statusEl) setStatusLabel(statusEl, agent.status);
+      }
+      return;
+    }
+
+    rowEls.clear();
     listEl.replaceChildren();
+    renderedStructure = structure;
+    renderedStatuses = statusSignature();
+
     if (contentState === "unavailable") {
       listEl.append(note(t("agents.unavailable")));
       return;

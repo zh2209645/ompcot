@@ -131,3 +131,69 @@ describe("ToolCardRenderer follow behavior", () => {
     expect(raf).not.toHaveBeenCalled();
   });
 });
+
+describe("ToolCardRenderer identity (one card per tool call)", () => {
+  let container;
+  let renderer;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    renderer = new ToolCardRenderer(container);
+  });
+
+  const execution = (overrides = {}) => ({
+    toolCallId: "call_1",
+    toolName: "bash",
+    args: { command: "ls" },
+    status: "pending",
+    output: "",
+    ...overrides,
+  });
+
+  it("a replayed createToolCard reuses the existing card", () => {
+    const first = renderer.createToolCard(execution());
+    const second = renderer.createToolCard(execution());
+
+    expect(second).toBe(first);
+    expect(container.querySelectorAll(".tool-card")).toHaveLength(1);
+  });
+
+  it("updateToolCard never appends a second card for the same call", () => {
+    const first = renderer.createToolCard(execution());
+    renderer.updateToolCard(execution({ status: "streaming", output: "partial" }));
+    const updated = renderer.updateToolCard(
+      execution({ status: "streaming", output: "partial more" }),
+    );
+
+    expect(updated).toBe(first);
+    expect(container.querySelectorAll(".tool-card")).toHaveLength(1);
+    expect(container.querySelector(".tool-output").textContent).toBe("partial more");
+  });
+
+  it("a history render reuses a live card instead of duplicating it", () => {
+    const live = renderer.createToolCard(execution());
+    const history = renderer.createHistoryCard({
+      toolCallId: "call_1",
+      toolName: "bash",
+      args: {},
+    });
+
+    expect(history).toBe(live);
+    expect(container.querySelectorAll(".tool-card")).toHaveLength(1);
+  });
+
+  it("creates a fresh card once the previous one was detached by a re-render", () => {
+    const stale = renderer.createToolCard(execution());
+    container.replaceChildren();
+
+    // The live update path (what a tool event does) must rebuild into the
+    // current transcript rather than write into the detached card.
+    const fresh = renderer.updateToolCard(
+      execution({ status: "streaming", output: "after re-render" }),
+    );
+
+    expect(fresh).not.toBe(stale);
+    expect(container.querySelectorAll(".tool-card")).toHaveLength(1);
+    expect(container.querySelector(".tool-output").textContent).toBe("after re-render");
+  });
+});

@@ -291,3 +291,94 @@ describe("agent hub panel", () => {
     }
   });
 });
+
+describe("agent hub renders only what changed", () => {
+  let dom;
+
+  beforeEach(() => {
+    dom = new JSDOM(html, { url: "http://localhost/" });
+    global.window = dom.window;
+    global.document = dom.window.document;
+    setLanguage("en");
+  });
+
+  afterEach(() => {
+    dom.window.close();
+  });
+
+  function createHub() {
+    const ws = new MockWsClient();
+    const hub = createAgentHub({
+      toggleEl: document.getElementById("agent-hub-toggle"),
+      panelEl: document.getElementById("agent-hub"),
+      listEl: document.getElementById("agent-hub-list"),
+      closeEl: document.getElementById("agent-hub-close"),
+      wsClient: ws,
+      onOpenSession: () => {},
+    });
+    return { hub, ws, list: document.getElementById("agent-hub-list") };
+  }
+
+  async function fetchRoster(ctx, roster) {
+    const done = ctx.hub.refresh();
+    ctx.ws.respond({ agents: roster, available: true });
+    await done;
+    return ctx;
+  }
+
+  test("an unchanged poll does not touch the roster DOM", async () => {
+    const ctx = createHub();
+    await fetchRoster(ctx, ROSTER);
+    ctx.hub.open();
+    await fetchRoster(ctx, ROSTER);
+
+    const row = ctx.list.querySelector(".agent-hub-row");
+    const statusEl = ctx.list.querySelector(".agent-hub-status");
+    const mutations = [];
+    const observer = new MutationObserver((records) => mutations.push(...records));
+    observer.observe(ctx.list, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+    });
+
+    await fetchRoster(ctx, ROSTER);
+    await tick();
+
+    expect(mutations).toEqual([]);
+    expect(ctx.list.querySelector(".agent-hub-row")).toBe(row);
+    expect(ctx.list.querySelector(".agent-hub-status")).toBe(statusEl);
+  });
+
+  test("a status-only change rewrites that label in place (no row rebuild)", async () => {
+    const ctx = createHub();
+    await fetchRoster(ctx, ROSTER);
+    ctx.hub.open();
+    await fetchRoster(ctx, ROSTER);
+
+    const row = ctx.list.querySelector(".agent-hub-row");
+    const statusEl = row.querySelector(".agent-hub-status");
+
+    await fetchRoster(ctx, [{ ...ROSTER[0], status: "writing tests" }, ...ROSTER.slice(1)]);
+
+    expect(ctx.list.querySelector(".agent-hub-row")).toBe(row);
+    expect(ctx.list.querySelector(".agent-hub-status")).toBe(statusEl);
+    expect(statusEl.textContent).toBe("writing tests");
+  });
+
+  test("a structural change (agent finished) rebuilds the groups", async () => {
+    const ctx = createHub();
+    await fetchRoster(ctx, ROSTER);
+    ctx.hub.open();
+    await fetchRoster(ctx, ROSTER);
+
+    await fetchRoster(ctx, [{ ...ROSTER[0], running: false, status: "done" }, ...ROSTER.slice(1)]);
+
+    // Nothing is running any more, so the "running" group disappears with its
+    // rows: one group, all rows finished.
+    expect(ctx.list.querySelectorAll(".agent-hub-group")).toHaveLength(1);
+    expect(ctx.list.querySelectorAll(".agent-hub-row.running")).toHaveLength(0);
+    expect(ctx.list.querySelectorAll(".agent-hub-row.finished")).toHaveLength(3);
+  });
+});

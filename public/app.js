@@ -43,6 +43,7 @@ import {
   resetRegistryBase,
   setRegistryBase,
 } from "./pkg-registry.js";
+import { reconcileSessionActivity } from "./session-activity.js";
 import { renderTranscriptFromEntries, resyncTranscript } from "./session-resync.js";
 import { findPortForSession, getWorkspacePathForPort } from "./session-routing.js";
 import { SessionSidebar } from "./session-sidebar.js";
@@ -886,6 +887,11 @@ wsClient.addEventListener("serverError", (e) => {
   // recover it into the queue instead of surfacing an error.
   if (composerCommands.consumeStreamRejection(e.detail?.message)) return;
   messageRenderer.renderError(e.detail.message);
+  // The broker reports an instance it gave up on as an error frame and a run
+  // that died with it will never send its `agent_end`. Re-read the instance
+  // registry now so the sidebar drops the dead session's green dot instead of
+  // waiting for the next poll.
+  pollInstances().catch(() => {});
 });
 
 // The broker could not deliver a command to any live omp process. For a tracked
@@ -1231,12 +1237,18 @@ function handleAgentEnd(event = null) {
   }
 }
 
-let currentStreamingThinking = "";
+// Thinking text per segment of the in-flight assistant message, in message
+// order. The runtime's partial message is cumulative and reports every segment
+// (`message.content`), so the live view is refreshed from it rather than from
+// accumulated deltas — a delta the message already carries would otherwise be
+// counted twice, and content that arrived only in `thinking_start` /
+// `thinking_end` (no delta) would never render at all.
+let currentStreamingThinking = [];
 
 function handleMessageStart(message) {
   if (message.role === "assistant") {
     currentStreamingText = "";
-    currentStreamingThinking = "";
+    currentStreamingThinking = [];
     // Carry the real entry id when the event provides one; the renderer
     // falls back to the "streaming" placeholder until finalize (F2).
     currentStreamingElement = messageRenderer.renderAssistantMessage(
@@ -1278,23 +1290,31 @@ function getAssistantText(message) {
     .join("\n");
 }
 
-function getAssistantThinking(message) {
-  if (!Array.isArray(message?.content)) return "";
+/** Thinking text per thinking block of an assistant message, in message order. */
+function getAssistantThinkingSegments(message) {
+  if (!Array.isArray(message?.content)) return [];
   return message.content
     .filter((block) => block.type === "thinking")
     .map((block) => block.thinking || "")
-    .join("\n");
+    .filter((text) => text.length > 0);
 }
 
 function ensureStreamingAssistantElement(message = null) {
+  // A snapshot/history re-render replaces the transcript wholesale, leaving the
+  // live element detached: continuing to stream into it would lose the rest of
+  // the turn off-screen. Drop it instead, so the renderer re-adopts the element
+  // that is actually on screen (or creates one).
+  if (currentStreamingElement && !currentStreamingElement.isConnected) {
+    currentStreamingElement = null;
+  }
   if (currentStreamingElement) return currentStreamingElement;
   currentStreamingText = getAssistantText(message);
-  currentStreamingThinking = getAssistantThinking(message);
+  currentStreamingThinking = getAssistantThinkingSegments(message);
   currentStreamingElement = messageRenderer.renderAssistantMessage(
     { content: "", id: message?.id },
     true,
   );
-  if (currentStreamingThinking) {
+  if (currentStreamingThinking.length > 0) {
     messageRenderer.updateStreamingThinking(currentStreamingElement, currentStreamingThinking);
   }
   if (currentStreamingText) {
@@ -1307,25 +1327,40 @@ function handleMessageUpdate(event) {
   const { assistantMessageEvent, message } = event;
   if (message?.role === "assistant") {
     ensureStreamingAssistantElement(message);
-  }
-
-  if (assistantMessageEvent.type === "thinking_delta") {
-    currentStreamingThinking =
-      getAssistantThinking(message) || currentStreamingThinking + assistantMessageEvent.delta;
-    if (currentStreamingElement) {
-      messageRenderer.updateStreamingThinking(currentStreamingElement, currentStreamingThinking);
+    // The partial message is cumulative, so it is the single source of truth
+    // for both the text and the thinking segments. The delta is only a
+    // fallback for a frame that arrives without the block it belongs to.
+    const segments = getAssistantThinkingSegments(message);
+    if (segments.length > 0) {
+      currentStreamingThinking = segments;
+      if (currentStreamingElement) {
+        messageRenderer.updateStreamingThinking(currentStreamingElement, segments);
+      }
+    } else if (assistantMessageEvent?.type === "thinking_delta" && assistantMessageEvent.delta) {
+      currentStreamingThinking = [
+        ...currentStreamingThinking.slice(0, -1),
+        (currentStreamingThinking[currentStreamingThinking.length - 1] || "") +
+          assistantMessageEvent.delta,
+      ];
+      if (currentStreamingElement) {
+        messageRenderer.updateStreamingThinking(currentStreamingElement, currentStreamingThinking);
+      }
     }
-  } else if (assistantMessageEvent.type === "text_delta") {
-    currentStreamingText =
-      getAssistantText(message) || currentStreamingText + assistantMessageEvent.delta;
-    if (currentStreamingElement) {
-      messageRenderer.updateStreamingMessage(currentStreamingElement, currentStreamingText);
+
+    const snapshotText = getAssistantText(message);
+    if (snapshotText || assistantMessageEvent?.type === "text_delta") {
+      currentStreamingText =
+        snapshotText || currentStreamingText + (assistantMessageEvent?.delta ?? "");
+      if (currentStreamingElement) {
+        messageRenderer.updateStreamingMessage(currentStreamingElement, currentStreamingText);
+      }
     }
   }
 }
 
 function handleMessageEnd(message) {
-  if (message?.role === "assistant" && message?.stopReason === "error") {
+  if (message?.role !== "assistant") return;
+  if (message?.stopReason === "error") {
     const provider = message?.provider ? String(message.provider) : "unknown";
     const model = message?.model ? String(message.model) : "unknown";
     const errorMessage = message?.errorMessage
@@ -1333,14 +1368,14 @@ function handleMessageEnd(message) {
       : "Model request failed";
     messageRenderer.renderError(`[${provider}/${model}] ${errorMessage}`);
   }
-  if (!currentStreamingElement && message?.role === "assistant") {
+  if (!currentStreamingElement) {
     // The live element may already have been released for this message (abort,
     // reconnect, out-of-order frames). Finish THAT element when it is still in
     // the transcript — creating a new one would append a second copy of the
     // same assistant turn.
     currentStreamingElement = messageRenderer.findUnfinishedAssistantElement(message?.id);
     if (currentStreamingElement) {
-      currentStreamingThinking = getAssistantThinking(message) || currentStreamingThinking;
+      currentStreamingThinking = getAssistantThinkingSegments(message);
     } else {
       ensureStreamingAssistantElement(message);
     }
@@ -1348,16 +1383,18 @@ function handleMessageEnd(message) {
   if (currentStreamingElement) {
     // Pass usage info for cost display
     const usage = message?.usage || null;
-    // Pass thinking content so finalize can render the thinking block, and
-    // the real entry id so the fork action can resolve this message (F2).
+    // Hand the message's own content blocks to finalize whenever the runtime
+    // provided them: rendering them (instead of the accumulated string) keeps
+    // a streamed message byte-identical to the same message rendered from the
+    // session file. The real entry id lets fork resolve this message (F2).
     messageRenderer.finalizeStreamingMessage(
       currentStreamingElement,
       usage,
-      currentStreamingThinking,
+      Array.isArray(message?.content) ? message.content : currentStreamingThinking.join("\n"),
       typeof message?.id === "string" ? message.id : null,
     );
     currentStreamingElement = null;
-    currentStreamingThinking = "";
+    currentStreamingThinking = [];
 
     // Track session cost and tokens
     if (usage?.cost?.total) {
@@ -1382,7 +1419,10 @@ function handleToolExecutionStart(event) {
     status: "pending",
   });
 
-  toolCardRenderer.createToolCard(state.getToolExecution(toolCallId));
+  // `updateToolCard` creates the card when it is missing and reuses the
+  // existing one otherwise, so a replayed start frame cannot add a second card
+  // for the same tool call.
+  toolCardRenderer.updateToolCard(state.getToolExecution(toolCallId));
 }
 
 function handleToolExecutionUpdate(event) {
@@ -1848,19 +1888,19 @@ async function resyncTranscriptFromAgent() {
     },
     onStatus: (kind) => {
       if (kind === "start") {
-        statusText.textContent = t("status.resyncing");
+        setStatusText(t("status.resyncing"));
         return;
       }
       if (kind === "done") {
-        statusText.textContent = t("status.resynced");
+        setStatusText(t("status.resynced"));
         setTimeout(() => {
-          statusText.textContent = t("status.connected");
+          setStatusText(authoritativeStatusText());
         }, 2000);
         return;
       }
-      statusText.textContent = t("status.resyncFailed");
+      setStatusText(t("status.resyncFailed"));
       setTimeout(() => {
-        statusText.textContent = t("status.connected");
+        setStatusText(authoritativeStatusText());
       }, 3000);
     },
   });
@@ -1884,18 +1924,19 @@ function resetTranscriptTotals() {
 let statusRevertTimer = null;
 function showTransientStatus(message, holdMs = 3000) {
   if (statusRevertTimer) clearTimeout(statusRevertTimer);
-  statusText.textContent = message;
+  setStatusText(message);
   statusRevertTimer = setTimeout(() => {
     statusRevertTimer = null;
-    if (state.isStreaming) {
-      statusText.textContent = t("status.working");
-      return;
-    }
-    if (lastConnectionStatus) {
-      updateConnectionStatus(lastConnectionStatus);
-      return;
-    }
-    statusText.textContent = t("status.connected");
+    // Back to whatever the authoritative status is by then: the run may have
+    // started (or the connection dropped) while the transient message was up.
+    setStatusText(authoritativeStatusText(), tailscaleUrl || lanUrl || "");
+    setStatusIndicatorState(
+      state.isStreaming
+        ? "streaming"
+        : lastConnectionStatus === "disconnected"
+          ? "disconnected"
+          : "connected",
+    );
   }, holdMs);
 }
 
@@ -2141,7 +2182,7 @@ commandPaletteOverlay.addEventListener("click", closeCommandPalette);
 
 async function rpcCommand(cmd, statusMsg) {
   try {
-    if (statusMsg) statusText.textContent = statusMsg;
+    if (statusMsg) setStatusText(statusMsg);
     const resp = await fetch("/api/rpc", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2149,21 +2190,21 @@ async function rpcCommand(cmd, statusMsg) {
     });
     const data = await resp.json();
     if (data.success) {
-      statusText.textContent = t("status.done");
+      setStatusText(t("status.done"));
       setTimeout(() => {
-        statusText.textContent = t("status.connected");
+        setStatusText(authoritativeStatusText());
       }, 2000);
     } else {
-      statusText.textContent = data.error || t("status.failed");
+      setStatusText(data.error || t("status.failed"));
       setTimeout(() => {
-        statusText.textContent = t("status.connected");
+        setStatusText(authoritativeStatusText());
       }, 3000);
     }
     return data;
   } catch (_e) {
-    statusText.textContent = t("status.error");
+    setStatusText(t("status.error"));
     setTimeout(() => {
-      statusText.textContent = t("status.connected");
+      setStatusText(authoritativeStatusText());
     }, 3000);
   }
 }
@@ -2171,9 +2212,9 @@ async function rpcCommand(cmd, statusMsg) {
 async function rpcExportHtml() {
   const data = await rpcCommand({ type: "export_html" }, t("status.exporting"));
   if (data?.success && data.data?.path) {
-    statusText.textContent = t("status.exported", { path: data.data.path });
+    setStatusText(t("status.exported", { path: data.data.path }));
     setTimeout(() => {
-      statusText.textContent = t("status.connected");
+      setStatusText(authoritativeStatusText());
     }, 4000);
   }
 }
@@ -3321,6 +3362,28 @@ function updateMirrorLiveIndicator() {
   });
 }
 
+/**
+ * Re-derive the sidebar's "running" marks from the live instance registry.
+ *
+ * The event-driven marks (agent_start/agent_end, mirror snapshots) are fast but
+ * latched: a dropped or re-tagged frame leaves a session showing the pulsing
+ * green dot long after its run ended (and a missed agent_start hides a live
+ * run). The registry knows which session each live process is on and whether
+ * that process is mid-run, so a pass here corrects both directions — see
+ * public/session-activity.js for the rules. Runs on every instance poll (5 s)
+ * and whenever the broker reports a dead instance.
+ */
+function reconcileSidebarStreaming() {
+  const { start, stop } = reconcileSessionActivity(sidebar.streamingFiles, liveInstances);
+  for (const filePath of stop) {
+    // Drop the bookkeeping too: a mark that no longer reflects reality must not
+    // be resurrected by the next `clearForegroundStreaming()` pass.
+    foregroundStreamingFiles.delete(filePath);
+    sidebar.setStreaming(filePath, false);
+  }
+  for (const filePath of start) sidebar.setStreaming(filePath, true);
+}
+
 // Poll for running instances to mark all live sessions
 async function pollInstances() {
   try {
@@ -3332,6 +3395,7 @@ async function pollInstances() {
         count: liveInstances.length,
         instances: liveInstances,
       });
+      reconcileSidebarStreaming();
       updateMirrorLiveIndicator();
       syncWorkspaceIndicatorFromInstances();
       if (document.querySelector(".welcome")) {
@@ -3588,11 +3652,9 @@ async function refreshLanUrl() {
     lanUrl = typeof data?.lanUrl === "string" ? data.lanUrl : "";
     if (!lanUrl && lanUrls.length > 0) lanUrl = lanUrls[0];
     if (tailscaleUrl) {
-      statusText.textContent = t("status.connectedTs");
-      statusText.title = tailscaleUrl;
+      setStatusText(t("status.connectedTs"), tailscaleUrl);
     } else if (lanUrl) {
-      statusText.textContent = t("status.connectedLan");
-      statusText.title = lanUrl;
+      setStatusText(t("status.connectedLan"), lanUrl);
     }
     updateLanQrButton(lanUrl);
   } catch {
@@ -3605,30 +3667,56 @@ async function refreshLanUrl() {
 // status text in the new language without a WS round-trip.
 let lastConnectionStatus = null;
 
+/**
+ * Write the header status label only when it actually changes.
+ *
+ * Every writer used to assign `textContent` unconditionally — including the
+ * per-frame `updateUI()` passes and the reverts that follow a transient
+ * message — which replaced the text node (and its title) with an identical
+ * one for no reason. Nothing about the label should be touched unless the
+ * value differs, so a stale/unnecessary write can never repaint it.
+ */
+function setStatusText(text, title = undefined) {
+  const next = String(text ?? "");
+  if (statusText.textContent !== next) statusText.textContent = next;
+  if (title !== undefined && statusText.title !== title) statusText.title = title;
+}
+
+/** Toggle the header dot's state class only when it really changes (each
+    reassignment restarts the dot's CSS animation). */
+function setStatusIndicatorState(state) {
+  const next = `status-indicator ${state}`;
+  if (statusIndicator.className !== next) statusIndicator.className = next;
+}
+
+/** The status the label should show right now: a run in flight wins over the
+    connection state, which in turn wins over the ambient "Connected" text. */
+function authoritativeStatusText() {
+  if (state.isStreaming) return t("status.working");
+  if (lastConnectionStatus === "disconnected") return t("status.disconnected");
+  if (tailscaleUrl) return t("status.connectedTs");
+  if (lanUrl) return t("status.connectedLan");
+  return t("status.connected");
+}
+
 function updateConnectionStatus(status) {
   // Authoritative write — cancels any pending transient-status revert so the
   // timer can't clobber this status later (F11).
   clearTransientStatusRevert();
   lastConnectionStatus = status;
-  statusIndicator.className = `status-indicator ${status}`;
+  // A run in flight owns the label (and the dot): a reconnect mid-run reports
+  // "connected" without ending the run, and flipping the label to "Connected"
+  // for that would flicker between the two states.
+  setStatusIndicatorState(state.isStreaming ? "streaming" : status);
 
   if (status === "connected") {
-    if (tailscaleUrl) {
-      statusText.textContent = t("status.connectedTs");
-      statusText.title = tailscaleUrl;
-    } else if (lanUrl) {
-      statusText.textContent = t("status.connectedLan");
-      statusText.title = lanUrl;
-    } else {
-      statusText.textContent = t("status.connected");
-      statusText.title = "";
-    }
+    setStatusText(authoritativeStatusText(), tailscaleUrl || lanUrl || "");
     // Fetch network link metadata on first connect
     if (!tailscaleUrl && !lanUrl) {
       void refreshLanUrl();
     }
   } else if (status === "disconnected") {
-    statusText.textContent = t("status.disconnected");
+    setStatusText(t("status.disconnected"));
   }
 }
 
@@ -3641,16 +3729,14 @@ function updateUI() {
   if (isStreaming) {
     // Authoritative write — cancels a pending transient-status revert (F11).
     clearTransientStatusRevert();
-    statusIndicator.classList.add("streaming");
-    statusIndicator.classList.remove("connected");
-    statusText.textContent = t("status.working");
+    setStatusIndicatorState("streaming");
+    setStatusText(t("status.working"));
   } else {
-    statusIndicator.classList.remove("streaming");
-    statusIndicator.classList.add("connected");
+    setStatusIndicatorState(lastConnectionStatus === "disconnected" ? "disconnected" : "connected");
     // Don't clobber a live transient status from a routine updateUI pass —
     // only connection/streaming changes cancel it explicitly (F11).
     if (!statusRevertTimer) {
-      statusText.textContent = t("status.connected");
+      setStatusText(authoritativeStatusText());
     }
   }
 
@@ -4665,11 +4751,14 @@ onLanguageChanged(() => {
   updateThinkingBtn();
   updateModelLabel();
   setWorkspaceLaunchInProgress(workspaceLaunchInProgress);
-  if (state.isStreaming) {
-    statusText.textContent = t("status.working");
-  } else if (lastConnectionStatus) {
-    updateConnectionStatus(lastConnectionStatus);
-  }
+  setStatusText(authoritativeStatusText(), tailscaleUrl || lanUrl || "");
+  setStatusIndicatorState(
+    state.isStreaming
+      ? "streaming"
+      : lastConnectionStatus === "disconnected"
+        ? "disconnected"
+        : "connected",
+  );
   updateTokenUsage();
   // Theme grid headings + swatch names are JS-built; rebuild so a live
   // language switch while Settings is open doesn't leave stale labels.

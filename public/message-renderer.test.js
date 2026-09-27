@@ -221,3 +221,139 @@ describe("MessageRenderer streaming markdown preview", () => {
     expect(scrolled).toBe(true);
   });
 });
+
+describe("thinking blocks are rendered identically live and from history", () => {
+  let container;
+  let renderer;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    renderer = new MessageRenderer(container);
+  });
+
+  const message = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "first thought" },
+      { type: "text", text: "the answer" },
+      { type: "thinking", thinking: "second thought, longer than the first one" },
+    ],
+    id: "msg_9",
+  };
+
+  const blockTexts = (el) =>
+    Array.from(el.querySelectorAll(".thinking-block")).map(
+      (block) => block.querySelector(".thinking-content").textContent,
+    );
+
+  it("finalize renders one block per thinking segment, like the history path", () => {
+    const live = renderer.renderAssistantMessage({ content: "", id: message.id }, true);
+    renderer.finalizeStreamingMessage(live, null, message.content, message.id);
+
+    const history = renderer.renderAssistantMessage(message, false, true);
+
+    expect(blockTexts(live)).toEqual([
+      "first thought",
+      "second thought, longer than the first one",
+    ]);
+    expect(blockTexts(live)).toEqual(blockTexts(history));
+  });
+
+  it("keeps the streamed placeholder in sync per segment (no merged block)", () => {
+    const el = renderer.renderAssistantMessage({ content: "" }, true);
+    renderer.updateStreamingThinking(el, ["alpha"]);
+    renderer.updateStreamingThinking(el, ["alpha", "beta"]);
+
+    expect(blockTexts(el)).toEqual(["alpha", "beta"]);
+    // Blocks keep message order and stay ahead of the text block.
+    const order = Array.from(el.querySelector(".message-content").children).map((child) =>
+      child.classList.contains("thinking-block")
+        ? "thinking"
+        : child.classList.contains("streaming-text")
+          ? "text"
+          : "other",
+    );
+    expect(order).toEqual(["thinking", "thinking", "text"]);
+  });
+
+  it("does not rewrite a segment whose text did not change", () => {
+    const el = renderer.renderAssistantMessage({ content: "" }, true);
+    renderer.updateStreamingThinking(el, ["alpha"]);
+    const contentEl = el.querySelector(".thinking-content");
+    const textNode = contentEl.firstChild;
+
+    renderer.updateStreamingThinking(el, ["alpha"]);
+
+    expect(contentEl.firstChild).toBe(textNode);
+  });
+
+  it("collapses every streamed segment when the run is stopped", () => {
+    const el = renderer.renderAssistantMessage({ content: "" }, true);
+    renderer.updateStreamingThinking(el, ["alpha", "beta"]);
+
+    renderer.stopStreaming(el);
+
+    expect(el.querySelectorAll(".streaming-thinking")).toHaveLength(0);
+    expect(el.querySelectorAll(".thinking-content.expanded")).toHaveLength(0);
+  });
+});
+
+describe("rendering is keyed on message identity (no duplicate elements)", () => {
+  let container;
+  let renderer;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    renderer = new MessageRenderer(container);
+  });
+
+  it("a replayed message_start for the same id streams into the existing element", () => {
+    const first = renderer.renderAssistantMessage({ content: "", id: "msg_1" }, true);
+    renderer.updateStreamingMessage(first, "partial answer");
+
+    // Replay of the same frame (provider retry / re-delivered event).
+    const second = renderer.renderAssistantMessage({ content: "", id: "msg_1" }, true);
+
+    expect(second).toBe(first);
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+  });
+
+  it("an id-less replay adopts the unfinished element instead of appending", () => {
+    const first = renderer.renderAssistantMessage({ content: "" }, true);
+    const second = renderer.renderAssistantMessage({ content: "" }, true);
+
+    expect(second).toBe(first);
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+  });
+
+  it("still creates a new element for the next turn of the same run", () => {
+    const first = renderer.renderAssistantMessage({ content: "" }, true);
+    renderer.updateStreamingMessage(first, "turn one");
+    renderer.finalizeStreamingMessage(first);
+
+    const second = renderer.renderAssistantMessage({ content: "" }, true);
+
+    expect(second).not.toBe(first);
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(2);
+  });
+
+  it("re-rendering the same finalized message replaces it in place", () => {
+    const first = renderer.renderAssistantMessage({ content: "hello", id: "msg_7" }, false, true);
+    const again = renderer.renderAssistantMessage({ content: "hello", id: "msg_7" }, false, true);
+
+    expect(again).toBe(first);
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+    expect(container.querySelectorAll(".message-copy-btn")).toHaveLength(1);
+  });
+
+  it("drops the finished affordances when a finalized element goes back to streaming", () => {
+    const el = renderer.renderAssistantMessage({ content: "old answer", id: "msg_9" }, false, true);
+    expect(el.querySelector(".message-copy-btn")).not.toBeNull();
+
+    const streamed = renderer.renderAssistantMessage({ content: "", id: "msg_9" }, true);
+
+    expect(streamed).toBe(el);
+    expect(el.querySelector(".message-copy-btn")).toBeNull();
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+  });
+});
