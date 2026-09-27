@@ -72,6 +72,9 @@ export class ToolCardRenderer {
 
     this.container.appendChild(card);
     this.toolCards.set(toolCallId, card);
+    // Remember the rendered status so updateToolCard can tell a real status
+    // transition from the next partial-output refresh.
+    card.dataset.toolStatus = status;
     this.scrollToBottom();
 
     return card;
@@ -84,25 +87,33 @@ export class ToolCardRenderer {
       card = this.createToolCard(toolExecution);
     }
 
-    // Update status
-    const statusElement = card.querySelector(".tool-status");
-    if (statusElement) {
-      statusElement.className = `tool-status ${toolExecution.status}`;
-      statusElement.textContent = toolStatusLabel(toolExecution.status);
-    }
-
-    // Auto-expand when streaming
-    if (toolExecution.status === "streaming") {
-      const body = card.querySelector(".tool-card-body");
-      const chevron = card.querySelector(".tool-card-chevron");
-      if (body) body.classList.add("expanded");
-      if (chevron) chevron.classList.add("expanded");
+    const status = toolExecution.status;
+    // Partial outputs arrive continuously (every stdout chunk). Only the
+    // status TRANSITION may touch the status pill, and only the first update of
+    // a live run may force the body open — doing either on every update made a
+    // card the user collapsed pop back open, and re-wrote the same DOM
+    // thousands of times while a command streamed.
+    if (card.dataset.toolStatus !== status) {
+      card.dataset.toolStatus = status;
+      const statusElement = card.querySelector(".tool-status");
+      if (statusElement) {
+        statusElement.className = `tool-status ${status}`;
+        statusElement.textContent = toolStatusLabel(status);
+      }
+      // Auto-expand once, when the tool starts producing.
+      if (status === "streaming") {
+        const body = card.querySelector(".tool-card-body");
+        const chevron = card.querySelector(".tool-card-chevron");
+        if (body) body.classList.add("expanded");
+        if (chevron) chevron.classList.add("expanded");
+      }
     }
 
     // Update output
     const outputElement = card.querySelector(".tool-output");
-    if (outputElement && toolExecution.output) {
-      outputElement.textContent = toolExecution.output;
+    const output = toolExecution.output || "";
+    if (outputElement && outputElement.textContent !== output) {
+      outputElement.textContent = output;
       this.scrollToBottom();
     }
   }
@@ -112,18 +123,21 @@ export class ToolCardRenderer {
     if (!card) return;
 
     // Update status
-    const statusElement = card.querySelector(".tool-status");
-    if (statusElement) {
-      const status = isError ? "error" : "complete";
-      statusElement.className = `tool-status ${status}`;
-      statusElement.textContent = toolStatusLabel(status);
+    const status = isError ? "error" : "complete";
+    if (card.dataset.toolStatus !== status) {
+      card.dataset.toolStatus = status;
+      const statusElement = card.querySelector(".tool-status");
+      if (statusElement) {
+        statusElement.className = `tool-status ${status}`;
+        statusElement.textContent = toolStatusLabel(status);
+      }
     }
 
     // Update output with final result
     const outputElement = card.querySelector(".tool-output");
     if (outputElement && result) {
       const output = this.formatResult(result);
-      outputElement.textContent = output;
+      if (outputElement.textContent !== output) outputElement.textContent = output;
     }
 
     // Collapse completed cards (less noise)
@@ -253,6 +267,7 @@ export class ToolCardRenderer {
 
     this.container.appendChild(card);
     this.toolCards.set(toolCallId, card);
+    card.dataset.toolStatus = "complete";
 
     return card;
   }
@@ -267,6 +282,7 @@ export class ToolCardRenderer {
     if (isError) {
       const statusEl = card.querySelector(".tool-status");
       if (statusEl) {
+        card.dataset.toolStatus = "error";
         statusEl.className = "tool-status error";
         statusEl.textContent = t("status.error");
       }
@@ -274,7 +290,8 @@ export class ToolCardRenderer {
 
     const outputElement = card.querySelector(".tool-output");
     if (outputElement && result) {
-      outputElement.textContent = this.formatResult(result);
+      const output = this.formatResult(result);
+      if (outputElement.textContent !== output) outputElement.textContent = output;
     }
   }
 
@@ -355,17 +372,21 @@ export class ToolCardRenderer {
   }
 
   scrollToBottom() {
-    if (this.container) {
-      const threshold = 100;
-      const isNear =
-        this.container.scrollHeight - this.container.scrollTop - this.container.clientHeight <
-        threshold;
-      if (isNear) {
-        requestAnimationFrame(() => {
-          this.container.scrollTop = this.container.scrollHeight;
-        });
-      }
-    }
+    if (!this.container) return;
+    const threshold = 100;
+    const isNear =
+      this.container.scrollHeight - this.container.scrollTop - this.container.clientHeight <
+      threshold;
+    if (!isNear) return;
+    requestAnimationFrame(() => {
+      // Instant, not the transcript's `scroll-behavior: smooth`: a smooth
+      // follow lags a fast-growing card, and the lagging geometry is what
+      // stops the auto-follow for good (see MessageRenderer.jumpToBottom).
+      const previousBehavior = this.container.style.scrollBehavior;
+      this.container.style.scrollBehavior = "auto";
+      this.container.scrollTop = this.container.scrollHeight;
+      this.container.style.scrollBehavior = previousBehavior;
+    });
   }
 
   expandAll() {

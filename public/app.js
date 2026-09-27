@@ -773,11 +773,17 @@ document.addEventListener("visibilitychange", () => {
 // Scroll-to-bottom button + new message indicator
 // ═══════════════════════════════════════
 
+const SCROLLED_UP_THRESHOLD = 150;
+
+function isViewportScrolledUp() {
+  return (
+    messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight >
+    SCROLLED_UP_THRESHOLD
+  );
+}
+
 messagesContainer.addEventListener("scroll", () => {
-  const threshold = 150;
-  const atBottom =
-    messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight <
-    threshold;
+  const atBottom = !isViewportScrolledUp();
   isScrolledUp = !atBottom;
 
   if (atBottom) {
@@ -795,6 +801,11 @@ scrollBottomBtn.addEventListener("click", () => {
 });
 
 function showNewMessageBadge() {
+  // Recomputing from the live geometry matters: content arriving below the
+  // viewport grows the scroll range without firing a scroll event, so a
+  // latched flag stayed false and the "new messages" hint never appeared
+  // exactly when the feed had stopped following.
+  isScrolledUp = isViewportScrolledUp();
   if (isScrolledUp) {
     scrollBottomBadge.classList.remove("hidden");
   }
