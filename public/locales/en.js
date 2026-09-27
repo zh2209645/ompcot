@@ -513,6 +513,7 @@ export const en = {
   "session.retry": "Retry",
   "session.loadFailed": "Failed to load sessions.",
   "session.loadFailedRuntime": "Failed to load sessions. OMP runtime may be unavailable.",
+  "session.switchUnconfirmed": "Session switch was not confirmed by the running OMP.",
   "session.messageMatches": "Message matches",
   "session.matchCount": "{count} matches",
   "session.untitled": "Untitled",

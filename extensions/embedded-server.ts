@@ -7364,6 +7364,32 @@ export default function (omp: ExtensionAPI) {
     replayPendingUiRequests();
   });
 
+  // `switch_session` in-place swap (omp 18.3.2 keeps the extension instance and
+  // its listeners — no session_shutdown / session_start pair fires), so the
+  // re-broadcast above does NOT run for it and connected clients would keep the
+  // previous session: the `mirror_sync_request` the WebView sends right after
+  // its switch RPC is always answered from the pre-switch session (the swap
+  // completes after it). Re-broadcast the same snapshot on `session_switch` so
+  // the UI converges on the switched session, and keep the instance registry
+  // (`/api/instances` — the GUI's live-session detection) in sync.
+  omp.on("session_switch", async (_event, ctx) => {
+    rememberCtx(ctx);
+    if (childAgentInstance) return;
+    // Only the instance that currently owns the process-scoped bindings may
+    // broadcast: after a reload-model swap (new_session/fork on builds that do
+    // reload) a stale instance's ctx is the previous session.
+    if (globalState.buildStateSnapshot !== buildStateSnapshot) return;
+    updateInstanceSession(ctx.sessionManager.getSessionFile() || "");
+    if (globalState.clients.size === 0) return;
+    try {
+      const snapshot = await buildStateSnapshot(ctx);
+      broadcast(snapshot);
+    } catch (err) {
+      console.error("[Embedded] Failed to broadcast post-switch snapshot:", err);
+    }
+    replayPendingUiRequests();
+  });
+
   // ═══════════════════════════════════════
   // Per-session teardown (NOT process shutdown — see EmbeddedServerGlobal)
   // ═══════════════════════════════════════

@@ -501,6 +501,7 @@ export const zhCN = {
   "session.retry": "重试",
   "session.loadFailed": "加载会话失败。",
   "session.loadFailedRuntime": "加载会话失败。OMP 运行时可能不可用。",
+  "session.switchUnconfirmed": "运行中的 OMP 未确认会话切换。",
   "session.messageMatches": "消息匹配",
   "session.matchCount": "{count} 个匹配",
   "session.untitled": "未命名",

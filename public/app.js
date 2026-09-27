@@ -46,6 +46,7 @@ import {
 import { renderTranscriptFromEntries, resyncTranscript } from "./session-resync.js";
 import { findPortForSession, getWorkspacePathForPort } from "./session-routing.js";
 import { SessionSidebar } from "./session-sidebar.js";
+import { SessionSwitchGate, sameWorkspacePath } from "./session-switch.js";
 import { createConfigSubnav } from "./settings-config-subnav.js";
 import {
   clearSettingsSaveMessage,
@@ -1150,9 +1151,12 @@ function handleAgentEnd(event = null) {
     if (live) sidebar.setStreaming(live, false);
     foregroundPort = findPortForSession(liveInstances, targetPath, foregroundPort);
     syncWorkspaceIndicatorFromInstances();
-    transport.switchSession(targetPath, foregroundPort).catch((e) => {
-      messageRenderer.renderError(`Failed to switch session: ${e}`);
-    });
+    transport
+      .switchSession(targetPath, foregroundPort)
+      .then(() => confirmMirrorSwitch(targetPath))
+      .catch((e) => {
+        messageRenderer.renderError(`Failed to switch session: ${e}`);
+      });
     return;
   }
 
@@ -2777,6 +2781,30 @@ async function handleNewProjectChat(project) {
   }
 }
 
+// Tracks which session an in-flight `switch_session` must land on. See
+// public/session-switch.js for the race this closes.
+const sessionSwitchGate = new SessionSwitchGate();
+
+/**
+ * Ask the running omp for a state snapshot and wait until it reports the
+ * session we just switched to. `switch_session` is fire-and-forget (the broker
+ * drops omp's RPC replies) and the first `mirror_sync_request` is answered from
+ * the PRE-switch session, so the gate only lets a matching snapshot repaint and
+ * we re-request until one lands. An unconfirmed switch (e.g. omp cancels it
+ * across a workspace change) is reported instead of silently ignored.
+ */
+async function confirmMirrorSwitch(sessionFile) {
+  sessionSwitchGate.expect(sessionFile);
+  const confirmed = await sessionSwitchGate.waitForConfirmation(sessionFile, {
+    sendRequest: () => wsClient.send({ type: "mirror_sync_request" }),
+  });
+  if (!confirmed) {
+    logSessionRoute("switch:unconfirmed", { selectedSession: sessionFile });
+    messageRenderer.renderError(t("session.switchUnconfirmed"));
+  }
+  return confirmed;
+}
+
 // Public entry point: serializes selections so overlapping clicks don't
 // interleave their awaits and corrupt shared routing state.
 function handleSessionSelect(session, project) {
@@ -2849,7 +2877,7 @@ async function handleSessionSelectImpl(session, project) {
       mirrorActiveSessionFile = session.filePath;
       viewingActiveSession = true;
       updateMirrorInputState();
-      wsClient.send({ type: "mirror_sync_request" });
+      await confirmMirrorSwitch(session.filePath);
       if (isMobile()) {
         sidebarEl.classList.add("collapsed");
         sidebarOverlay.classList.remove("visible");
@@ -2857,48 +2885,61 @@ async function handleSessionSelectImpl(session, project) {
       return;
     }
 
-    if (wasStreaming) {
-      if (transport.spawnSessionProcess) {
-        let targetPort = null;
-        try {
-          const cwd = getCurrentWorkspacePath();
-          targetPort = await transport.spawnSessionProcess(session.filePath, cwd);
-        } catch (e) {
-          console.error(
-            "[App] Failed to spawn session process, falling back to deferred switch:",
-            e,
-          );
-        }
-        if (targetPort != null) {
-          logSessionRoute("select:spawned-dedicated", {
-            selectedSession: session.filePath,
-            targetPort,
-          });
-          foregroundPort = targetPort;
-          portSessionMap.set(targetPort, session.filePath);
-          wsClient.setRoutingContext({
-            sessionId: session.filePath,
-            sourcePort: foregroundPort,
-          });
-          syncWorkspaceIndicatorFromInstances();
-          pollInstances().catch(() => {});
-          wsClient.send({ type: "mirror_sync_request" });
-          if (isMobile()) {
-            sidebarEl.classList.add("collapsed");
-            sidebarOverlay.classList.remove("visible");
-          }
-          return;
-        }
+    // Only a process whose workspace matches the session's own cwd can switch
+    // to it in place — omp cancels `switch_session` across a cwd change (18.3.2
+    // answers `cancelled: true` and stays on the old session). A streaming run
+    // also needs its own process so the active agent is not interrupted. Both
+    // cases resume the session in a dedicated process (`omp --session <file>`),
+    // which then owns the foreground port.
+    const sessionCwd = session.cwd || project?.path || "";
+    const needsOwnProcess =
+      wasStreaming ||
+      (Boolean(sessionCwd) && !sameWorkspacePath(sessionCwd, getCurrentWorkspacePath()));
+
+    if (needsOwnProcess && transport.spawnSessionProcess) {
+      let targetPort = null;
+      try {
+        targetPort = await transport.spawnSessionProcess(
+          session.filePath,
+          sessionCwd || getCurrentWorkspacePath(),
+        );
+      } catch (e) {
+        console.error("[App] Failed to spawn session process:", e);
       }
-      // Fallback: defer the switch until the current agent run ends.
-      // This preserves the old safe behavior when spawn is unavailable or fails.
-      pendingSessionSwitchPath = session.filePath;
-      updateUI();
-      if (isMobile()) {
-        sidebarEl.classList.add("collapsed");
-        sidebarOverlay.classList.remove("visible");
+      if (targetPort != null) {
+        logSessionRoute("select:spawned-dedicated", {
+          selectedSession: session.filePath,
+          targetPort,
+        });
+        foregroundPort = targetPort;
+        portSessionMap.set(targetPort, session.filePath);
+        wsClient.setRoutingContext({
+          sessionId: session.filePath,
+          sourcePort: foregroundPort,
+        });
+        syncWorkspaceIndicatorFromInstances();
+        pollInstances().catch(() => {});
+        await confirmMirrorSwitch(session.filePath);
+        if (isMobile()) {
+          sidebarEl.classList.add("collapsed");
+          sidebarOverlay.classList.remove("visible");
+        }
+        return;
       }
-      return;
+      if (wasStreaming) {
+        // Fallback: defer the switch until the current agent run ends.
+        // This preserves the old safe behavior when spawn is unavailable or fails.
+        pendingSessionSwitchPath = session.filePath;
+        updateUI();
+        if (isMobile()) {
+          sidebarEl.classList.add("collapsed");
+          sidebarOverlay.classList.remove("visible");
+        }
+        return;
+      }
+      // A cross-workspace spawn failure falls through to the in-place switch so
+      // the confirmation reports the failure honestly instead of leaving the
+      // rendered history looking like a live session.
     }
 
     try {
@@ -2907,7 +2948,7 @@ async function handleSessionSelectImpl(session, project) {
         targetPort: foregroundPort,
       });
       await transport.switchSession(session.filePath, foregroundPort);
-      wsClient.send({ type: "mirror_sync_request" });
+      await confirmMirrorSwitch(session.filePath);
     } catch (e) {
       messageRenderer.renderError(`Failed to switch session: ${e}`);
     }
@@ -3105,6 +3146,25 @@ function handleMirrorSync(data) {
     logSessionRoute("mirrorSync:ignored-child-agent", { sessionFile: data.sessionFile });
     return;
   }
+
+  // A switch we asked for is still in flight: only the target session's
+  // snapshot may repaint the transcript and rebind routing. The pre-switch
+  // snapshot that answers the first mirror_sync_request must never clobber the
+  // history we just rendered for the selected session (see
+  // public/session-switch.js for the race this closes).
+  const snapshotSessionFile = data.sessionFile || null;
+  if (!sessionSwitchGate.accepts(snapshotSessionFile)) {
+    logSessionRoute("mirrorSync:ignored-pending-switch", {
+      sessionFile: snapshotSessionFile,
+      pendingSwitch: sessionSwitchGate.pending,
+    });
+    if (snapshotSessionFile) {
+      sidebar.setStreaming(snapshotSessionFile, Boolean(data.isStreaming));
+      updateMirrorLiveIndicator();
+    }
+    return;
+  }
+  sessionSwitchGate.settle(snapshotSessionFile);
 
   console.log("[Mirror] Received state snapshot:", data.entries?.length, "entries");
   isMirrorMode = true;

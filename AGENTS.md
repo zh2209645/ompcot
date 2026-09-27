@@ -117,7 +117,7 @@ The frontend is vanilla JS with **no framework**:
 **3. Embedded server (`extensions/embedded-server.ts`)** — runs **inside** each omp process:
 - HTTP: static assets, `/api/sessions`, `/api/search`, `/api/cost-dashboard`, `/api/files`, `/api/agent-settings`(+`PUT`/`reset`), `/api/agent-config`, `/api/models-config`, `/api/rpc`, `/api/lan-qr`, `/api/health`
 - WS commands (shared dispatcher): prompt/steer/follow_up, abort/compact, get_state/set_model/set_thinking_level/cycle_thinking_level, list_commands, list_agents/get_agent_transcript, mcp.*, ui_response/ui_cancel, get_usage, run_omp_login, import_session, fork_session, list_memory_files, get_model_configuration/set_model_role/set_default_thinking_level/set_task_agent_*, auth key CRUD, session ops
-- Forwarded events: message/tool lifecycle, auto-compaction, agents_changed, settings_changed, extension_ui_request (with replay), mirror_sync
+- Forwarded events: message/tool lifecycle, auto-compaction, agents_changed, settings_changed, extension_ui_request (with replay), mirror_sync (snapshot re-broadcast on connect / session_start / session_switch — an in-place `switch_session` reloads no extension, so the `session_switch` re-broadcast is what lets the UI converge on the switched session)
 
 Key data flow: user action → `window.tauriNative.*` or WS command → embedded-server → omp surfaces (ExtensionAPI / in-process settings+registry / CLI fallbacks).
 
