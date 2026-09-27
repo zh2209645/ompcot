@@ -394,33 +394,95 @@ const INSTANCES_DIR = path.join(path.dirname(OMP_AGENT_ROOT), "ompcot-instances"
 // which scanned the whole INSTANCES_DIR (for tmux / standalone pi
 // processes), we only ever write our own entry: Ompcot's Rust side
 // manages all omp processes it spawns.
-function registerInstance(port: number, sessionFile: string, cwd: string) {
+export type InstanceEntry = {
+  port: number;
+  pid: number;
+  sessionFile: string;
+  cwd: string;
+  isStreaming?: boolean;
+  startedAt: string;
+};
+
+// In-memory copy of this process's entry. Writes go through it instead of a
+// read-modify-write of `${pid}.json`: that read is racy (another process can
+// unlink or rewrite the file between the two calls) and, worse, a missing file
+// silently dropped every later patch — including the `isStreaming` transition,
+// which every other window's green dot reads.
+let instanceEntry: InstanceEntry | null = null;
+
+/** Publish the entry, atomically so a concurrent `/api/instances` read never sees a torn file. */
+function writeInstanceEntry(info: InstanceEntry) {
   fs.mkdirSync(INSTANCES_DIR, { recursive: true });
-  const info = {
+  const file = path.join(INSTANCES_DIR, `${process.pid}.json`);
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(info));
+    fs.renameSync(tmp, file);
+  } catch (e: unknown) {
+    console.error(`[Embedded] instance registry write failed: ${errMessage(e)}`);
+  }
+}
+
+/**
+ * The entry to publish for this process, given whatever we last published.
+ *
+ * Re-registering happens on every extension load (session switch, new session,
+ * fork), i.e. mid-run, and must not blank the live run flag: the corrective
+ * write is deduped by `instanceActivityPair`, so an entry rewritten to
+ * `isStreaming:false` could stay wrong for a whole reconcile interval — and
+ * every window's sidebar treats `false` as evidence of idleness. `startedAt`
+ * likewise describes the process, not the registration. Exported for tests.
+ */
+export function mergeInstanceEntry(
+  previous: InstanceEntry | null,
+  next: { port: number; pid: number; sessionFile: string; cwd: string },
+): InstanceEntry {
+  return {
+    port: next.port,
+    pid: next.pid,
+    sessionFile: next.sessionFile,
+    cwd: next.cwd,
+    isStreaming: previous?.isStreaming === true,
+    startedAt:
+      typeof previous?.startedAt === "string" && previous.startedAt
+        ? previous.startedAt
+        : new Date().toISOString(),
+  };
+}
+
+/** Apply one patch to the published entry (a missing flag keeps its last value). */
+export function applyInstancePatch(
+  entry: InstanceEntry,
+  patch: { sessionFile?: string; isStreaming?: boolean },
+): InstanceEntry {
+  const next = { ...entry };
+  if (typeof patch.sessionFile === "string" && patch.sessionFile)
+    next.sessionFile = patch.sessionFile;
+  if (typeof patch.isStreaming === "boolean") next.isStreaming = patch.isStreaming;
+  return next;
+}
+
+function registerInstance(port: number, sessionFile: string, cwd: string) {
+  instanceEntry = mergeInstanceEntry(instanceEntry, {
     port,
     pid: process.pid,
     sessionFile,
     cwd,
-    // Live per-process run state, kept fresh by `syncInstanceActivity` on every
-    // forwarded event. Every GUI window reads it (`/api/instances`) to mark the
-    // sidebar from real session state instead of trusting that one specific
-    // `agent_start` / `agent_end` frame pair arrived intact.
-    isStreaming: false,
-    startedAt: new Date().toISOString(),
-  };
-  fs.writeFileSync(path.join(INSTANCES_DIR, `${process.pid}.json`), JSON.stringify(info));
+  });
+  writeInstanceEntry(instanceEntry);
+  // The stored pair no longer describes what is on disk, so the next
+  // `syncInstanceActivity` write must not be skipped as a duplicate.
+  instanceActivityPair = "";
 }
 
 function patchInstanceEntry(patch: { sessionFile?: string; isStreaming?: boolean }) {
-  const file = path.join(INSTANCES_DIR, `${process.pid}.json`);
-  if (!fs.existsSync(file)) return;
-  try {
-    const info = JSON.parse(fs.readFileSync(file, "utf8"));
-    fs.writeFileSync(file, JSON.stringify({ ...info, ...patch }));
-  } catch {}
+  if (!instanceEntry) return;
+  instanceEntry = applyInstancePatch(instanceEntry, patch);
+  writeInstanceEntry(instanceEntry);
 }
 
 function updateInstanceSession(sessionFile: string) {
+  if (!sessionFile) return;
   patchInstanceEntry({ sessionFile });
 }
 
@@ -429,36 +491,71 @@ function updateInstanceSession(sessionFile: string) {
 // registry writes (start + end) plus one per session swap.
 let instanceActivityPair = "";
 
-function getRunningInstances(): Array<{
-  port: number;
-  pid: number;
-  sessionFile: string;
-  cwd: string;
-  isStreaming?: boolean;
-}> {
+/**
+ * Validate one registry entry read off disk.
+ *
+ * The file belongs to another omp process (or to a previous run of this one), so
+ * its shape is external input: every field the frontend relies on is checked
+ * once here instead of being asserted at each read. A `null` return means
+ * "unreadable or torn", never "dead" — only a failed liveness probe may retire
+ * an entry.
+ */
+export function parseInstanceEntry(raw: string): InstanceEntry | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  if (!("pid" in value) || typeof value.pid !== "number") return null;
+  if (!("port" in value) || typeof value.port !== "number") return null;
+  if (!("sessionFile" in value) || typeof value.sessionFile !== "string") return null;
+  if (!("cwd" in value) || typeof value.cwd !== "string") return null;
+  const isStreaming =
+    "isStreaming" in value && typeof value.isStreaming === "boolean"
+      ? value.isStreaming
+      : undefined;
+  const startedAt =
+    "startedAt" in value && typeof value.startedAt === "string" ? value.startedAt : "";
+  return {
+    port: value.port,
+    pid: value.pid,
+    sessionFile: value.sessionFile,
+    cwd: value.cwd,
+    ...(isStreaming === undefined ? {} : { isStreaming }),
+    startedAt,
+  };
+}
+
+function getRunningInstances(): InstanceEntry[] {
   if (!fs.existsSync(INSTANCES_DIR)) return [];
-  const instances: Array<{
-    port: number;
-    pid: number;
-    sessionFile: string;
-    cwd: string;
-    isStreaming?: boolean;
-  }> = [];
+  const instances: InstanceEntry[] = [];
   for (const file of fs.readdirSync(INSTANCES_DIR)) {
     if (!file.endsWith(".json")) continue;
+    const info = parseInstanceEntry(fs.readFileSync(path.join(INSTANCES_DIR, file), "utf8"));
+    // A torn read — another process is rewriting its entry right now — is not
+    // evidence of a dead process. Skipping it for one poll leaves the
+    // frontend's mark untouched (a missing entry is "unknown"), while deleting
+    // the file made that session look process-less: every window then dropped
+    // its green dot for the rest of the run.
+    if (!info) continue;
     try {
-      const info = JSON.parse(fs.readFileSync(path.join(INSTANCES_DIR, file), "utf8"));
-      // Check if process is still alive
-      try {
-        process.kill(info.pid, 0);
+      process.kill(info.pid, 0);
+    } catch (e: unknown) {
+      // ESRCH is the only code that means "gone"; EPERM (another user's
+      // process) still exists and must stay listed.
+      const code = e && typeof e === "object" && "code" in e ? e.code : undefined;
+      if (code !== "ESRCH") {
         instances.push(info);
-      } catch {
-        // Process dead — clean up stale file
-        try {
-          fs.unlinkSync(path.join(INSTANCES_DIR, file));
-        } catch {}
+        continue;
       }
-    } catch {}
+      try {
+        fs.unlinkSync(path.join(INSTANCES_DIR, file));
+      } catch {}
+      continue;
+    }
+    instances.push(info);
   }
   return instances;
 }
@@ -1912,6 +2009,36 @@ function getOrCreateGlobalState(): EmbeddedServerGlobal {
   return g[EMBEDDED_GLOBAL_KEY] as EmbeddedServerGlobal;
 }
 
+/**
+ * Session-entry id of the entry a runtime message object belongs to, matched by
+ * role + timestamp — the runtime event carries no identity of its own
+ * (`{role, content, …}`, no id) while every re-render draws the same message
+ * under its session-entry id, and the GUI keys transcript elements by exactly
+ * this value (fork, duplicate detection, element adoption).
+ *
+ * External input (`getEntries()` output is untyped at this boundary), so every
+ * field is narrowed rather than asserted. Exported for tests.
+ */
+export function matchMessageEntryId(entries: readonly unknown[], message: unknown): string | null {
+  if (!message || typeof message !== "object") return null;
+  if (!("timestamp" in message) || typeof message.timestamp !== "number") return null;
+  const wantedTimestamp = message.timestamp;
+  const wantedRole = "role" in message ? message.role : undefined;
+  // The entry is normally the newest one, so scan from the end.
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (!entry || typeof entry !== "object") continue;
+    if (!("type" in entry) || entry.type !== "message") continue;
+    if (!("id" in entry) || typeof entry.id !== "string") continue;
+    const candidate = "message" in entry ? entry.message : undefined;
+    if (!candidate || typeof candidate !== "object") continue;
+    if (!("role" in candidate) || candidate.role !== wantedRole) continue;
+    if (!("timestamp" in candidate) || candidate.timestamp !== wantedTimestamp) continue;
+    return entry.id;
+  }
+  return null;
+}
+
 export default function (omp: ExtensionAPI) {
   const globalState = getOrCreateGlobalState();
 
@@ -1968,13 +2095,11 @@ export default function (omp: ExtensionAPI) {
       const sessionFile = ctx.sessionManager.getSessionFile();
       if (typeof sessionFile === "string" && sessionFile.trim()) return sessionFile;
     } catch {}
-    try {
-      const entries = ctx.sessionManager.getEntries();
-      const sessionEntry = entries.find(
-        (e: { type?: string; id?: unknown }) => e?.type === "session" && typeof e?.id === "string",
-      );
-      if (sessionEntry?.id) return sessionEntry.id;
-    } catch {}
+    // Deliberately no fallback to the session *entry* id: the value is used as a
+    // session-file key (the instance registry, event routing metadata, the
+    // sidebar's marks) and an entry id matches no path — it made a brand-new
+    // session unfindable to every path-keyed lookup. Callers treat null as "not
+    // known yet".
     return null;
   }
 
@@ -2014,18 +2139,41 @@ export default function (omp: ExtensionAPI) {
       const ctx = globalState.getLatestCtx?.() ?? latestCtx;
       if (!ctx) return;
       const sessionFile = currentSessionIdFromCtx(ctx) || "";
-      let isStreaming: boolean;
-      try {
-        isStreaming = !ctx.isIdle();
-      } catch {
-        return; // torn-down ctx: the next instance re-publishes its bindings
-      }
+      const isStreaming = sampleStreaming(ctx);
+      // A sample that is still inside the idle-debounce window publishes
+      // nothing: the stored flag stays as the last trustworthy value said.
+      if (isStreaming === undefined) return;
       if (readStoredActivityPair() === `${sessionFile}|${isStreaming}`) return;
       instanceActivityPair = `${sessionFile}|${isStreaming}`;
       patchInstanceEntry({ sessionFile, isStreaming });
     }, ACTIVITY_RECONCILE_MS);
     timer.unref?.();
     globalState.activityReconcileTimer = timer;
+  }
+
+  // `!ctx.isIdle()` is an instantaneous sample — false between messages and
+  // tool calls of a run that is still going — while the registry flag is what
+  // every window's green dot reads, so a single false sample must never be
+  // published as "not running". A sampled false only latches after this many
+  // consecutive samples; an explicit lifecycle hint (or any busy sample)
+  // resets the count.
+  const IDLE_SAMPLES_BEFORE_STOP = 3;
+  let idleSamples = 0;
+
+  /** Sampled run state, or `undefined` while the sample is not yet trustworthy. */
+  function sampleStreaming(ctx: ExtensionContext): boolean | undefined {
+    let idle: boolean;
+    try {
+      idle = ctx.isIdle();
+    } catch {
+      return undefined; // torn-down ctx: the next instance re-publishes its bindings
+    }
+    if (!idle) {
+      idleSamples = 0;
+      return true;
+    }
+    idleSamples += 1;
+    return idleSamples >= IDLE_SAMPLES_BEFORE_STOP ? false : undefined;
   }
 
   /**
@@ -2048,20 +2196,24 @@ export default function (omp: ExtensionAPI) {
     if (!ctx) return;
     const sessionFile = currentSessionIdFromCtx(ctx) || "";
     let isStreaming = streamingHint;
-    if (isStreaming === undefined) {
-      try {
-        isStreaming = !ctx.isIdle();
-      } catch {
-        isStreaming = undefined;
-      }
+    if (typeof streamingHint === "boolean") {
+      // An explicit lifecycle transition is authoritative: start (false while
+      // the runtime flag has not flipped yet) and end both reset the sampler.
+      idleSamples = 0;
+    } else {
+      isStreaming = sampleStreaming(ctx);
     }
+    const patch: { sessionFile?: string; isStreaming?: boolean } = {};
+    if (sessionFile) patch.sessionFile = sessionFile;
+    if (isStreaming !== undefined) patch.isStreaming = isStreaming;
+    if (patch.sessionFile === undefined && patch.isStreaming === undefined) return;
     const pair = `${sessionFile}|${isStreaming}`;
     if (pair === instanceActivityPair) return;
     instanceActivityPair = pair;
-    // Without a trustworthy value, leave the stored flag untouched rather than
-    // blanking it: the frontend treats a missing flag as "unknown" and falls
+    // Without a trustworthy flag value the patch only refreshes the session
+    // path: the frontend treats a missing/unchanged flag as "unknown" and falls
     // back to the event-driven marks for that session.
-    patchInstanceEntry(isStreaming === undefined ? { sessionFile } : { sessionFile, isStreaming });
+    patchInstanceEntry(patch);
   }
 
   /**
@@ -2079,24 +2231,37 @@ export default function (omp: ExtensionAPI) {
     ctx: ExtensionContext | null,
     event: Record<string, unknown>,
   ): string | null {
-    const message = event.message as Record<string, unknown> | undefined;
-    if (!ctx || !message || typeof message.timestamp !== "number") return null;
+    if (!ctx) return null;
     try {
-      const entries = ctx.sessionManager.getEntries();
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const entry = entries[i] as {
-          type?: string;
-          id?: unknown;
-          message?: { role?: string; timestamp?: number };
-        };
-        if (entry?.type !== "message" || typeof entry.id !== "string") continue;
-        const candidate = entry.message;
-        if (candidate?.role !== message.role) continue;
-        if (candidate?.timestamp !== message.timestamp) continue;
-        return entry.id;
-      }
+      return matchMessageEntryId(ctx.sessionManager.getEntries(), event.message);
     } catch {
       return null;
+    }
+  }
+
+  // A message's session entry is persisted *after* its `message_end` handler
+  // runs (measured on 18.3.2: the entry appears 11–20 ms later), so resolving
+  // synchronously found nothing and every live frame reached the GUI without an
+  // `entryId` — live elements kept the `"streaming"` placeholder id for good,
+  // which cost fork-from-message on a fresh reply and made duplicate detection
+  // fall back to content matching. Frames that no later frame of the same
+  // message can overtake (a user message's start, any message_end) wait for the
+  // entry instead of broadcasting an id-less frame.
+  const ENTRY_ID_RESOLVE_ATTEMPTS = 12;
+  const ENTRY_ID_RESOLVE_DELAY_MS = 5;
+
+  async function resolveMessageEntryIdDeferred(
+    ctx: ExtensionContext | null,
+    event: Record<string, unknown>,
+  ): Promise<string | null> {
+    const direct = resolveMessageEntryId(ctx, event);
+    if (direct) return direct;
+    for (let attempt = 1; attempt < ENTRY_ID_RESOLVE_ATTEMPTS; attempt++) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, ENTRY_ID_RESOLVE_DELAY_MS);
+      await promise;
+      const retried = resolveMessageEntryId(ctx, event);
+      if (retried) return retried;
     }
     return null;
   }
@@ -2717,13 +2882,25 @@ export default function (omp: ExtensionAPI) {
         // for the message it belongs to (no id field at all), so without this
         // the GUI cannot tell a live message apart from the entry a re-render
         // already drew for it — and appended both (same reply, thinking block
-        // and tool call twice).
-        const entryId = resolveMessageEntryId(ctx, event as Record<string, unknown>);
+        // and tool call twice). The entry is persisted a few ms after the
+        // event, so the two frame types that cannot be overtaken by a later
+        // frame of the same message wait for it (see
+        // `resolveMessageEntryIdDeferred`); streaming frames stay immediate.
+        const rawEvent = event as Record<string, unknown>;
+        const rawMessage = rawEvent.message;
+        const role =
+          rawMessage && typeof rawMessage === "object" && "role" in rawMessage
+            ? rawMessage.role
+            : undefined;
+        const entryId =
+          eventType === "message_end" || (eventType === "message_start" && role === "user")
+            ? await resolveMessageEntryIdDeferred(ctx, rawEvent)
+            : resolveMessageEntryId(ctx, rawEvent);
         broadcast({
           type: "event",
           event: {
             type: eventType,
-            ...(event as Record<string, unknown>),
+            ...rawEvent,
             ...(entryId ? { entryId } : {}),
           },
         });
