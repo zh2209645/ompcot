@@ -12,13 +12,15 @@
 // Behavior:
 // - The last-active sub-page persists for the window session; `open()` (called
 //   every time the Configuration tab is selected) restores it. Default: Providers.
-// - Lazy loading: a page's loaders run once, on its first activation. The
-//   catalog is fetched once on the first catalog-backed page visit and shared;
-//   page pills for known-empty pages are then hidden (Providers, Models &
-//   Reasoning, MCP and Advanced are always present). Before the first
-//   successful load the catalog-backed pills all appear as candidates; a
-//   failed load keeps them reachable so the inline error + retry stays
-//   accessible.
+// - Lazy loading: a page's loaders run on its first activation, and every
+//   activation after that for the live-list pages (Providers, Models &
+//   Reasoning, MCP) — a provider, model, or credential added while the window
+//   was open must show up without a restart. The catalog is fetched once on
+//   the first catalog-backed page visit and shared; page pills for known-empty
+//   pages are then hidden (Providers, Models & Reasoning, MCP and Advanced are
+//   always present). Before the first successful load the catalog-backed pills
+//   all appear as candidates; a failed load keeps them reachable so the inline
+//   error + retry stays accessible.
 // - Pill labels come from the i18n dictionaries and re-render on language
 //   change (the strip is JS-built, so data-i18n attributes cannot reach it).
 
@@ -30,9 +32,11 @@ import { onLanguageChanged, t } from "./i18n.js";
 // raw config.yml editor — unmapped catalog keys render on the Other page.
 const STATIC_PAGES = new Set(["providers", "models", "mcp", "advanced"]);
 
-// Pages whose loader is a live list: re-run on every activation (providers /
-// advanced are one-shot editors and load once per window session).
-const RELOAD_ON_OPEN = new Set(["models", "mcp"]);
+// Pages whose loader is a live list: re-run on every activation. Advanced is
+// the one one-shot editor (re-running it would clobber an unsaved config.yml
+// draft); the Providers page reloads on every activation too — its own
+// models.yml editor skips the refetch while the textarea holds unsaved edits.
+const RELOAD_ON_OPEN = new Set(["providers", "models", "mcp"]);
 
 export function createConfigSubnav({ root, catalog, loaders = {} }) {
   const subnavEl = root?.querySelector("#settings-config-subnav") ?? null;

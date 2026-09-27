@@ -2391,6 +2391,17 @@ function openModelDropdown() {
   modelDropdownMenu.classList.remove("hidden");
   modelDropdown.classList.add("open");
   requestAnimationFrame(() => search.focus());
+
+  // The list rendered above is the in-memory snapshot from the last fetch —
+  // a provider or model added after boot (CLI `omp login`, another Ompcot
+  // window, an edited models.yml) would be missing, and the user would have to
+  // restart the workspace to see it. Re-read on every open and re-render in
+  // place; the server resyncs against disk first (see resyncModelSources in
+  // embedded-server.ts) and stays cheap when nothing changed, while
+  // fetchModelInfo's generation guard drops replies that raced a newer load.
+  fetchModelInfo().then(() => {
+    if (!modelDropdownMenu.classList.contains("hidden")) renderItems(search.value);
+  });
 }
 
 function closeModelDropdown() {

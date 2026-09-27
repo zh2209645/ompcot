@@ -579,6 +579,13 @@ type EmbeddedServerGlobal = {
   // between sessions during a reload. We cache the first registry we see
   // here and prefer it (when present) over `latestCtx?.modelRegistry`.
   modelRegistry: ModelRegistry | null;
+  // Signature (`mtimeMs:size` per file) of the on-disk model sources this
+  // process caches — `models.yml` + the legacy `auth.json` — as of the last
+  // resync. `null` until the first resync records it. Process-scoped like the
+  // registry itself: the extension is reloaded on every session switch, the
+  // registry is not, so the "what has the registry already seen" bookkeeping
+  // must survive the reload with it. See resyncModelSources.
+  modelSourcesSignature: string | null;
   // The freshest `ExtensionAPI` (i.e. `omp`) reference, re-published on
   // every `session_start`. Command handlers MUST go through this getter
   // instead of capturing the `omp` parameter from `export default function`
@@ -1833,6 +1840,7 @@ function getOrCreateGlobalState(): EmbeddedServerGlobal {
       getLatestCtx: null,
       getAomp: null,
       modelRegistry: null,
+      modelSourcesSignature: null,
       sessionHeaderCache: new Map<string, SessionFileCacheEntry<unknown>>(),
       sessionMetricsCache: new Map<string, SessionFileCacheEntry<unknown>>(),
       settingsChangeSubscribed: false,
@@ -2375,6 +2383,112 @@ export default function (omp: ExtensionAPI) {
     if (!globalState.modelRegistry && ctx?.modelRegistry) {
       globalState.modelRegistry = ctx.modelRegistry;
     }
+  }
+
+  // ═══════════════════════════════════════
+  // Runtime provider/model resync
+  // ═══════════════════════════════════════
+  //
+  // omp snapshots both answers to "which providers and models exist?" at
+  // process start: `models.yml` is parsed when the ModelRegistry is
+  // constructed, and credentials are loaded once into AuthStorage (SQLite
+  // `agent.db` since 18.3). Adding a provider, model, or credential while
+  // Ompcot runs — `omp login` / `omp config` from a terminal, another
+  // Ompcot window (one omp process per workspace, but models.yml and the
+  // credential DB are machine-global), or a hand edit — was therefore
+  // invisible to this process: the model picker and the Providers page kept
+  // serving the boot snapshot until the workspace was restarted.
+  //
+  // Every list read (`get_available_models`, `list_auth_status`) now runs
+  // this resync first:
+  //   - credentials: `authStorage.credentials.poll()` is omp's dedicated
+  //     "did another process commit to the store?" probe — a `PRAGMA
+  //     data_version` plus one revision read, no file scanning.
+  //   - registry: `ModelRegistry.refresh()` re-reads models.yml (built-ins +
+  //     custom providers) and re-hydrates credential-scoped catalogs. It only
+  //     runs when a source actually moved (a credential commit, or a
+  //     `models.yml` / legacy `auth.json` mtime+size change), so a plain list
+  //     read stays a stat + two cheap SQLite reads.
+  // Failures are logged and swallowed: a failed resync must degrade to the
+  // last-good list, never to an error response.
+  function fileSignature(fileName: string): string {
+    try {
+      const stat = fs.statSync(path.join(OMP_AGENT_ROOT, fileName));
+      return `${stat.mtimeMs}:${stat.size}`;
+    } catch {
+      // Absent file — a later creation still changes the signature.
+      return "";
+    }
+  }
+
+  async function pollCredentialStore(registry: ModelRegistry): Promise<boolean> {
+    // omp-surface probe: `authStorage.credentials.poll()` exists on 18.3+ and
+    // is the only cheap "another process committed" check. The cast names the
+    // shape; the runtime checks below are what validate it.
+    const probed = registry as unknown as { authStorage?: unknown };
+    const authStorage = probed.authStorage;
+    if (!authStorage || typeof authStorage !== "object" || !("credentials" in authStorage)) {
+      // Older builds keep credentials in `auth.json`, which the caller's
+      // file-signature check already watches.
+      return false;
+    }
+    const credentials = authStorage.credentials;
+    if (!credentials || typeof credentials !== "object" || !("poll" in credentials)) return false;
+    const poll = credentials.poll;
+    if (typeof poll !== "function") return false;
+    return (await (poll as () => Promise<boolean>).call(credentials)) === true;
+  }
+
+  // Serialized: several GUI surfaces can ask for a fresh list at once
+  // (Providers page opening while the model dropdown re-fetches), and a
+  // models.yml write must never race a read-side pass into skipping its
+  // refresh. Resyncs are cheap when nothing changed, so queueing beats
+  // coalescing bookkeeping here.
+  let resyncQueue: Promise<boolean> = Promise.resolve(false);
+
+  async function runModelResync(registry: ModelRegistry, force: boolean): Promise<boolean> {
+    // Read the signature BEFORE the refresh and record exactly that value
+    // afterwards: a write landing mid-refresh then leaves a mismatch and the
+    // next list read refreshes again, instead of being latched as applied.
+    const signature = `${fileSignature("models.yml")}|${fileSignature("auth.json")}`;
+    const sourcesChanged = signature !== globalState.modelSourcesSignature;
+
+    let credentialsChanged = false;
+    try {
+      credentialsChanged = await pollCredentialStore(registry);
+    } catch (e: unknown) {
+      console.error("[Embedded] Credential store poll failed:", errMessage(e));
+    }
+
+    let refreshed = false;
+    const probed = registry as unknown as { refresh?: unknown };
+    const refresh = probed.refresh;
+    if (force || sourcesChanged || credentialsChanged) {
+      try {
+        if (typeof refresh === "function") {
+          await (refresh as () => Promise<void>).call(registry);
+          refreshed = true;
+        }
+      } catch (e: unknown) {
+        console.error("[Embedded] Model registry refresh failed:", errMessage(e));
+      }
+    }
+    globalState.modelSourcesSignature = signature;
+    return refreshed;
+  }
+
+  function resyncModelSources(
+    registry: ModelRegistry | null | undefined,
+    options: { force?: boolean } = {},
+  ): Promise<boolean> {
+    if (!registry) return Promise.resolve(false);
+    const force = options.force === true;
+    const run = resyncQueue.then(
+      () => runModelResync(registry, force),
+      () => runModelResync(registry, force),
+    );
+    resyncQueue = run;
+    return run;
   }
 
   for (const eventType of eventTypes) {
@@ -2999,6 +3113,10 @@ export default function (omp: ExtensionAPI) {
             sendTo(ws, error("get_available_models", "No context available"));
             break;
           }
+          // Pick up providers/models added while this process ran (CLI
+          // `omp login`, another Ompcot window, a hand-edited models.yml) —
+          // see resyncModelSources.
+          await resyncModelSources(ctx.modelRegistry);
           const models = await ctx.modelRegistry.getAvailable();
           sendTo(ws, success("get_available_models", { models }));
           break;
@@ -3032,6 +3150,10 @@ export default function (omp: ExtensionAPI) {
             );
             break;
           }
+          // Providers appear when a credential or a models.yml entry lands
+          // (in another process, another window, or by hand) — resync first so
+          // the panel never lists a stale provider set. See resyncModelSources.
+          await resyncModelSources(registry);
           // Collect unique providers from all known models (built-in + custom).
           const allModels = registry.getAll();
           const providerNames = new Set<string>();
@@ -5917,21 +6039,13 @@ export default function (omp: ExtensionAPI) {
           fs.mkdirSync(path.dirname(configPath), { recursive: true });
           fs.writeFileSync(configPath, content, "utf8");
           // Reload omp's in-memory model registry so the picker sees the new
-          // providers/models without restarting the workspace.
-          // IMPORTANT: await refresh() so the registry is fully updated
-          // before we respond — the frontend calls get_available_models
-          // immediately after receiving our response, and without await it
-          // would race against the async reload and return stale models.
-          let refreshed = false;
-          try {
-            const registry = globalState.modelRegistry;
-            if (registry && typeof (registry as { refresh?: unknown }).refresh === "function") {
-              await (registry as { refresh: () => unknown }).refresh();
-              refreshed = true;
-            }
-          } catch {
-            // Non-fatal: file is saved, user can /reload or restart.
-          }
+          // providers/models without restarting the workspace. `force` because
+          // this write is the change: a resync that already read the file's
+          // pre-write signature must not be allowed to skip the reload.
+          // Awaited — the frontend calls get_available_models immediately after
+          // this response, and a background reload would race it into stale
+          // models.
+          const refreshed = await resyncModelSources(globalState.modelRegistry, { force: true });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: true, refreshed }));
         } catch (e: unknown) {

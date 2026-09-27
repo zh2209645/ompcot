@@ -183,4 +183,58 @@ describe("models config editor loading", () => {
     expect(value).toContain("baseUrl: http://localhost:11434/v1");
     expect(value).not.toContain('"providers"');
   });
+
+  test("keeps unsaved edits when the Providers page re-activates the editor", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ success: true, content: "providers: {}\n", path: "/x/models.yml" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { loadInlineModelsEditor } = setupEditors();
+
+    await loadInlineModelsEditor();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const textarea = document.getElementById("inline-models-textarea");
+    textarea.value = "providers:\n  mine: {}\n";
+    textarea.dispatchEvent(new dom.window.Event("input"));
+
+    // Re-activation (Providers is a reload-on-open page) must not clobber the
+    // draft with the on-disk content.
+    await loadInlineModelsEditor();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(textarea.value).toBe("providers:\n  mine: {}\n");
+  });
+
+  test("reloads models.yml again after a successful save of the draft", async () => {
+    const fetchMock = vi.fn(async (_url, options) =>
+      options?.method === "PUT"
+        ? { ok: true, json: async () => ({ success: true, refreshed: true }) }
+        : {
+            ok: true,
+            json: async () => ({
+              success: true,
+              content: "providers:\n  mine: {}\n",
+              path: "/x/models.yml",
+            }),
+          },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const showSettingsSaveSuccess = vi.fn();
+    const { loadInlineModelsEditor } = setupEditors({ showSettingsSaveSuccess });
+
+    await loadInlineModelsEditor();
+    const textarea = document.getElementById("inline-models-textarea");
+    textarea.value = "providers:\n  mine: {}\n";
+    textarea.dispatchEvent(new dom.window.Event("input"));
+
+    document.getElementById("inline-models-save").click();
+    // Wait for the save to settle (the fetch call alone is recorded before the
+    // handler clears the dirty flag).
+    await vi.waitFor(() => expect(showSettingsSaveSuccess).toHaveBeenCalled());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await loadInlineModelsEditor();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });

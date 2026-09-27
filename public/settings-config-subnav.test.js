@@ -76,7 +76,7 @@ describe("settings configuration sub-pages", () => {
     expect(host().hidden).toBe(true);
   });
 
-  test("open() lazily loads only the active page's loaders, once per page", () => {
+  test("open() lazily loads only the active page's loaders", () => {
     const { subnav, catalog, loaders } = setup();
 
     subnav.open();
@@ -85,7 +85,11 @@ describe("settings configuration sub-pages", () => {
     expect(catalog.load).not.toHaveBeenCalled();
 
     subnav.open();
-    expect(loaders.providers).toHaveBeenCalledTimes(1); // revisit does not reload
+    // Providers is a live list (a provider or key added while the window was
+    // open must show up) — like Models & Reasoning and MCP it reloads on every
+    // activation; the one-shot config.yml editor stays lazy.
+    expect(loaders.providers).toHaveBeenCalledTimes(2);
+    expect(loaders.advanced).not.toHaveBeenCalled();
   });
 
   test("visiting a catalog page fetches the catalog once and filters the page set", () => {
@@ -245,16 +249,19 @@ describe("settings configuration sub-pages", () => {
     expect(loaders.advanced).not.toHaveBeenCalled();
   });
 
-  test("open(pageId) forces a target sub-page", () => {
+  test("the static Providers page refetches its lists on every open", () => {
     const { subnav, loaders } = setup();
 
     subnav.open();
     pillOf("advanced").click();
+    expect(loaders.advanced).toHaveBeenCalledTimes(1);
+
     subnav.open("providers");
 
     expect(subnav.getPage()).toBe("providers");
     expect(sectionOf("providers").hidden).toBe(false);
-    expect(loaders.providers).toHaveBeenCalledTimes(1);
+    // Live list: the Providers loader re-runs on every activation.
+    expect(loaders.providers).toHaveBeenCalledTimes(2);
   });
 
   test("re-renders pill labels on language change", () => {

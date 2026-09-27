@@ -354,6 +354,11 @@ export function setupSettingsEditors({
 
   async function loadInlineModelsEditor() {
     if (!inlineModelsTextarea) return;
+    // The Providers page re-runs its loaders on every activation so the panel
+    // reflects providers added elsewhere. That must not wipe a draft: while the
+    // textarea holds unsaved edits, keep them and skip the refetch (its
+    // Save/Insert paths still work off the on-screen content).
+    if (inlineModelsTextarea.dataset.dirty === "1") return;
     clearInlineModelsError();
     inlineModelsTextarea.value = "";
     if (inlineModelsPath) inlineModelsPath.textContent = "Loading...";
@@ -371,12 +376,19 @@ export function setupSettingsEditors({
       } catch {
         inlineModelsTextarea.value = data.content;
       }
+      inlineModelsTextarea.dataset.dirty = "0";
       if (inlineModelsPath) inlineModelsPath.textContent = data.path || "";
     } catch (e) {
       if (inlineModelsPath) inlineModelsPath.textContent = "";
       showInlineModelsError(e.message || String(e));
     }
   }
+
+  // Track unpublished edits so the reload-on-activation above cannot discard
+  // them; cleared by a successful load or save.
+  inlineModelsTextarea?.addEventListener("input", () => {
+    inlineModelsTextarea.dataset.dirty = "1";
+  });
 
   inlineModelsSave?.addEventListener("click", async () => {
     if (!inlineModelsTextarea) return;
@@ -413,6 +425,7 @@ export function setupSettingsEditors({
       });
       const data = await resp.json();
       if (!data.success) throw new Error(data.error || "Failed to save models.yml");
+      inlineModelsTextarea.dataset.dirty = "0";
       showSettingsSaveSuccess(inlineModelsError);
       await onModelConfigurationChanged?.();
     } catch (e) {
@@ -429,6 +442,7 @@ export function setupSettingsEditors({
       if (!confirm("Replace current content with the Ollama example?")) return;
     }
     inlineModelsTextarea.value = MODELS_YAML_EXAMPLE;
+    inlineModelsTextarea.dataset.dirty = "1";
     clearInlineModelsError();
   });
 
