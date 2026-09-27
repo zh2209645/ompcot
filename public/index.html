@@ -331,6 +331,40 @@
             </div>
           </div>
           <div class="settings-section">
+            <div class="settings-section-title" data-i18n="settings.typography">Fonts</div>
+            <div class="settings-row">
+              <span class="settings-label" data-i18n="settings.fontFamily">Interface font</span>
+              <!-- Options are populated from FONT_FAMILIES in font-settings.js,
+                   each labeled through i18n. -->
+              <select id="font-family-select" class="settings-select"></select>
+            </div>
+            <div class="settings-row">
+              <span class="settings-label" data-i18n="settings.fontSize">Font size</span>
+              <div class="font-size-controls">
+                <input
+                  type="range"
+                  id="font-size-range"
+                  class="font-size-range"
+                  aria-label="Font size"
+                  data-i18n-aria-label="settings.fontSize"
+                />
+                <span class="font-size-value" id="font-size-value"></span>
+                <button
+                  type="button"
+                  class="settings-value-btn"
+                  id="font-size-reset"
+                  data-i18n="settings.fontSizeReset"
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+            <div class="settings-help" data-i18n="settings.fontSizeHelp">
+              Scales every text size in the interface. Code and tool output keep their monospaced
+              font.
+            </div>
+          </div>
+          <div class="settings-section">
             <div class="settings-section-title" data-i18n="settings.language">Language</div>
             <div class="settings-row">
               <span class="settings-label" data-i18n="settings.interfaceLanguage">Interface language</span>

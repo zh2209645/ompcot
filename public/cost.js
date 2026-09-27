@@ -1,4 +1,9 @@
 import { renderCostInfobar } from "./cost-infobar.js";
+import { applyFontSettings, getFontSettings } from "./font-settings.js";
+
+// Same cookie as the main window's Settings → General → Fonts, so the cost
+// window (and the embedded cost view) renders with the user's font choice.
+applyFontSettings(getFontSettings());
 
 const scopeSelect = document.getElementById("scope-select");
 let currentRange = "30d";

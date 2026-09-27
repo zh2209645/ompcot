@@ -18,6 +18,7 @@ import {
   isSlashStreamRejection,
 } from "./composer-commands.js";
 import { FileBrowser } from "./file-browser.js";
+import { setupFontSettings } from "./font-settings.js";
 import { anchorHistoryToBottom } from "./history-scroll-anchor.js";
 import {
   applyTranslations,
@@ -4743,6 +4744,19 @@ function setupLanguageSetting() {
 // setLanguage(), which re-runs applyTranslations() itself.
 applyTranslations();
 setupLanguageSetting();
+
+// ═══════════════════════════════════════
+// Interface fonts (Settings → General → Fonts)
+// ═══════════════════════════════════════
+// Applied through CSS variables on <html>, so the whole interface (transcript,
+// sidebar, chrome) follows one preference. The module also applies the stored
+// choice on boot, so a window that never opens Settings still honours it.
+setupFontSettings({
+  selectEl: document.getElementById("font-family-select"),
+  rangeEl: document.getElementById("font-size-range"),
+  valueEl: document.getElementById("font-size-value"),
+  resetEl: document.getElementById("font-size-reset"),
+});
 
 // setLanguage() has already refreshed the data-i18n markup; re-render the
 // JS-owned dynamic labels that static attributes cannot reach. Everything
