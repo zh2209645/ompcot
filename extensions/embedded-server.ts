@@ -585,6 +585,7 @@ type EmbeddedServerGlobal = {
   wss: WebSocketServer | null;
   clients: Set<UnifiedWS>;
   heartbeatTimer: NodeJS.Timeout | null;
+  activityReconcileTimer: NodeJS.Timeout | null;
   localUrl: string;
   lanUrl: string;
   // Re-published by every extension instance on session_start so the
@@ -1859,6 +1860,7 @@ function getOrCreateGlobalState(): EmbeddedServerGlobal {
       wss: null,
       clients: new Set<UnifiedWS>(),
       heartbeatTimer: null,
+      activityReconcileTimer: null,
       localUrl: "",
       lanUrl: "",
       handleCommand: null,
@@ -1951,6 +1953,56 @@ export default function (omp: ExtensionAPI) {
   }
 
   /**
+   * Keep the registry's streaming flag honest for the life of the process.
+   *
+   * Event-driven writes cover the normal lifecycle, but a single lost write —
+   * an `agent_end` frame the extension never saw, a transiently failing
+   * registry write, a `${pid}.json` inherited from a previous process whose pid
+   * got reused — used to leave the flag at `true` for good. Every GUI window
+   * treats that flag as ground truth, so the session kept its pulsing green dot
+   * (and the sidebar's reconciliation re-created it 5s after the event stream
+   * had already cleared it). This pass re-reads the entry and rewrites it from
+   * the runtime's real state whenever the two disagree, so a stale flag cannot
+   * outlive one tick.
+   */
+  const ACTIVITY_RECONCILE_MS = 10000;
+
+  /** `<sessionFile>|<isStreaming>` as stored on disk, or null when unreadable. */
+  function readStoredActivityPair(): string | null {
+    try {
+      const info = JSON.parse(
+        fs.readFileSync(path.join(INSTANCES_DIR, `${process.pid}.json`), "utf8"),
+      );
+      const sessionFile = typeof info.sessionFile === "string" ? info.sessionFile : "";
+      const isStreaming =
+        info.isStreaming === true ? true : info.isStreaming === false ? false : undefined;
+      return `${sessionFile}|${isStreaming}`;
+    } catch {
+      return null;
+    }
+  }
+
+  function ensureActivityReconcile() {
+    if (globalState.activityReconcileTimer) return;
+    const timer = setInterval(() => {
+      const ctx = globalState.getLatestCtx?.() ?? latestCtx;
+      if (!ctx) return;
+      const sessionFile = currentSessionIdFromCtx(ctx) || "";
+      let isStreaming: boolean;
+      try {
+        isStreaming = !ctx.isIdle();
+      } catch {
+        return; // torn-down ctx: the next instance re-publishes its bindings
+      }
+      if (readStoredActivityPair() === `${sessionFile}|${isStreaming}`) return;
+      instanceActivityPair = `${sessionFile}|${isStreaming}`;
+      patchInstanceEntry({ sessionFile, isStreaming });
+    }, ACTIVITY_RECONCILE_MS);
+    timer.unref?.();
+    globalState.activityReconcileTimer = timer;
+  }
+
+  /**
    * Mirror this process's live session and streaming flag into the shared
    * instance registry.
    *
@@ -1959,7 +2011,9 @@ export default function (omp: ExtensionAPI) {
    * provably not mid-run. Updated on every event this instance forwards (they
    * are frequent during a run, so a lost lifecycle frame self-heals), with
    * `isStreaming` read from the runtime (`ctx.isIdle()`) rather than assumed
-   * from the event type alone.
+   * from the event type alone. `ensureActivityReconcile` additionally audits
+   * the stored entry on a timer, which is what heals a write that never
+   * happened at all.
    *
    * `streamingHint` pins the value for the two transition events, where the
    * runtime flag may not have flipped yet when the handler runs.
@@ -7366,6 +7420,7 @@ export default function (omp: ExtensionAPI) {
 
     function onListening(port: number) {
       ensureHeartbeat(); // audit A7: only after the listen actually succeeded
+      ensureActivityReconcile(); // registry self-heal, process-scoped like the heartbeat
       const localHost = isLoopbackHost(BIND_HOST) ? BIND_HOST : "127.0.0.1";
       globalState.localUrl = `http://${localHost}:${port}`;
       const lanUrls = buildLanUrls(port);

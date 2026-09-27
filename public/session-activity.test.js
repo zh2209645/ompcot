@@ -64,6 +64,49 @@ describe("reconcileSessionActivity", () => {
     expect(stop).toEqual([]);
   });
 
+  test("a stale registry flag cannot resurrect a run the window watched end", () => {
+    // The window's own process: `agent_end` already cleared the mark, and the
+    // registry still claims a run because its flag was never corrected.
+    const { start, stop } = reconcileSessionActivity([], [instance(RUNNING, true)], {
+      port: 47821,
+      streaming: false,
+    });
+
+    expect(start).toEqual([]);
+    expect(stop).toEqual([]);
+  });
+
+  test("a mark on the window's own session is dropped once it reports idle", () => {
+    const { start, stop } = reconcileSessionActivity([RUNNING], [instance(RUNNING, true)], {
+      port: 47821,
+      streaming: false,
+    });
+
+    expect(start).toEqual([]);
+    expect(stop).toEqual([RUNNING]);
+  });
+
+  test("while the window streams, its session stays authoritative either way", () => {
+    const { start, stop } = reconcileSessionActivity([], [instance(RUNNING, false)], {
+      port: 47821,
+      streaming: true,
+    });
+
+    expect(start).toEqual([RUNNING]);
+    expect(stop).toEqual([]);
+  });
+
+  test("the foreground rule only applies to the foreground port", () => {
+    const other = "/ws/.omp/sessions/proj/other.jsonl";
+    const { start } = reconcileSessionActivity(
+      [],
+      [{ ...instance(other, true), port: 49000 }, instance(RUNNING, true)],
+      { port: 47821, streaming: false },
+    );
+
+    expect(start).toEqual([other]);
+  });
+
   test("reconciles every mark, not just the first", () => {
     const other = "/ws/.omp/sessions/proj/other.jsonl";
     const { start, stop } = reconcileSessionActivity(

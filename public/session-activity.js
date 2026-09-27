@@ -24,16 +24,32 @@
  * idleness, while a missing *instance* is (a session cannot run without a
  * process behind it).
  *
+ * The window's own process is the exception. For it the live event stream is
+ * strictly better evidence than the registry: a run this window watched finish
+ * must not be resurrected by a registry flag that was never corrected (a lost
+ * `agent_end` write, a stale `${pid}.json`). `foreground` therefore disables
+ * the registry's vote for that one process — otherwise the poll loop re-added
+ * the dot ~5s after `agent_end` had already cleared it.
+ *
  * @param {Iterable<string>} markedFiles session files currently marked as running
- * @param {Array<{sessionFile?: unknown, isStreaming?: unknown}>} instances `/api/instances` payload
+ * @param {Array<{sessionFile?: unknown, isStreaming?: unknown, port?: number}>} instances `/api/instances` payload
+ * @param {{port?: number|null, streaming?: boolean}} [foreground] window's own process
  * @returns {{start: string[], stop: string[]}} files to mark and unmark
  */
-export function reconcileSessionActivity(markedFiles, instances) {
+export function reconcileSessionActivity(markedFiles, instances, foreground = {}) {
+  const foregroundPort = typeof foreground?.port === "number" ? foreground.port : null;
+  const foregroundStreaming = foreground?.streaming === true;
   const streaming = new Set();
   const unknown = new Set();
   for (const instance of Array.isArray(instances) ? instances : []) {
     const file = instance?.sessionFile;
     if (typeof file !== "string" || file.length === 0) continue;
+    if (foregroundPort !== null && instance?.port === foregroundPort) {
+      // Own process: trust the event stream. When it is running, the mark came
+      // from `agent_start` already; when it is idle, the entry is stale.
+      if (foregroundStreaming) streaming.add(file);
+      continue;
+    }
     if (instance.isStreaming === true) streaming.add(file);
     else if (instance.isStreaming !== false) unknown.add(file);
   }

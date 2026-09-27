@@ -3375,7 +3375,12 @@ function updateMirrorLiveIndicator() {
  * and whenever the broker reports a dead instance.
  */
 function reconcileSidebarStreaming() {
-  const { start, stop } = reconcileSessionActivity(sidebar.streamingFiles, liveInstances);
+  const { start, stop } = reconcileSessionActivity(sidebar.streamingFiles, liveInstances, {
+    // The window's own process is judged by its live event stream instead of
+    // the registry's flag, so a finished run can never be resurrected here.
+    port: foregroundPort,
+    streaming: state.isStreaming,
+  });
   for (const filePath of stop) {
     // Drop the bookkeeping too: a mark that no longer reflects reality must not
     // be resurrected by the next `clearForegroundStreaming()` pass.
