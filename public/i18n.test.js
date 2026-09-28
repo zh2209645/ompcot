@@ -128,13 +128,15 @@ describe("applyTranslations()", () => {
   test("fills textContent, title, placeholder and aria-label", () => {
     document.body.innerHTML = `
       <span data-i18n="status.connected">Connected</span>
-      <button data-i18n-title="composer.attachImage" title="Attach image"></button>
+      <button data-i18n-title="composer.attachFile" title="Attach file"></button>
       <input data-i18n-placeholder="composer.placeholder" placeholder="Type a message..." />
       <button data-i18n-aria-label="sidebar.refreshSessions" aria-label="Refresh sessions"></button>
     `;
     applyTranslations();
     expect(document.querySelector("[data-i18n]").textContent).toBe("Connected");
-    expect(document.querySelector("[data-i18n-title]").title).toBe("Attach image");
+    expect(document.querySelector("[data-i18n-title]").title).toBe(
+      "Attach file or image (mention in the prompt)",
+    );
     expect(document.querySelector("input").placeholder).toBe("Type a message...");
     expect(document.querySelector("[data-i18n-aria-label]").getAttribute("aria-label")).toBe(
       "Refresh sessions",
@@ -142,7 +144,9 @@ describe("applyTranslations()", () => {
 
     setLanguage("zh-CN");
     expect(document.querySelector("[data-i18n]").textContent).toBe("已连接");
-    expect(document.querySelector("[data-i18n-title]").title).toBe("附加图片");
+    expect(document.querySelector("[data-i18n-title]").title).toBe(
+      "附加文件或图片（以提及方式插入提示）",
+    );
     expect(document.querySelector("input").placeholder).toBe("输入消息...");
     expect(document.querySelector("[data-i18n-aria-label]").getAttribute("aria-label")).toBe(
       "刷新会话列表",

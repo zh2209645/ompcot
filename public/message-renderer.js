@@ -202,23 +202,8 @@ export class MessageRenderer {
               .join("\n")
           : "";
 
-    let imagesHtml = "";
-    if (message.images && message.images.length > 0) {
-      imagesHtml =
-        '<div class="message-images">' +
-        message.images
-          .map((img) => {
-            const src = img.data.startsWith("data:")
-              ? img.data
-              : `data:${img.mimeType || "image/png"};base64,${img.data}`;
-            return `<img class="message-image" src="${src}" alt="${t("msg.attachedImage")}" />`;
-          })
-          .join("") +
-        "</div>";
-    }
-
     div.innerHTML = `
-      <div class="message-content">${imagesHtml}${renderUserMarkdown(message.content)}</div>
+      <div class="message-content">${renderUserMarkdown(message.content)}</div>
       ${this._copyButtonHtml()}
     `;
     this._setupCopyBtn(div);

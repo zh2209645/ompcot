@@ -2020,147 +2020,22 @@ messageInput.addEventListener("input", () => {
   syncComposerHeight(messageInput);
 });
 
-// ═══════════════════════════════════════
-// Image attachment
-// ═══════════════════════════════════════
-
-const attachBtn = document.getElementById("attach-btn");
-const imageInput = document.getElementById("image-input");
-const imagePreviews = document.getElementById("image-previews");
-let pendingImages = []; // Array of { data: base64, mimeType: string }
-
-// Max dimension — resize images larger than this to reduce token cost & avoid API limits
-const MAX_IMAGE_DIM = 2048;
-const VALID_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-
-function processImageFile(file) {
-  return new Promise((resolve, reject) => {
-    // Validate mime type
-    const mimeType = VALID_MIME_TYPES.includes(file.type) ? file.type : "image/png";
-
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Failed to read file"));
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        // Resize if too large
-        let { width, height } = img;
-        if (width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM) {
-          const scale = MAX_IMAGE_DIM / Math.max(width, height);
-          width = Math.round(width * scale);
-          height = Math.round(height * scale);
-        }
-
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, width, height);
-
-        // Output as PNG for screenshots/diagrams, JPEG for photos
-        const outputMime = mimeType === "image/jpeg" ? "image/jpeg" : "image/png";
-        const quality = outputMime === "image/jpeg" ? 0.85 : undefined;
-        const dataUrl = canvas.toDataURL(outputMime, quality);
-        const base64 = dataUrl.split(",")[1];
-
-        if (!base64) {
-          reject(new Error("Failed to encode image"));
-          return;
-        }
-
-        resolve({ data: base64, mimeType: outputMime });
-      };
-      img.onerror = () => reject(new Error("Failed to decode image"));
-      img.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-async function addImageFiles(files) {
-  for (const file of files) {
-    if (!file.type.startsWith("image/")) continue;
-    try {
-      const img = await processImageFile(file);
-      pendingImages.push(img);
-    } catch (e) {
-      console.error("[Ompcot] Image processing failed:", e);
-    }
-  }
-  renderImagePreviews();
-}
-
-attachBtn.addEventListener("click", () => imageInput.click());
-
-// Attach files (native host only): the OS picker returns real paths, which go
-// into the composer as `@`-mentions for omp to auto-read. Browser/mobile
-// clients have no file paths to offer — they use the `@` popup or drag rows
-// out of the file browser instead.
-const attachFileBtn = document.getElementById("attach-file-btn");
-attachFileBtn.addEventListener("click", async () => {
-  try {
-    const picked = await transport.pickFiles();
-    await composerMentions.insertPaths(picked);
-  } catch (err) {
-    console.error("[Ompcot] File picker failed:", err);
-  }
-});
-
-/** Reveal native-only toolbar affordances once the broker handshake lands. */
-function refreshAttachFileButton() {
-  attachFileBtn.classList.toggle("hidden", !nativeAvailable());
-}
-refreshAttachFileButton();
-
-imageInput.addEventListener("change", () => {
-  addImageFiles(imageInput.files);
-  imageInput.value = "";
-});
-
-// Drag & drop anywhere on the composer card
+// The composer card swallows file drops: the browser's default is to navigate
+// to the dropped file, which would replace the app. A *browser* drop carries no
+// real path either, so there is nothing to attach from it — files are attached
+// through the picker, or dragged as rows out of the file pane (which inserts
+// the mention directly).
 const composerCard = document.getElementById("composer-card");
 composerCard.addEventListener("dragover", (e) => {
   e.preventDefault();
 });
 composerCard.addEventListener("drop", (e) => {
   e.preventDefault();
-  addImageFiles(e.dataTransfer.files);
 });
-
-// Paste images
-messageInput.addEventListener("paste", (e) => {
-  const files = [];
-  for (const item of e.clipboardData.items) {
-    if (!item.type.startsWith("image/")) continue;
-    files.push(item.getAsFile());
-  }
-  if (files.length) addImageFiles(files);
-});
-
-function renderImagePreviews() {
-  imagePreviews.innerHTML = "";
-  if (pendingImages.length === 0) {
-    imagePreviews.classList.add("hidden");
-    return;
-  }
-  imagePreviews.classList.remove("hidden");
-  pendingImages.forEach((img, i) => {
-    const el = document.createElement("div");
-    el.className = "image-preview";
-    el.innerHTML = `
-      <img src="data:${img.mimeType};base64,${img.data}" />
-      <button class="image-preview-remove" data-index="${i}">✕</button>
-    `;
-    el.querySelector(".image-preview-remove").addEventListener("click", () => {
-      pendingImages.splice(i, 1);
-      renderImagePreviews();
-    });
-    imagePreviews.appendChild(el);
-  });
-}
 
 // ═══════════════════════════════════════
-// Send message (with images)
+// Send message
+// ═══════════════════════════════════════
 // ═══════════════════════════════════════
 
 // Queued-strip model (F15): pending prompts + visual-only steer echoes.
@@ -2235,24 +2110,10 @@ function sendMessage() {
     message,
   };
 
-  if (pendingImages.length > 0) {
-    cmd.images = pendingImages.map((img) => {
-      console.log(`[Ompcot] Sending image: mimeType=${img.mimeType}, dataLen=${img.data?.length}`);
-      return {
-        type: "image",
-        data: img.data,
-        mimeType: img.mimeType || "image/png",
-      };
-    });
-    pendingImages = [];
-    renderImagePreviews();
-  }
-
   if (delivery === "queue") {
     // Queue it — show as bubble above input
     composerQueue.queuePrompt(message, {
       kind: isSlashCommand(message) ? "slash" : "queue",
-      images: cmd.images,
     });
     lastSentMessage = message;
     renderQueuedMessages();
@@ -2287,7 +2148,7 @@ function sendMessage() {
 // rendered element attached to the in-flight entry so a server rejection can
 // clear it again (F16).
 function sendPromptNow(cmd, message) {
-  messageRenderer.renderUserMessage({ content: message, images: cmd.images });
+  messageRenderer.renderUserMessage({ content: message });
   const element = messagesContainer.querySelector(".message.user:last-of-type");
   const requestId = wsClient.send(cmd);
   trackPromptDelivery(requestId, message, element);
@@ -2366,7 +2227,7 @@ function flushQueue() {
     }
     // `kind` is UI-only routing metadata — strip it from the wire payload.
     const { kind: _kind, ...payload } = cmd;
-    messageRenderer.renderUserMessage({ content: cmd.message, images: cmd.images });
+    messageRenderer.renderUserMessage({ content: cmd.message });
     trackPromptDelivery(
       wsClient.send(payload),
       cmd.message,

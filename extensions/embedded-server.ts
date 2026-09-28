@@ -841,7 +841,6 @@ interface RpcCommand {
   customInstructions?: string;
   disabled?: boolean;
   entryId?: string;
-  images?: Array<{ data?: string; mimeType?: string }>;
   level?: string;
   message: string;
   model?: string | null;
@@ -3370,50 +3369,7 @@ export default function (omp: ExtensionAPI) {
               a.sendUserMessage(command.message, { deliverAs: "followUp" });
             }
           } else {
-            // Build content with optional images
-            if (command.images?.length) {
-              const validMimes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-              // biome-ignore lint/suspicious/noExplicitAny: mixed text/image content blocks for sendUserMessage
-              const content: any[] = [
-                { type: "text", text: command.message || "(see attached image)" },
-              ];
-              for (const img of command.images) {
-                if (!img.data || typeof img.data !== "string") {
-                  console.error("[embedded-server] Skipping image: missing or invalid data");
-                  continue;
-                }
-                // Strip data URL prefix if accidentally included
-                const data = img.data.includes(",") ? img.data.split(",")[1] : img.data;
-                const mimeType = (
-                  validMimes.includes(img.mimeType ?? "") ? (img.mimeType as string) : "image/png"
-                ) as "image/png" | "image/jpeg" | "image/gif" | "image/webp";
-                console.log(
-                  `[embedded-server] Image: mimeType=${mimeType}, dataLen=${data.length}, rawMimeType=${img.mimeType}`,
-                );
-                const imageBlock = {
-                  type: "image" as const,
-                  data: data,
-                  mimeType: mimeType,
-                };
-                // Defensive: verify mimeType is actually set (debug crash where it was missing)
-                if (!imageBlock.mimeType) {
-                  console.error(
-                    `[embedded-server] BUG: mimeType is falsy after assignment! img.mimeType=${img.mimeType}, falling back to image/png`,
-                  );
-                  imageBlock.mimeType = "image/png";
-                }
-                content.push(imageBlock);
-              }
-              // Only send content array if we actually have images, otherwise just text
-              const hasImages = content.some((c) => c.type === "image");
-              if (hasImages) {
-                a.sendUserMessage(content);
-              } else {
-                a.sendUserMessage(command.message);
-              }
-            } else {
-              a.sendUserMessage(command.message);
-            }
+            a.sendUserMessage(command.message);
           }
           sendTo(ws, success("prompt"));
           break;
