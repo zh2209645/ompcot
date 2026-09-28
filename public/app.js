@@ -87,6 +87,7 @@ import {
   REWIND_ICON_SVG,
   UIRequestManager,
 } from "./ui-requests.js";
+import { createUserEchoTracker } from "./user-echo.js";
 import { resolveWebSocketUrl, WebSocketClient } from "./websocket-client.js";
 import {
   openFolderAsWorkspace,
@@ -309,7 +310,11 @@ const originalTitle = document.title;
 let hasFocus = true;
 let unreadCount = 0;
 let isScrolledUp = false;
-let lastSentMessage = null; // Track to avoid duplicate rendering in mirror mode
+// User messages this window drew itself, so their echo (a `message_start` for
+// the user role, which is also how another surface's message arrives) cannot
+// draw a second copy. See user-echo.js for the lifetime rule — remembering a
+// message before its bubble exists is what lost a steered queued message (F23).
+const userEcho = createUserEchoTracker();
 let lastUsage = null; // Full usage object for context visualiser
 let mirrorActiveSessionFile = null; // The live session file path from the TUI
 /**
@@ -1117,7 +1122,7 @@ wsClient.addEventListener("commandResponse", (e) => {
     // optimistic render — the queued strip becomes the source of truth.
     pending.element?.remove();
     composerQueue.queuePrompt(pending.message, { kind: "slash" });
-    lastSentMessage = pending.message;
+    userEcho.clear();
     renderQueuedMessages();
     return;
   }
@@ -1847,12 +1852,11 @@ function handleMessageStart(message, entryId = null) {
     const echoText = getMessageText(message);
     // The echo of a steered message retires its visual-only chip (F15).
     removeSteeredEcho(echoText);
-    if (!lastSentMessage || echoText !== lastSentMessage) {
+    if (!userEcho.shouldSuppress(echoText)) {
       if (echoText) {
         messageRenderer.renderUserMessage({ content: echoText, id: entryId || message.id });
       }
     }
-    lastSentMessage = null;
   }
 }
 
@@ -2365,15 +2369,15 @@ const composerCommands = createComposerCommands({
   onSubmit: () => sendMessage(),
   queueSlash: (message) => {
     composerQueue.queuePrompt(message, { kind: "slash" });
-    lastSentMessage = message;
     renderQueuedMessages();
   },
   showSteerQueued: (message, kind = "steer") => {
     // Visual-only echo (F15): the steer RPC already went out; this chip must
     // never be flushed. It is retired when the user message echoes back —
     // and that echo must RENDER: unlike a queued or immediate prompt, a steer
-    // has no optimistic bubble of its own, so setting `lastSentMessage` here
-    // suppressed the only copy of the message the user would ever see.
+    // has no optimistic bubble of its own, so anything that makes the echo look
+    // like a duplicate (`userEcho.expect`) hides the only copy the user sees
+    // (F23).
     composerQueue.addSteerEcho(message, kind);
     renderQueuedMessages();
   },
@@ -2527,7 +2531,6 @@ function sendMessage() {
     composerQueue.queuePrompt(message, {
       kind: isSlashCommand(message) ? "slash" : "queue",
     });
-    lastSentMessage = message;
     renderQueuedMessages();
     return;
   }
@@ -2557,7 +2560,7 @@ function sendMessage() {
     return;
   }
 
-  lastSentMessage = message;
+  userEcho.expect(message);
   sendPromptNow(cmd, message);
 }
 
@@ -2612,6 +2615,10 @@ function renderQueuedMessages() {
     if (steerBtn) {
       steerBtn.addEventListener("click", () => {
         composerQueue.remove(entry.item);
+        // The chip is gone and a steer draws no bubble of its own: its echo is
+        // the only copy of this message the user will see, so nothing may
+        // suppress it (F23 — this is the line the reported loss needed).
+        userEcho.clear();
         renderQueuedMessages();
         composerCommands.sendSteerNow(entry.message);
       });
@@ -2620,6 +2627,7 @@ function renderQueuedMessages() {
     if (cancelBtn) {
       cancelBtn.addEventListener("click", () => {
         composerQueue.remove(entry.item);
+        userEcho.clear();
         renderQueuedMessages();
       });
     }
@@ -2653,6 +2661,7 @@ function flushQueue() {
     const { kind: _kind, ...payload } = cmd;
     // Their own queued message being delivered: same rule.
     messageRenderer.renderUserMessage({ content: cmd.message }, false, { forceScroll: true });
+    userEcho.expect(cmd.message);
     trackPromptDelivery(
       wsClient.send(payload),
       cmd.message,
