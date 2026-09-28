@@ -8092,6 +8092,70 @@ export default function (omp: ExtensionAPI) {
     });
   }
 
+  // ─── GUI rewind command ───
+  // omp exposes session-tree navigation (`navigateTree`, the esc-esc rewind's
+  // primitive) only to extension *command* handlers and hooks; neither the event
+  // context this server runs in nor the native RPC protocol carries it (the
+  // protocol only has `get_tree`, read-only). A command is therefore the only
+  // headless entry point: the desktop broker writes a real
+  // `{type:"prompt", message:"/ompcot-rewind <entryId>"}` frame to the process,
+  // and the session dispatches it with command expansion on — the extension's own
+  // `sendUserMessage` path deliberately passes `expandPromptTemplates: false`, so
+  // a slash prompt sent that way reaches the model as literal text.
+  //
+  // Rewinding moves the session's leaf, so the transcript on screen is now a
+  // suffix of the new branch: broadcast the same snapshot a session swap
+  // broadcasts and let the UI replay it. `rewind_done` tells the GUI what
+  // happened (and lets it restore the withdrawn message into the composer).
+  try {
+    if (typeof omp.registerCommand === "function") {
+      omp.registerCommand("ompcot-rewind", {
+        description: "Rewind the session to an entry (Ompcot GUI)",
+        handler: async (args: string, commandCtx: unknown) => {
+          const entryId = String(args || "").trim();
+          const navigate = (
+            commandCtx as {
+              navigateTree?: (
+                targetId: string,
+                options?: { summarize?: boolean },
+              ) => Promise<{ cancelled?: boolean } | undefined>;
+            }
+          )?.navigateTree;
+          if (!entryId) {
+            broadcast({ type: "rewind_done", ok: false, error: "entryId is required" });
+            return;
+          }
+          if (typeof navigate !== "function") {
+            broadcast({
+              type: "rewind_done",
+              ok: false,
+              error: "Rewind unavailable in this build",
+            });
+            return;
+          }
+          try {
+            const result = await navigate.call(commandCtx, entryId, { summarize: false });
+            broadcast({
+              type: "rewind_done",
+              ok: true,
+              entryId,
+              cancelled: Boolean(result?.cancelled),
+            });
+            try {
+              broadcast(await buildStateSnapshot(commandCtx as ExtensionContext));
+            } catch (err) {
+              console.error("[Embedded] rewind snapshot broadcast failed:", errMessage(err));
+            }
+          } catch (err) {
+            broadcast({ type: "rewind_done", ok: false, entryId, error: errMessage(err) });
+          }
+        },
+      });
+    }
+  } catch (err) {
+    console.error("[Embedded] Failed to register the rewind command:", errMessage(err));
+  }
+
   // ═══════════════════════════════════════
   // Auto-start on session begin
   // ═══════════════════════════════════════

@@ -415,23 +415,39 @@ export class UIRequestManager {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Fork from message (B7)
+// Message actions — fork from here / rewind to here
 // ═══════════════════════════════════════════════════════════════════════
 
 /** Git-branch glyph, shared with the palette command in app.js. */
 export const FORK_ICON_SVG =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6"/><path d="M15 6.5A9 9 0 0 0 6 15.7"/></svg>';
 
+/** Rewind glyph: an arrow curling back to the start of the line. */
+export const REWIND_ICON_SVG =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>';
+
 /**
- * Hover "Fork from here" action on finished assistant messages + the
- * "Fork from latest" palette entry. Follows the copy-button pattern: an
- * icon button appended to the message element, revealed on hover, with
- * keyboard focus keeping it visible.
+ * Hover actions on transcript messages, plus the matching palette entries:
+ *
+ * - **Fork from here** (assistant *and* user messages): `branch(entryId)` — the
+ *   session becomes a new one that starts from that entry.
+ * - **Rewind to here** (user messages, desktop only): `navigateTree(entryId)` —
+ *   the session's leaf moves back to that message, everything after it leaves
+ *   the branch, and the message's text goes back into the composer to edit and
+ *   resend. That is omp's own esc-esc rewind, reachable from a GUI only as an
+ *   extension command (see the note in `embedded-server.ts`), so the caller
+ *   injects `rewindViaBroker` — absent on browser/mobile clients, where the
+ *   action is not attached at all rather than failing on click.
+ *
+ * Buttons follow the copy-button pattern: appended to the message element,
+ * revealed on hover, kept visible by keyboard focus.
  */
-export function createForkActions({
+export function createMessageActions({
   wsClient,
   messagesContainer,
   sendForkViaBroker = null,
+  rewindViaBroker = null,
+  canRewind = () => false,
   onStatus = () => {},
   onError = () => {},
   onRefresh = () => {},
@@ -448,43 +464,79 @@ export function createForkActions({
     return id && id !== "streaming" ? id : null;
   }
 
-  function attachForkButtons() {
+  function actionButton({ className, icon, label, onClick }) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `message-action-btn ${className}`;
+    btn.innerHTML = icon;
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      onClick();
+    });
+    return btn;
+  }
+
+  function attachActions() {
     if (!messagesContainer) return;
+
     for (const el of messagesContainer.querySelectorAll(".message.assistant")) {
       // Streaming placeholders carry no id yet — wait until finalize.
       if (el.querySelector(".message-content.streaming")) continue;
-      if (el.querySelector(".message-fork-btn")) continue;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "message-fork-btn";
-      btn.innerHTML = FORK_ICON_SVG;
-      const label = t("fork.fromHere");
-      btn.title = label;
-      btn.setAttribute("aria-label", label);
-      btn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        void forkFromElement(el);
-      });
-      el.appendChild(btn);
+      if (el.querySelector(".message-action-btn")) continue;
+      el.appendChild(
+        actionButton({
+          className: "message-fork-btn",
+          icon: FORK_ICON_SVG,
+          label: t("fork.fromHere"),
+          onClick: () => void forkFromElement(el),
+        }),
+      );
       const id = entryIdFromElement(el);
       if (id) lastKnownEntryId = id;
     }
+
+    for (const el of messagesContainer.querySelectorAll(".message.user")) {
+      if (el.querySelector(".message-action-btn")) continue;
+      const id = entryIdFromElement(el);
+      if (!id) continue;
+      lastKnownEntryId = id;
+      if (canRewind() && rewindViaBroker) {
+        el.appendChild(
+          actionButton({
+            className: "message-rewind-btn",
+            icon: REWIND_ICON_SVG,
+            label: t("rewind.fromHere"),
+            onClick: () => void rewindFromElement(el),
+          }),
+        );
+      }
+      el.appendChild(
+        actionButton({
+          className: "message-fork-btn",
+          icon: FORK_ICON_SVG,
+          label: t("fork.fromHere"),
+          onClick: () => void forkFromElement(el),
+        }),
+      );
+    }
   }
 
-  // Finalized messages land in #messages asynchronously (stream finalize,
-  // history render) — observe and attach on the next frame, debounced.
+  // Messages land in #messages asynchronously (stream finalize, history render)
+  // — observe and attach on the next frame, debounced.
   const observer =
     messagesContainer && typeof MutationObserver === "function"
       ? new MutationObserver(() => {
           if (frame) return;
           frame = schedule(() => {
             frame = 0;
-            attachForkButtons();
+            attachActions();
           });
         })
       : null;
   observer?.observe(messagesContainer, { childList: true, subtree: true });
-  attachForkButtons();
+  attachActions();
 
   async function sendFork(entryId) {
     const command = { type: "fork_session" };
@@ -532,10 +584,28 @@ export function createForkActions({
     return sendFork(lastKnownEntryId || undefined);
   }
 
+  async function rewindFromElement(el) {
+    const entryId = entryIdFromElement(el);
+    if (!entryId || !rewindViaBroker) return false;
+    return rewindViaBroker(entryId, el?._messageText ?? "");
+  }
+
+  /** Rewind to the newest user message: drop the turn that followed it. */
+  function rewindFromLatest() {
+    const users = messagesContainer?.querySelectorAll(".message.user") || [];
+    for (let i = users.length - 1; i >= 0; i--) {
+      const id = entryIdFromElement(users[i]);
+      if (id) return rewindFromElement(users[i]);
+    }
+    return Promise.resolve(false);
+  }
+
   return {
-    attachForkButtons,
+    attachActions,
     forkFromElement,
     forkFromLatest,
+    rewindFromElement,
+    rewindFromLatest,
     destroy: () => {
       observer?.disconnect();
     },

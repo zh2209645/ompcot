@@ -405,6 +405,16 @@ export const zhCN = {
   "status.forking": "正在分叉...",
   "status.forked": "已创建分叉",
 
+  // ── 撤回消息（悬浮操作 + 命令面板）──
+  "rewind.fromHere": "撤回至此处",
+  "rewind.failed": "撤回失败：{error}",
+  "rewind.unavailable": "撤回需要桌面端（命令经本地 broker 执行）",
+  "palette.rewind": "撤回到最后一条消息",
+  "palette.rewindDesc": "撤回这一轮对话，并把消息放回输入框",
+  "status.rewinding": "正在撤回...",
+  "status.rewound": "已撤回 — 可编辑后重新发送",
+  "status.commandFailed": "命令执行失败：{error}",
+
   // ── 扩展 UI 请求对话框 ──
   "uiRequest.autoCancelIn": "{seconds} 秒后自动取消",
 

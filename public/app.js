@@ -75,7 +75,12 @@ import { ToolCardRenderer } from "./tool-card.js";
 import { resolveTranscriptOpenAction } from "./transcript-open.js";
 import { createTranscriptView } from "./transcript-view.js";
 import { initTransport } from "./transport.js";
-import { createForkActions, FORK_ICON_SVG, UIRequestManager } from "./ui-requests.js";
+import {
+  createMessageActions,
+  FORK_ICON_SVG,
+  REWIND_ICON_SVG,
+  UIRequestManager,
+} from "./ui-requests.js";
 import { resolveWebSocketUrl, WebSocketClient } from "./websocket-client.js";
 import {
   openFolderAsWorkspace,
@@ -1476,7 +1481,7 @@ function handleMessageStart(message, entryId = null) {
     removeSteeredEcho(echoText);
     if (!lastSentMessage || echoText !== lastSentMessage) {
       if (echoText) {
-        messageRenderer.renderUserMessage({ content: echoText });
+        messageRenderer.renderUserMessage({ content: echoText, id: entryId || message.id });
       }
     }
     lastSentMessage = null;
@@ -2181,6 +2186,21 @@ function sendMessage() {
     return;
   }
 
+  if (isSlashCommand(message) && nativeAvailable()) {
+    // A command, not a prompt: omp executes it (and records no user message),
+    // so there is nothing to render optimistically — the command's own output
+    // (compaction summary, rewind snapshot, …) is the feedback.
+    void sendSlashViaUpstream(message).then((result) => {
+      if (result.ok) {
+        refreshSidebarAfterUserPrompt();
+        return;
+      }
+      messageRenderer.renderError(t("status.commandFailed", { error: result.error || "" }));
+      if (!messageInput.value.trim()) setComposerText(messageInput, message);
+    });
+    return;
+  }
+
   lastSentMessage = message;
   sendPromptNow(cmd, message);
 }
@@ -2255,10 +2275,20 @@ function flushQueue() {
   // delivered and are excluded from the flushable queue by design.
   if (composerQueue.flushableCount > 0 && !state.isStreaming) {
     const cmd = composerQueue.takeFlushable();
+    renderQueuedMessages();
+    if (cmd.kind === "slash" && nativeAvailable()) {
+      // Queued commands execute over the native channel too (see the idle path
+      // in sendMessage) — the strip chip is the only acknowledgement they get.
+      void sendSlashViaUpstream(cmd.message).then((result) => {
+        if (!result.ok) {
+          messageRenderer.renderError(t("status.commandFailed", { error: result.error || "" }));
+        }
+      });
+      return;
+    }
     // `kind` is UI-only routing metadata — strip it from the wire payload.
     const { kind: _kind, ...payload } = cmd;
     messageRenderer.renderUserMessage({ content: cmd.message, images: cmd.images });
-    renderQueuedMessages();
     trackPromptDelivery(
       wsClient.send(payload),
       cmd.message,
@@ -2476,7 +2506,87 @@ async function forkViaBroker(entryId) {
   pollInstances().catch(() => {});
   return true;
 }
-const forkActions = createForkActions({
+/**
+ * Run a slash command through omp's own RPC `prompt` frame (the desktop broker
+ * writes it to the process's stdin).
+ *
+ * Commands must go this way: the extension API's `sendUserMessage` — the path
+ * every other prompt takes — passes `expandPromptTemplates: false`, so `/cmd`
+ * sent through it reaches the model as literal text instead of executing. omp's
+ * RPC prompt path dispatches extension commands, custom commands, skills and
+ * builtins, and answers with a `response` frame carrying our id.
+ *
+ * @returns {Promise<{ok: boolean, error?: string, data?: unknown}>}
+ */
+function sendSlashViaUpstream(message, { timeoutMs = 30000 } = {}) {
+  if (!nativeAvailable()) {
+    return Promise.resolve({ ok: false, error: "Not available in this client" });
+  }
+  const requestId = `ompcot-cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const settled = new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      wsClient.removeEventListener("commandResponse", onResponse);
+      resolve({ ok: false, error: "timeout" });
+    }, timeoutMs);
+    function onResponse(event) {
+      const detail = event.detail || {};
+      if ((detail.requestId ?? detail.id) !== requestId) return;
+      clearTimeout(timer);
+      wsClient.removeEventListener("commandResponse", onResponse);
+      resolve(
+        detail.success === false
+          ? { ok: false, error: String(detail.error || "command failed") }
+          : { ok: true, data: detail.data ?? null },
+      );
+    }
+    wsClient.addEventListener("commandResponse", onResponse);
+  });
+  try {
+    transport.promptUpstream({ message, requestId }).catch((err) => {
+      // The control round trip failed: surface it through the same channel the
+      // response would have used, so the caller's recovery runs.
+      wsClient.dispatchEvent(
+        new CustomEvent("commandResponse", {
+          detail: { id: requestId, success: false, error: String(err?.message ?? err) },
+        }),
+      );
+    });
+  } catch (err) {
+    return Promise.resolve({ ok: false, error: String(err?.message ?? err) });
+  }
+  return settled;
+}
+
+/**
+ * Rewind the session tree to a message (omp's esc-esc rewind): the leaf moves
+ * back to that entry, everything after it leaves the branch, and the message's
+ * text returns to the composer to edit and resend. The command's handler
+ * broadcasts the fresh snapshot, so the transcript repaints itself.
+ */
+async function rewindViaBroker(entryId, text) {
+  showTransientStatus(t("status.rewinding"));
+  const result = await sendSlashViaUpstream(`/ompcot-rewind ${entryId}`);
+  if (!result.ok) {
+    messageRenderer.renderError(t("rewind.failed", { error: result.error || "" }));
+    return false;
+  }
+  showTransientStatus(t("status.rewound"));
+  if (text && !messageInput.value.trim()) {
+    setComposerText(messageInput, text);
+  }
+  return true;
+}
+
+/** The command's own outcome (the prompt response only says it was dispatched). */
+wsClient.addEventListener("rpcEvent", (event) => {
+  const detail = event.detail || {};
+  if (detail.type !== "rewind_done") return;
+  if (detail.ok) return;
+  if (detail.cancelled) return;
+  messageRenderer.renderError(t("rewind.failed", { error: String(detail.error || "") }));
+});
+
+const messageActions = createMessageActions({
   wsClient,
   messagesContainer,
   // Desktop-only path (omp native `branch` via the broker). Evaluated at call
@@ -2484,6 +2594,11 @@ const forkActions = createForkActions({
   // reject with the server's feature-missing vocabulary, which onError maps
   // to the per-session "Fork unavailable" degrade.
   sendForkViaBroker: forkViaBroker,
+  // Rewind's primitive (`navigateTree`) is command-context only, so it runs as
+  // the `/ompcot-rewind` extension command over the broker's RPC prompt frame.
+  // Browsers/mobile clients have no broker: the action is not attached there.
+  rewindViaBroker,
+  canRewind: () => nativeAvailable(),
   onStatus: (message) => showTransientStatus(message),
   onError: (message) => {
     if (String(message ?? "").includes("Fork unavailable")) {
@@ -2501,7 +2616,8 @@ const forkActions = createForkActions({
     pollInstances().catch(() => {});
   },
 });
-const forkPaletteAction = () => forkActions.forkFromLatest();
+const forkPaletteAction = () => messageActions.forkFromLatest();
+const rewindPaletteAction = () => messageActions.rewindFromLatest();
 
 /**
  * Last REAL assistant entry id in the transcript ("streaming" placeholders
@@ -2521,6 +2637,22 @@ function isForkPaletteBlocked() {
   // Blocked when the build lacks fork support for this session, or when the
   // transcript carries no real entry id to fork from.
   return isForkUnavailable() || !latestRealEntryId();
+}
+
+function isRewindPaletteBlocked() {
+  // Rewind runs as an extension command over the desktop broker, and needs a
+  // real user entry to navigate to.
+  return !nativeAvailable() || !latestUserEntryId();
+}
+
+/** Newest user message that carries its session-entry id. */
+function latestUserEntryId() {
+  const messages = messagesContainer?.querySelectorAll(".message.user") || [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const id = messages[i]?.dataset?.messageId;
+    if (id && id !== "streaming") return id;
+  }
+  return null;
 }
 
 // Labels are translated at render time (see openCommandPalette) so an
@@ -2543,6 +2675,12 @@ const commands = [
     labelKey: "palette.fork",
     descKey: "palette.forkDesc",
     action: forkPaletteAction,
+  },
+  {
+    icon: REWIND_ICON_SVG,
+    labelKey: "palette.rewind",
+    descKey: "palette.rewindDesc",
+    action: rewindPaletteAction,
   },
   {
     icon: "📋",
@@ -2585,7 +2723,12 @@ function openCommandPalette() {
     // Fork is disabled for sessions whose server already reported the build
     // lacks fork support, or when no real entry id exists to fork from — the
     // server requires an entryId (F2).
-    if (cmd.action === forkPaletteAction && isForkPaletteBlocked()) {
+    if (cmd.action === rewindPaletteAction && isRewindPaletteBlocked()) {
+      el.style.opacity = "0.5";
+      el.style.pointerEvents = "none";
+      el.setAttribute("aria-disabled", "true");
+      el.title = t("rewind.unavailable");
+    } else if (cmd.action === forkPaletteAction && isForkPaletteBlocked()) {
       el.style.opacity = "0.5";
       el.style.pointerEvents = "none";
       el.setAttribute("aria-disabled", "true");
@@ -4903,6 +5046,9 @@ const ompBinarySettings = createOmpBinarySettings({
 // so buttons that were hidden on first paint appear when attached to the host.
 wsClient.addEventListener("capabilities", () => {
   refreshAttachFileButton();
+  // The rewind action only exists on a native host (it needs the broker's RPC
+  // prompt frame), and the handshake lands after the first transcript render.
+  messageActions.attachActions();
   refreshHeaderOpenAppButton();
   void loadHeaderOpenApps();
   void updater.initUpdaterUI();

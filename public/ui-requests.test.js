@@ -1,7 +1,7 @@
 import { JSDOM } from "jsdom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { setLanguage } from "./i18n.js";
-import { createForkActions, UIRequestManager } from "./ui-requests.js";
+import { createMessageActions, UIRequestManager } from "./ui-requests.js";
 
 class MockWsClient extends EventTarget {
   constructor() {
@@ -367,7 +367,7 @@ describe("extension UI request dialogs", () => {
   });
 });
 
-describe("fork actions", () => {
+describe("message actions (fork / rewind)", () => {
   let dom;
 
   beforeEach(() => {
@@ -392,8 +392,18 @@ describe("fork actions", () => {
     return el;
   }
 
+  function userMessage(id, { text = "hello there" } = {}) {
+    const el = document.createElement("div");
+    el.className = "message user";
+    if (id !== undefined) el.dataset.messageId = id;
+    el.innerHTML = '<div class="message-content">hello there</div>';
+    el._messageText = text;
+    document.body.appendChild(el);
+    return el;
+  }
+
   function createActions(ws = new MockWsClient(), deps = {}) {
-    const actions = createForkActions({
+    const actions = createMessageActions({
       wsClient: ws,
       messagesContainer: document.body,
       ...deps,
@@ -412,6 +422,51 @@ describe("fork actions", () => {
     btn.click();
     await tick();
     expect(lastSent(ctx)).toEqual({ type: "fork_session", entryId: "entry-42" });
+  });
+
+  test("a user message gets fork, and rewind only where the broker exists", () => {
+    userMessage("user-1");
+    const rewindViaBroker = vi.fn().mockResolvedValue(true);
+
+    // No native broker (browser/mobile): fork is offered, rewind is not.
+    const plain = createActions();
+    expect(document.querySelector(".message-fork-btn")).toBeTruthy();
+    expect(document.querySelector(".message-rewind-btn")).toBeNull();
+    plain.actions.destroy();
+    for (const el of document.querySelectorAll(".message-action-btn")) el.remove();
+
+    // Native host: rewind appears next to fork and hands over id + text.
+    const native = createActions(new MockWsClient(), {
+      rewindViaBroker,
+      canRewind: () => true,
+    });
+    const rewindBtn = document.querySelector(".message-rewind-btn");
+    expect(rewindBtn).toBeTruthy();
+    rewindBtn.click();
+    expect(rewindViaBroker).toHaveBeenCalledWith("user-1", "hello there");
+    native.actions.destroy();
+  });
+
+  test("rewindFromLatest targets the newest user message", async () => {
+    userMessage("user-1");
+    assistantMessage("entry-2");
+    userMessage("user-9", { text: "second question" });
+    const rewindViaBroker = vi.fn().mockResolvedValue(true);
+    const ctx = createActions(new MockWsClient(), { rewindViaBroker, canRewind: () => true });
+
+    await ctx.actions.rewindFromLatest();
+    expect(rewindViaBroker).toHaveBeenCalledWith("user-9", "second question");
+    ctx.actions.destroy();
+  });
+
+  test("a user message without an entry id gets no actions", () => {
+    userMessage(undefined);
+    const ctx = createActions(new MockWsClient(), {
+      rewindViaBroker: vi.fn(),
+      canRewind: () => true,
+    });
+    expect(document.querySelector(".message-action-btn")).toBeNull();
+    ctx.actions.destroy();
   });
 
   test("streaming placeholders get no button and no entry id", () => {

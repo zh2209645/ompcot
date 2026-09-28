@@ -414,6 +414,16 @@ export const en = {
   "status.forking": "Forking...",
   "status.forked": "Fork created",
 
+  // ── rewind to message (hover action + palette) ──
+  "rewind.fromHere": "Rewind to here",
+  "rewind.failed": "Rewind failed: {error}",
+  "rewind.unavailable": "Rewind needs the desktop app (the command runs through the local broker)",
+  "palette.rewind": "Rewind to last message",
+  "palette.rewindDesc": "Drop this turn and put the message back in the composer",
+  "status.rewinding": "Rewinding...",
+  "status.rewound": "Rewound — edit and resend",
+  "status.commandFailed": "Command failed: {error}",
+
   // ── extension UI request dialogs ──
   "uiRequest.autoCancelIn": "Auto-cancels in {seconds}s",
 

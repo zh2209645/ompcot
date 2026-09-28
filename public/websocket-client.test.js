@@ -266,6 +266,28 @@ describe("WebSocketClient broker routing", () => {
     expect(syncs[0].port).toBe(47822);
   });
 
+  test("prompt_result is surfaced (not warned about as an unknown frame)", () => {
+    // The broker forwards omp's own RPC frames: every native prompt — slash
+    // commands, the rewind command — ends in one of these, and before the case
+    // existed it fell into the unknown-type console warning.
+    const client = new WebSocketClient("ws://127.0.0.1:49000/ui-ws");
+    const results = [];
+    client.addEventListener("promptResult", (event) => results.push(event.detail));
+
+    client.handleMessage({
+      type: "prompt_result",
+      id: "rw1",
+      agentInvoked: false,
+      status: "completed",
+      sessionSettled: true,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].id).toBe("rw1");
+    expect(results[0].status).toBe("completed");
+    expect(results[0].agentInvoked).toBe(false);
+  });
+
   test("send returns the requestId so callers can correlate delivery failures", () => {
     const client = new WebSocketClient("ws://127.0.0.1:49000/ui-ws");
     client.ws = { readyState: WebSocket.OPEN, send: () => {} };

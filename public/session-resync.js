@@ -70,7 +70,7 @@ export function renderTranscriptFromEntries(
       if (content || images.length > 0) {
         counts.user++;
         messageRenderer.renderUserMessage(
-          { content: content || "", images: images.length > 0 ? images : undefined },
+          { content: content || "", images: images.length > 0 ? images : undefined, id: entry.id },
           true,
         );
       }

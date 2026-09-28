@@ -482,6 +482,14 @@ export class WebSocketClient extends EventTarget {
         // fields without a refetch.
         this.dispatchEvent(new CustomEvent("settingsChanged", { detail: message }));
         break;
+      case "prompt_result":
+        // Terminal outcome of a prompt the broker wrote to omp's own RPC stdin
+        // (`prompt_upstream`): `{id, agentInvoked, status: completed|error|aborted,
+        // sessionSettled}`. Slash commands and the rewind command report through
+        // this frame — without the case it fell into the unknown-type warning on
+        // every native prompt.
+        this.dispatchEvent(new CustomEvent("promptResult", { detail: message }));
+        break;
       case "mirror_sync":
         // Do NOT call setRoutingContext here. The broker broadcasts every
         // upstream's `mirror_sync` to all UI clients, so a snapshot emitted by

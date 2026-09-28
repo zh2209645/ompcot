@@ -976,6 +976,29 @@ fn install_control_handler(broker: &Arc<BrokerWs>, manager: Arc<OmpManager>, app
                         Some(path) => Value::from(path),
                         None => Value::Null,
                     }),
+                    "prompt_upstream" => {
+                        // Write a real RPC `prompt` frame to this workspace's omp
+                        // process (its stdin protocol). Slash commands and the
+                        // rewind command go through here: omp's RPC prompt path
+                        // dispatches extension commands, custom commands, skills
+                        // and builtins, while the extension API's
+                        // `sendUserMessage` deliberately skips command expansion
+                        // (`expandPromptTemplates: false`), so a `/cmd` sent that
+                        // way reaches the model as literal text. The upstream's
+                        // reply arrives as the usual forwarded `response` frame,
+                        // correlated by the `id` the caller supplied.
+                        let message = arg_str("message").ok_or("message is required")?;
+                        let port = resolve_control_port(arg_u16("port"), &broker)?;
+                        let mut frame = serde_json::json!({ "type": "prompt", "message": message });
+                        if let Some(request_id) = arg_str("requestId") {
+                            frame["id"] = Value::from(request_id);
+                        }
+                        if let Some(behavior) = arg_str("streamingBehavior") {
+                            frame["streamingBehavior"] = Value::from(behavior);
+                        }
+                        manager.send_rpc(port, frame)?;
+                        Ok(Value::Null)
+                    }
                     "pick_files" => {
                         // Composer @-mentions: multi-select, paths straight into
                         // the prompt. An empty array means cancelled.

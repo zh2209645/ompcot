@@ -6777,7 +6777,7 @@ html.macos-overlay .settings-content {
    Fork from message (ui-requests.js) — copy-button pattern
    ═══════════════════════════════════════════════════════ */
 
-.message-fork-btn {
+.message-action-btn {
   opacity: 0;
   align-self: flex-start;
   margin-top: 4px;
@@ -6792,18 +6792,24 @@ html.macos-overlay .settings-content {
   flex-shrink: 0;
 }
 
-.message:hover .message-fork-btn,
-.message-fork-btn:focus-visible {
+.message:hover .message-action-btn,
+.message-action-btn:focus-visible {
   opacity: 1;
 }
 
-.message-fork-btn:hover {
+.message-action-btn:hover {
   color: var(--accent-text);
   background: var(--bg-glass-hover);
 }
 
-.message-fork-btn:active {
+.message-action-btn:active {
   transform: scale(0.9);
+}
+
+/* Rewind sits first in the user message's action row (it is the more
+   destructive of the two, so it stays left of fork). */
+.message-rewind-btn {
+  margin-left: 2px;
 }
 
 /* ═══════════════════════════════════════════════════════

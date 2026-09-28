@@ -132,6 +132,26 @@ export class WsTransport {
     return this._control("remove_pi_package", { source }, { timeoutMs: PACKAGE_TIMEOUT_MS });
   }
 
+  /**
+   * Send a prompt through omp's own RPC `prompt` frame (written to the process's
+   * stdin by the desktop broker) instead of the extension's WS API.
+   *
+   * Slash commands need this: omp's RPC prompt path dispatches extension
+   * commands, custom commands, skills and builtins, while `sendUserMessage`
+   * (the extension API the embedded server uses) explicitly passes
+   * `expandPromptTemplates: false` — a `/cmd` sent that way reaches the model as
+   * literal text. The upstream answers with a normal `response` frame carrying
+   * `requestId`, which the WebSocket client dispatches as `commandResponse`.
+   */
+  promptUpstream({ message, requestId = null, streamingBehavior = null, port = null } = {}) {
+    return this._control("prompt_upstream", {
+      message,
+      requestId,
+      streamingBehavior,
+      port: port ?? currentPort(this.env),
+    });
+  }
+
   // ── Native-only ops (need an OS host; reject when capabilities.native=false) ─
 
   pickFolder() {

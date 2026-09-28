@@ -174,6 +174,20 @@ export class MessageRenderer {
 
     const div = document.createElement("div");
     div.className = `message user${isHistory ? " history" : ""}`;
+    // Session-entry identity, when the caller knows it: the rewind action needs
+    // the entry to navigate to, and fork can branch from a user message too.
+    if (message.id) div.dataset.messageId = String(message.id);
+    // The raw text (markdown markup intact) for the rewind action to restore:
+    // reading it back from the DOM would return the *rendered* text.
+    div._messageText =
+      typeof message.content === "string"
+        ? message.content
+        : Array.isArray(message.content)
+          ? message.content
+              .filter((b) => b?.type === "text")
+              .map((b) => b.text || "")
+              .join("\n")
+          : "";
 
     let imagesHtml = "";
     if (message.images && message.images.length > 0) {
