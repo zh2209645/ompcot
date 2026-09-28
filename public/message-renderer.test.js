@@ -758,6 +758,28 @@ describe("MessageRenderer session notices", () => {
     expect(container.querySelectorAll("[data-notice-id]")).toHaveLength(1);
   });
 
+  it("hides the notices the runtime wrote for the agent, not for the reader", () => {
+    // `lsp-late-diagnostic` is the LSP tooling telling the model that
+    // diagnostics landed after its edit returned; one reported turn rendered
+    // 22 of them, each a paragraph of biome output. The entry stays in the
+    // session file and in the debug log — only the transcript hides it.
+    const hidden = renderer.renderNotice({
+      id: "entry_lsp",
+      customType: "lsp-late-diagnostic",
+      content:
+        "<system-notice>\nLate LSP diagnostics arrived after the edit returned: a.js — 1 error(s)\n</system-notice>",
+    });
+    expect(hidden).toBeNull();
+    expect(container.querySelectorAll("[data-notice-id]")).toHaveLength(0);
+
+    // …while the notices a person acts on keep rendering.
+    for (const type of ["async-result", "launch-completion"]) {
+      const el = renderer.renderNotice({ id: `entry_${type}`, customType: type, content: "done" });
+      expect(el).not.toBeNull();
+      expect(el.querySelector(".notice-type").textContent).toBe(type);
+    }
+  });
+
   it("skips entries with no text and keeps notice ordering stable", () => {
     expect(renderer.renderNotice({ id: "entry_n4", content: "   " })).toBeNull();
 

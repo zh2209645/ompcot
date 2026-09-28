@@ -13,6 +13,27 @@ import { ScrollFollow } from "./scroll-follow.js";
  */
 export const TEXT_DUPLICATE_SCAN_MS = 2000;
 
+/**
+ * Session-notice types written for the *agent*, not for the person watching.
+ *
+ * omp persists the notices its TUI shows as `custom_message` entries with
+ * `display: true`, and the GUI rendered every one of them. Some are nudges the
+ * runtime hands the model mid-run, and the model is the only intended reader:
+ * `lsp-late-diagnostic` is the LSP tooling telling the agent that diagnostics
+ * arrived after its edit returned — the reported flood rendered 22 of them in
+ * one turn, each a paragraph of `[biome]` output addressed at the model — and
+ * `mid-run-todo-nudge` is the todo reminder (already `display: false` in this
+ * build; listed so a future build that flips the flag cannot leak it).
+ *
+ * Notices the person cares about keep rendering: `async-result` (a background
+ * job's result was delivered) and `launch-completion` (a supervised process
+ * ended). The list lives here rather than in the extension because every paint
+ * path — history, snapshot, resync, and the live `session_notice` frame — goes
+ * through `renderNotice`; the entries stay in the session file and in the debug
+ * bundle's frame log, so hiding is purely a display decision.
+ */
+export const AGENT_ONLY_NOTICE_TYPES = new Set(["lsp-late-diagnostic", "mid-run-todo-nudge"]);
+
 /** Increment/decrement a duplicate counter, dropping it at zero. */
 function bumpCount(map, key, delta) {
   const next = (map.get(key) || 0) + delta;
@@ -862,6 +883,7 @@ export class MessageRenderer {
    * @returns {HTMLElement|null} the appended element, or null when skipped
    */
   renderNotice({ id = null, customType = "", content = null, label = null } = {}) {
+    if (AGENT_ONLY_NOTICE_TYPES.has(String(customType || ""))) return null;
     const text = noticeText(content);
     if (!text) return null;
     if (typeof id === "string" && id && this.findNoticeElement(id)) return null;
