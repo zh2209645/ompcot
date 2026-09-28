@@ -42,6 +42,16 @@ export function isSlashCommand(message) {
 }
 
 /**
+ * True when a slash command is omp's own manual compaction (`/compact` and its
+ * `remote` / `snapcompact` / focus-argument forms). The window watches the
+ * runtime's answer for it: a declined pass is silent, and only a frame (or the
+ * absence of one) says so — see `public/compaction-pending.js`.
+ */
+export function isCompactionCommand(message) {
+  return typeof message === "string" && /^\/compact(?:\s|$)/.test(message.trim());
+}
+
+/**
  * Slash-popup context for the current composer state. Returns null when the
  * popup must not appear: text does not start with `/`, or the caret has moved
  * past the first whitespace-delimited token (i.e. the user is typing args).

@@ -13,8 +13,6 @@ describe("isTranscriptEvent", () => {
       "tool_execution_start",
       "tool_execution_update",
       "tool_execution_end",
-      "auto_compaction_start",
-      "auto_compaction_end",
       "extension_error",
     ]) {
       expect(isTranscriptEvent(type)).toBe(true);
@@ -33,6 +31,13 @@ describe("isTranscriptEvent", () => {
       "session_branch",
       "session_name",
       "agents_changed",
+      // The compaction frames carry the *global* compaction state (the
+      // header's "compacting" label and dot); only the transcript line they
+      // draw is surface-owned, and the handlers guard that write themselves.
+      // Dropping the frames whole left a compaction that ran during a peek
+      // completely invisible — and its start line stuck on screen.
+      "auto_compaction_start",
+      "auto_compaction_end",
     ]) {
       expect(isTranscriptEvent(type)).toBe(false);
     }

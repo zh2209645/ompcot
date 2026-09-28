@@ -1456,6 +1456,12 @@ body {
   animation: spin 1s linear infinite;
 }
 
+/* The label sits next to the spinner and is rewritten in place while the pass
+   runs (elapsed seconds) and when it lands (outcome). */
+.compaction-label {
+  margin-left: 6px;
+}
+
 .compaction-done {
   color: var(--accent);
   opacity: 0.8;
@@ -1467,6 +1473,14 @@ body {
 .compaction-failed {
   color: var(--text-secondary);
   opacity: 1;
+}
+
+/* A pass that ended without touching the context (skipped: nothing to
+   compact; aborted by the user). Same reading as `.compaction-failed`: no
+   spinner, no completion color. */
+.compaction-skipped {
+  color: var(--text-secondary);
+  opacity: 0.8;
 }
 
 @keyframes spin {

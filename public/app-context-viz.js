@@ -17,6 +17,17 @@
  */
 import { t } from "./i18n.js";
 
+/**
+ * Compact token count for the context pill and the popover's legend
+ * (12_345 → "12.3k"). Shared with the compaction notice's before/after line in
+ * app.js so both spellings are the same one.
+ */
+export function formatTokenCount(n) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 export function setupContextViz({
   tokenUsageEl,
   contextViz,
@@ -27,11 +38,7 @@ export function setupContextViz({
   getUsage,
   getContextWindowSize,
 }) {
-  function formatTokens(n) {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-    return String(n);
-  }
+  const formatTokens = formatTokenCount;
 
   function isOpen() {
     return !contextViz.classList.contains("hidden");

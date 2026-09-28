@@ -1,7 +1,11 @@
 // @vitest-environment node
 
 import { describe, expect, it, vi } from "vitest";
-import { type GuiCompactOptions, startGuiCompaction } from "./embedded-server.ts";
+import {
+  type GuiCompactOptions,
+  nextCompactionLifecycle,
+  startGuiCompaction,
+} from "./embedded-server.ts";
 
 function flush(): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -95,5 +99,93 @@ describe("startGuiCompaction", () => {
 
     expect(compact.mock.calls[0][0]).toBeTypeOf("object");
     expect(report).toHaveBeenCalledWith({ summary: "s" });
+  });
+});
+
+describe("nextCompactionLifecycle", () => {
+  it("starts on the automatic path's own frame and ends on it", () => {
+    const started = nextCompactionLifecycle(null, { kind: "auto-start", action: "context-full" });
+    expect(started.state).toEqual({ source: "auto", action: "context-full" });
+    expect(started.emit).toBe("start");
+
+    const ended = nextCompactionLifecycle(started.state, {
+      kind: "auto-end",
+      action: "context-full",
+    });
+    expect(ended.state).toBeNull();
+    expect(ended.emit).toBe("end");
+  });
+
+  it("starts a manual compaction from the summarize step, once", () => {
+    // omp's own `/compact` builtin reaches the host through the RPC prompt
+    // frame: it emits no `auto_compaction_start`, so the summarize step (which
+    // it does emit, inside the long part of the pass) is the first honest
+    // signal — and the GUI must see it.
+    const first = nextCompactionLifecycle(null, { kind: "summarize" });
+    expect(first.state).toEqual({ source: "manual" });
+    expect(first.emit).toBe("start");
+
+    // A method fallback summarizes again inside the same pass; that is not a
+    // second compaction.
+    const second = nextCompactionLifecycle(first.state, { kind: "summarize" });
+    expect(second.state).toEqual({ source: "manual" });
+    expect(second.emit).toBeNull();
+
+    // The auto path's summarize is covered by its own start frame.
+    const autoSummarize = nextCompactionLifecycle(
+      { source: "auto", action: "context-full" },
+      { kind: "summarize" },
+    );
+    expect(autoSummarize.emit).toBeNull();
+  });
+
+  it("ends a manual compaction on the commit", () => {
+    // `session_compact` is the only end signal the builtin path gets, and the
+    // commit is also where the transcript must be repainted: the summarized
+    // stretch collapses into the compaction item.
+    const committed = nextCompactionLifecycle({ source: "manual" }, { kind: "commit" });
+    expect(committed.state).toBeNull();
+    expect(committed.emit).toBe("snapshot+end");
+  });
+
+  it("converges on a commit it never saw start", () => {
+    // An extension reload mid-pass loses the start frame; the commit still has
+    // to repaint and report, or the window shows a branch the session left.
+    const committed = nextCompactionLifecycle(null, { kind: "commit" });
+    expect(committed.state).toBeNull();
+    expect(committed.emit).toBe("snapshot+end");
+  });
+
+  it("lets the auto and gui paths keep their own end", () => {
+    // The auto path's `auto_compaction_end` follows the commit, and the GUI
+    // command reports from its promise; the commit only adds the repaint — and
+    // marks itself seen, so the GUI command does not repaint a second time.
+    const autoCommitted = nextCompactionLifecycle(
+      { source: "auto", action: "soft" },
+      { kind: "commit" },
+    );
+    expect(autoCommitted.state).toEqual({ source: "auto", action: "soft" });
+    expect(autoCommitted.emit).toBe("snapshot");
+
+    const guiStarted = nextCompactionLifecycle(null, { kind: "gui-start" });
+    expect(guiStarted).toEqual({ state: { source: "gui" }, emit: "start" });
+    const guiCommitted = nextCompactionLifecycle(guiStarted.state, { kind: "commit" });
+    expect(guiCommitted.state).toEqual({ source: "gui", committed: true });
+    expect(guiCommitted.emit).toBe("snapshot");
+    const guiEnded = nextCompactionLifecycle(guiCommitted.state, { kind: "gui-end" });
+    expect(guiEnded.state).toBeNull();
+    expect(guiEnded.emit).toBe("end");
+  });
+
+  it("repaints for a shake, which rewrites the branch without a commit", () => {
+    // `/shake elide` drops tool results from the session's entries in place:
+    // no compaction entry, so no `session_compact` follows — the end frame is
+    // the only place the repaint can ride.
+    const ended = nextCompactionLifecycle(
+      { source: "auto", action: "shake" },
+      { kind: "auto-end", action: "shake" },
+    );
+    expect(ended.state).toBeNull();
+    expect(ended.emit).toBe("snapshot+end");
   });
 });

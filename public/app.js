@@ -6,14 +6,16 @@ import { createAccountUsage, createOAuthLogin } from "./account-usage.js";
 import { createAgentHub } from "./agent-hub.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { pageForKey } from "./agent-settings-pages.js";
-import { setupContextViz } from "./app-context-viz.js";
+import { formatTokenCount, setupContextViz } from "./app-context-viz.js";
 import { setupSettingsEditors } from "./app-settings-editors.js";
 import { setupSettingsToggles } from "./app-settings-toggles.js";
 import { createAppUpdater } from "./app-updater.js";
 import { setupVoiceInput } from "./app-voice-input.js";
+import { createPendingCompaction } from "./compaction-pending.js";
 import {
   createComposerCommands,
   createComposerQueue,
+  isCompactionCommand,
   isSlashCommand,
   isSlashStreamRejection,
 } from "./composer-commands.js";
@@ -1190,7 +1192,7 @@ function handleRPCEvent(event) {
       handleToolExecutionEnd(event);
       break;
     case "auto_compaction_start":
-      handleCompactionStart();
+      handleCompactionStart(event);
       break;
     case "auto_compaction_end":
       handleCompactionEnd(event);
@@ -1236,24 +1238,162 @@ function handleBackgroundRPCEvent(sessionFile, event) {
   }
 }
 
-function handleCompactionStart() {
-  const el = document.createElement("div");
-  el.className = "system-message compaction-message";
-  el.id = "compaction-indicator";
-  const spinner = document.createElement("span");
-  spinner.className = "compaction-spinner";
-  spinner.textContent = "⟳";
-  el.append(spinner, ` ${t("status.compacting")}`);
-  messagesContainer.appendChild(el);
-  // The compaction indicator is the newest item: keep it in view the same way
-  // every other append does (the previous bare `scrollToBottom()` was an
-  // undefined reference — the handler threw and never scrolled).
-  messageRenderer.scrollToBottom();
+/**
+ * The compaction this window believes is in flight (null when none is).
+ *
+ * Compaction is a black box between the start frame and the outcome: omp
+ * aborts the running agent first, so the transcript can go completely silent
+ * for a pass (a remote summarizer took tens of seconds in the reported case).
+ * The header therefore carries the state — label plus the breathing dot — and
+ * it is deliberately *not* part of the transcript surface, so a read-only peek
+ * cannot hide it. `startedAt` drives the elapsed-seconds line: a static
+ * "compacting" looks the same as a frozen one.
+ */
+let compactionActive = null;
+let compactionTicker = null;
+
+/**
+ * A `/compact` this window dispatched but that no compaction frame has
+ * acknowledged yet (see `public/compaction-pending.js` for why the window is
+ * needed at all). A real pass replaces the pending state with its own start
+ * frame; if none arrives the command declined, and the state ends as a skip
+ * instead of being left hanging — or guessed as a success.
+ */
+const pendingCompaction = createPendingCompaction({
+  onStart: () => handleCompactionStart({ pending: true }),
+  onSkip: () => {
+    if (!compactionActive?.pending) return; // a real pass took over
+    handleCompactionEnd({ skipped: true });
+  },
+});
+
+/** i18n keys for the compaction methods a start frame can name. */
+const COMPACTION_ACTION_KEYS = {
+  remote: "ctx.compactActionRemote",
+  snapcompact: "ctx.compactActionSnapcompact",
+  handoff: "ctx.compactActionHandoff",
+  shake: "ctx.compactActionShake",
+};
+
+/** The indicator's line: what is running, and for how long. */
+function compactionProgressLabel() {
+  const seconds = compactionActive
+    ? Math.max(0, Math.round((Date.now() - compactionActive.startedAt) / 1000))
+    : 0;
+  const tagKey = compactionActive ? COMPACTION_ACTION_KEYS[compactionActive.action] : "";
+  return tagKey
+    ? t("ctx.compactingForAction", { action: t(tagKey), seconds })
+    : t("ctx.compactingFor", { seconds });
 }
 
-function handleCompactionEnd(event) {
+function setCompactionLabel(el, text) {
+  const label = el?.querySelector(".compaction-label");
+  if (label && label.textContent !== text) label.textContent = text;
+}
+
+/**
+ * One indicator per compaction. Repeated start frames — the host's own start
+ * after this server's, a method fallback inside one pass, a second click —
+ * update the line instead of appending a second one, and a repaint that
+ * detached the element (a snapshot, a session swap) gets it back only while
+ * the pass is still running.
+ */
+function renderCompactionIndicator() {
+  let el = document.getElementById("compaction-indicator");
+  if (!el?.isConnected) {
+    el = document.createElement("div");
+    el.className = "system-message compaction-message";
+    el.id = "compaction-indicator";
+    const spinner = document.createElement("span");
+    spinner.className = "compaction-spinner";
+    spinner.textContent = "⟳";
+    const label = document.createElement("span");
+    label.className = "compaction-label";
+    el.append(spinner, label);
+    messagesContainer.appendChild(el);
+    // The compaction indicator is the newest item: keep it in view the same way
+    // every other append does (the previous bare `scrollToBottom()` was an
+    // undefined reference — the handler threw and never scrolled).
+    messageRenderer.scrollToBottom();
+  }
+  el.classList.remove("compaction-failed", "compaction-done", "compaction-skipped");
+  setCompactionLabel(el, compactionProgressLabel());
+}
+
+function startCompactionTicker() {
+  if (compactionTicker) return;
+  compactionTicker = setInterval(() => {
+    const el = document.getElementById("compaction-indicator");
+    // A repaint (a snapshot, a session swap) can detach the element mid-pass;
+    // the pass itself is not over, and the header keeps saying so.
+    if (!compactionActive || !el?.isConnected) {
+      stopCompactionTicker();
+      return;
+    }
+    setCompactionLabel(el, compactionProgressLabel());
+  }, 1000);
+}
+
+function stopCompactionTicker() {
+  if (compactionTicker) {
+    clearInterval(compactionTicker);
+    compactionTicker = null;
+  }
+}
+
+/** The header goes back to whatever is true now: a run that survived the
+    compaction (its continuation) keeps the streaming state. */
+function restoreStatusAfterCompaction() {
+  setStatusIndicatorState(
+    state.isStreaming
+      ? "streaming"
+      : lastConnectionStatus === "disconnected"
+        ? "disconnected"
+        : "connected",
+  );
+  // Don't clobber a live transient status from another actor (F11 rule).
+  if (!statusRevertTimer) setStatusText(authoritativeStatusText());
+}
+
+function handleCompactionStart(event = null) {
+  const pending = event?.pending === true;
+  compactionActive = {
+    action: typeof event?.action === "string" ? event.action : "",
+    startedAt: Date.now(),
+    pending,
+  };
+  // A frame-driven start is the runtime's own word that this pass is real: the
+  // pending window (a dispatched command nobody acknowledged) is over, and a
+  // skip must not follow the pass it was watching for.
+  if (!pending) pendingCompaction.settle();
+  // Authoritative write — a compaction pauses the run, and this state must
+  // outlast any transient status (it is the only feedback while it runs).
+  clearTransientStatusRevert();
+  setStatusIndicatorState("streaming");
+  setStatusText(t("status.compacting"));
+  // The header is not part of the transcript surface; the indicator line is,
+  // so a read-only peek must not receive it.
+  if (!transcriptView.active) renderCompactionIndicator();
+  startCompactionTicker();
+}
+
+function handleCompactionEnd(event = null) {
   const indicator = document.getElementById("compaction-indicator");
-  const error = typeof event?.error === "string" ? event.error : "";
+  // Two frame shapes land here: this workspace's own `compact` command reports
+  // `error`, while the host's `auto_compaction_end` carries `errorMessage`.
+  const error =
+    typeof event?.error === "string" && event.error
+      ? event.error
+      : typeof event?.errorMessage === "string"
+        ? event.errorMessage
+        : "";
+  // The pill's "before" is the last request's size; the frame's post-compaction
+  // usage overwrites it below.
+  const tokensBefore = lastInputTokens;
+  compactionActive = null;
+  pendingCompaction.settle();
+  stopCompactionTicker();
+  restoreStatusAfterCompaction();
   if (error) {
     // A compaction can end without compacting: "Already compacted" and
     // "Nothing to compact (session too small)" are how the runtime declines a
@@ -1261,22 +1401,40 @@ function handleCompactionEnd(event) {
     // the transcript, the pill and the ≥80% compact button (which hides itself
     // on click) must all stay where they were — only the outcome line moves.
     if (indicator) {
-      indicator.textContent = t("ctx.compactFailed", { error });
+      setCompactionLabel(indicator, t("ctx.compactFailed", { error }));
       indicator.classList.add("compaction-failed");
     }
     updateTokenUsage();
     return;
   }
-  if (indicator) {
-    indicator.textContent = `✓ ${t("ctx.compacted")}`;
-    indicator.classList.add("compaction-done");
+  // A skipped pass ("nothing to compact") and an aborted one count as *ended*,
+  // never as compacted: the context is exactly what it was.
+  const unchanged = event?.skipped === true || event?.aborted === true;
+  const applied = applyContextUsage(event?.contextUsage);
+  let line = "";
+  if (event?.skipped) line = t("ctx.compactSkipped");
+  else if (event?.aborted) line = t("ctx.compactAborted");
+  else line = `✓ ${t("ctx.compacted")}`;
+  if (!unchanged && applied && tokensBefore > 0) {
+    line += ` · ${formatTokenCount(tokensBefore)} → ${formatTokenCount(lastInputTokens)}`;
+  }
+  if (indicator && !transcriptView.active) {
+    // The ticking label is replaced by the outcome, in place.
+    setCompactionLabel(indicator, line);
+    indicator.classList.add(unchanged ? "compaction-skipped" : "compaction-done");
+  }
+  if (unchanged) {
+    // The context did not move: keep the numbers on screen rather than blanking
+    // a pill that is still telling the truth.
+    updateTokenUsage();
+    return;
   }
   // The runtime reports the *post*-compaction size on the frame; the snapshot
   // that arrives just before it repainted the transcript from the kept tail,
   // whose last assistant usage is still the pre-compaction number. Prefer the
   // live value; without one, blank the stale numbers (the next message sets
   // them) rather than showing a percentage the context no longer has.
-  if (!applyContextUsage(event.contextUsage)) {
+  if (!applied) {
     lastInputTokens = 0;
   }
   // `lastUsage` is the pill's *breakdown* (cache read / input) and belongs to
@@ -2626,10 +2784,16 @@ function sendSlashViaUpstream(message, { timeoutMs = 30000 } = {}) {
       if ((detail.requestId ?? detail.id) !== requestId) return;
       clearTimeout(timer);
       wsClient.removeEventListener("commandResponse", onResponse);
+      const ok = detail.success !== false;
+      // A `/compact` the runtime accepted but never acknowledged with a
+      // compaction frame is the builtin's silent no-op (see
+      // public/compaction-pending.js): watch for it, so "the command did
+      // nothing" reads as a skip instead of as nothing at all.
+      if (ok && isCompactionCommand(message)) pendingCompaction.arm();
       resolve(
-        detail.success === false
-          ? { ok: false, error: String(detail.error || "command failed") }
-          : { ok: true, data: detail.data ?? null },
+        ok
+          ? { ok: true, data: detail.data ?? null }
+          : { ok: false, error: String(detail.error || "command failed") },
       );
     }
     wsClient.addEventListener("commandResponse", onResponse);
@@ -4466,9 +4630,11 @@ function setStatusIndicatorState(state) {
   if (statusIndicator.className !== next) statusIndicator.className = next;
 }
 
-/** The status the label should show right now: a run in flight wins over the
-    connection state, which in turn wins over the ambient "Connected" text. */
+/** The status the label should show right now: a compaction (which pauses the
+    run) wins over a run in flight, which wins over the connection state, which
+    in turn wins over the ambient "Connected" text. */
 function authoritativeStatusText() {
+  if (compactionActive) return t("status.compacting");
   if (state.isStreaming) return t("status.working");
   if (lastConnectionStatus === "disconnected") return t("status.disconnected");
   if (tailscaleUrl) return t("status.connectedTs");
@@ -4503,11 +4669,11 @@ function updateUI() {
 
   composerCard.classList.toggle("streaming", isStreaming);
 
-  if (isStreaming) {
+  if (isStreaming || compactionActive) {
     // Authoritative write — cancels a pending transient-status revert (F11).
     clearTransientStatusRevert();
     setStatusIndicatorState("streaming");
-    setStatusText(t("status.working"));
+    setStatusText(compactionActive ? t("status.compacting") : t("status.working"));
   } else {
     setStatusIndicatorState(lastConnectionStatus === "disconnected" ? "disconnected" : "connected");
     // Don't clobber a live transient status from a routine updateUI pass —

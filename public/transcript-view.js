@@ -30,6 +30,14 @@
  * the dot never appeared, and the 5s activity reconcile then treated the
  * window's own process as idle, because the local flag drives that verdict.
  * `agent_end` stays unfiltered for the same reason in the other direction.
+ *
+ * The compaction frames are absent for a third reason: they carry the *global*
+ * compaction state — the header's label and dot say "the runtime is busy
+ * compacting", which is not part of the peeking surface — and only the
+ * transcript line they draw is. Their handlers therefore guard their own
+ * `#messages` write with `transcriptView.active` instead of being dropped whole:
+ * a compaction that runs while the user reads a subagent must still be visible
+ * (and endable) in the header, and it must never paint into the peek.
  */
 const TRANSCRIPT_EVENTS = new Set([
   "message_start",
@@ -38,8 +46,6 @@ const TRANSCRIPT_EVENTS = new Set([
   "tool_execution_start",
   "tool_execution_update",
   "tool_execution_end",
-  "auto_compaction_start",
-  "auto_compaction_end",
   "extension_error",
   "session_notice",
 ]);

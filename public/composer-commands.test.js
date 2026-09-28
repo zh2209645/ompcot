@@ -4,6 +4,7 @@ import {
   createComposerCommands,
   createComposerQueue,
   filterSlashCommands,
+  isCompactionCommand,
   isSlashCommand,
   isSlashStreamRejection,
   resolveDelivery,
@@ -146,6 +147,20 @@ describe("slash context + filtering helpers", () => {
     expect(isSlashCommand(" /help")).toBe(true);
     expect(isSlashCommand("hello /help")).toBe(false);
     expect(isSlashCommand("")).toBe(false);
+  });
+
+  test("detects the manual compaction command and nothing that resembles it", () => {
+    // The pending-compaction window arms on exactly these: a declined
+    // `/compact` is silent, so a false positive would invent a skip and a
+    // false negative would leave the user with no feedback at all.
+    expect(isCompactionCommand("/compact")).toBe(true);
+    expect(isCompactionCommand("  /compact remote keep the API notes ")).toBe(true);
+    expect(isCompactionCommand("/compact snapcompact")).toBe(true);
+    expect(isCompactionCommand("/compacted")).toBe(false);
+    expect(isCompactionCommand("/compact:")).toBe(false);
+    expect(isCompactionCommand("please /compact")).toBe(false);
+    expect(isCompactionCommand("")).toBe(false);
+    expect(isCompactionCommand(null)).toBe(false);
   });
 });
 

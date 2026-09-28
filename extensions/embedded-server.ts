@@ -622,6 +622,86 @@ export interface GuiCompactOptions {
   onError?: (error: unknown) => void;
 }
 
+/** Which composer this compaction came from. */
+export type CompactionSource = "auto" | "gui" | "manual";
+
+/** The compaction a process believes is in flight. */
+export interface CompactionState {
+  source: CompactionSource;
+  action?: string;
+  /** True once `session_compact` reported this pass's entry. */
+  committed?: boolean;
+}
+
+/** What the frame sequence must publish next. */
+export type CompactionFrame = "start" | "end" | "snapshot" | "snapshot+end" | null;
+
+/** Steps the host's events and this server's own command produce. */
+export type CompactionStep =
+  | { kind: "auto-start"; action?: string }
+  | { kind: "auto-end"; action?: string }
+  | { kind: "gui-start" }
+  | { kind: "summarize" }
+  | { kind: "gui-end" }
+  | { kind: "commit" };
+
+/**
+ * Advance the compaction lifecycle and say which frames must go out.
+ *
+ * omp's event surface covers only *automatic* compaction: `auto_compaction_*`
+ * is emitted by `runAutoCompaction` and by the shake path, while a manual
+ * `AgentSession.compact` — the GUI's `compact` command and omp's own
+ * `/compact` builtin driven through the RPC prompt frame — emits neither. The
+ * seams that do fire for every manual pass are `session.compacting` (inside the
+ * summarize step, i.e. the long part) and `session_compact` (once the entry
+ * commits). This state machine folds all four into one start/end pair per
+ * compaction, so the GUI can always show "compacting" while it runs and an
+ * outcome when it stops:
+ *
+ * - `summarize` only starts a compaction when nothing published a start: it
+ *   runs for the auto path too (whose start frame is already out), and a method
+ *   fallback inside one `compact()` call summarizes more than once.
+ * - `commit` repaints for every path — the summarized stretch collapses into
+ *   the compaction item, so a transcript kept as-is no longer matches the
+ *   session — and ends the compaction for the paths whose end nobody else
+ *   reports (the builtin's `/compact`, and a commit with no start seen at all,
+ *   e.g. an extension reload mid-pass).
+ * - `auto-end` for a shake carries the repaint too: a shake rewrites the
+ *   branch's entries (eliding tool results) without committing a compaction
+ *   entry, so no `session_compact` follows it.
+ */
+export function nextCompactionLifecycle(
+  state: CompactionState | null,
+  step: CompactionStep,
+): { state: CompactionState | null; emit: CompactionFrame } {
+  switch (step.kind) {
+    case "auto-start":
+      return {
+        state: { source: "auto", ...(step.action ? { action: step.action } : {}) },
+        emit: "start",
+      };
+    case "gui-start":
+      return { state: { source: "gui" }, emit: "start" };
+    case "summarize":
+      if (state) return { state, emit: null };
+      return { state: { source: "manual" }, emit: "start" };
+    case "auto-end":
+      return { state: null, emit: step.action === "shake" ? "snapshot+end" : "end" };
+    case "gui-end":
+      return { state: null, emit: "end" };
+    case "commit":
+      if (!state || state.source === "manual") return { state: null, emit: "snapshot+end" };
+      // The auto path's own end frame follows the commit, and the GUI command
+      // reports its outcome from the promise: both still own their "end".
+      // `committed` is what tells the GUI command that the repaint has already
+      // gone out (the command's fallback repaint would be a second one).
+      return {
+        state: state.source === "gui" ? { ...state, committed: true } : state,
+        emit: "snapshot",
+      };
+  }
+}
+
 /** Terminal outcome of a GUI-initiated manual compaction. */
 export interface GuiCompactOutcome {
   summary?: string;
@@ -2288,6 +2368,11 @@ export default function (omp: ExtensionAPI) {
 
   // Store latest context reference for use in command handlers
   let latestCtx: ExtensionContext | null = null;
+  // The compaction this process believes is in flight (see
+  // nextCompactionLifecycle): `auto_compaction_*` covers only the automatic
+  // path, so the manual ones are tracked from `session.compacting` /
+  // `session_compact` / this server's own `compact` command.
+  let activeCompaction: CompactionState | null = null;
   // True once this instance's session_start revealed we are bound to a
   // subagent/advisor child session (see isChildAgentSession). Child
   // instances must not touch any process-scoped surface.
@@ -3171,6 +3256,26 @@ export default function (omp: ExtensionAPI) {
         // forwardSessionNotices).
         if (NOTICE_CHECK_EVENTS[eventType]) forwardSessionNotices(ctx);
 
+        // Compaction bookkeeping. The `auto_*` pair is the *automatic* path's
+        // own frame (and the shake's); the state machine decides whether the
+        // normal forward below is also the end of a compaction, and the
+        // repaint a rewritten branch needs must land *before* that end frame,
+        // whose live `contextUsage` is the pill's last word.
+        if (eventType === "auto_compaction_start" || eventType === "auto_compaction_end") {
+          const raw = event as Record<string, unknown>;
+          const action = typeof raw.action === "string" ? raw.action : undefined;
+          const next = nextCompactionLifecycle(
+            activeCompaction,
+            eventType === "auto_compaction_start"
+              ? { kind: "auto-start", action }
+              : { kind: "auto-end", action },
+          );
+          activeCompaction = next.state;
+          if (next.emit === "snapshot" || next.emit === "snapshot+end") {
+            await broadcastSnapshot(ctx);
+          }
+        }
+
         // Forward event to all connected browser clients
         // Wrap in { type: "event", event: ... } to match the existing frontend
         // protocol. Message events additionally carry `entryId`, resolved from
@@ -3197,12 +3302,66 @@ export default function (omp: ExtensionAPI) {
           event: {
             type: eventType,
             ...rawEvent,
+            // The runtime's live context usage, for the compaction end frames:
+            // after a commit it is the *post*-compaction size, while the
+            // repaint that precedes the frame derives its number from the kept
+            // tail's last assistant message (still the pre-compaction one).
+            ...(eventType === "auto_compaction_end" ? { contextUsage: ctx.getContextUsage() } : {}),
             ...(entryId ? { entryId } : {}),
           },
         });
       },
     );
   }
+
+  // ── Compaction lifecycle ────────────────────────────────────────────
+  //
+  // `session.compacting` fires inside the summarize step of *every*
+  // compaction — including omp's own `/compact` builtin, which reaches the
+  // host through the RPC prompt frame and is invisible to this server
+  // otherwise (no `auto_compaction_start`, no promise of ours to await). The
+  // summarize step is the long part, so it is where a "compacting" indicator
+  // has to come from. The handler must stay inert (it returns no overrides)
+  // and must never throw: it runs inside the host's compaction.
+  omp.on("session.compacting", async (_event, ctx) => {
+    try {
+      rememberCtx(ctx);
+      if (childAgentInstance) return undefined;
+      const next = nextCompactionLifecycle(activeCompaction, { kind: "summarize" });
+      activeCompaction = next.state;
+      if (next.emit === "start") {
+        broadcast({ type: "event", event: { type: "auto_compaction_start" } });
+      }
+    } catch (err: unknown) {
+      console.error("[Embedded] compaction start broadcast failed:", errMessage(err));
+    }
+    return undefined;
+  });
+
+  // `session_compact` fires once a compaction entry is committed — for every
+  // path, automatic and manual. It is the builtin `/compact`'s only end
+  // signal, and the repaint every path needs (the summarized stretch collapses
+  // into the item, so the transcript on screen no longer matches the branch).
+  omp.on("session_compact", async (_event, ctx) => {
+    try {
+      rememberCtx(ctx);
+      if (childAgentInstance) return;
+      const next = nextCompactionLifecycle(activeCompaction, { kind: "commit" });
+      activeCompaction = next.state;
+      await broadcastSnapshot(ctx);
+      if (next.emit === "snapshot+end") {
+        broadcast({
+          type: "event",
+          event: {
+            type: "auto_compaction_end",
+            contextUsage: ctx.getContextUsage(),
+          },
+        });
+      }
+    } catch (err: unknown) {
+      console.error("[Embedded] compaction commit broadcast failed:", errMessage(err));
+    }
+  });
 
   // Also capture context from session events
   // Auto-title: collect user messages and generate a title after a few turns
@@ -3368,6 +3527,25 @@ export default function (omp: ExtensionAPI) {
       isStreaming: !ctx.isIdle(),
       contextUsage,
     };
+  }
+
+  /**
+   * Re-broadcast the session snapshot, swallowing a failure.
+   *
+   * A committed compaction (and a shake, which rewrites the branch in place)
+   * leaves the transcript on every screen describing a branch the session no
+   * longer has: the summarized stretch must collapse into the compaction item
+   * and an elided tool result must disappear. The repaint is the same
+   * `mirror_sync` a session swap sends, and its failure is not worth breaking
+   * the frame sequence over — the next repaint converges.
+   */
+  async function broadcastSnapshot(ctx: ExtensionContext): Promise<void> {
+    try {
+      const snapshot = await buildStateSnapshot(ctx);
+      if (snapshot) broadcast(snapshot);
+    } catch (err: unknown) {
+      console.error("[Embedded] state snapshot broadcast failed:", errMessage(err));
+    }
   }
 
   // ═══════════════════════════════════════
@@ -4138,10 +4316,19 @@ export default function (omp: ExtensionAPI) {
           // app's event switch, so a bare `auto_compaction_start` fell into its
           // "Unknown message type" branch and the GUI showed nothing at all for
           // a manual compaction.
+          activeCompaction = nextCompactionLifecycle(activeCompaction, { kind: "gui-start" }).state;
           broadcast({ type: "event", event: { type: "auto_compaction_start" } });
           startGuiCompaction(
             (instructionsOrOptions) => ctx.compact(instructionsOrOptions),
             (outcome) => {
+              // A commit means the compaction landed: `session_compact` already
+              // re-broadcast the snapshot that collapses the summarized stretch
+              // into the transcript item, so only the outcome is left to send.
+              const committed =
+                activeCompaction?.source === "gui" && activeCompaction.committed === true;
+              activeCompaction = nextCompactionLifecycle(activeCompaction, {
+                kind: "gui-end",
+              }).state;
               const report = () => {
                 broadcast({
                   type: "event",
@@ -4161,23 +4348,14 @@ export default function (omp: ExtensionAPI) {
                 report();
                 return;
               }
-              // A committed compaction rewrites the branch (the summary replaces
-              // the summarized history), so the transcript on screen no longer
-              // matches the session: broadcast the fresh snapshot — the same one
-              // a session swap or a rewind sends — and only then the terminal
-              // frame, so its usage wins over the repaint's history-derived one.
-              void buildStateSnapshot(ctx)
-                .catch((err: unknown) => {
-                  console.error(
-                    "[Embedded] compaction snapshot broadcast failed:",
-                    errMessage(err),
-                  );
-                  return null;
-                })
-                .then((snapshot) => {
-                  if (snapshot) broadcast(snapshot);
-                  report();
-                });
+              // No commit seen (a success the process did not observe): the
+              // transcript on screen still shows the summarized branch, so the
+              // repaint goes out here instead.
+              if (committed) {
+                report();
+                return;
+              }
+              void broadcastSnapshot(ctx).then(report);
             },
             typeof command.customInstructions === "string" ? command.customInstructions : undefined,
           );
