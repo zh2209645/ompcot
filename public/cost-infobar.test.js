@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  MODEL_CHART_PALETTE,
   renderCostInfobar,
   renderInfobarModels,
   renderInfobarOverview,
   renderInfobarProjects,
   renderInfobarToolCost,
   renderInfobarUsage,
+  TOOL_CHART_PALETTE,
 } from "./cost-infobar.js";
 
 describe("cost infobar renderers", () => {
@@ -117,7 +119,9 @@ describe("cost infobar renderers", () => {
       expect(models.querySelectorAll(".infobar-model-legend-row")).toHaveLength(2);
       expect(projects.querySelector(".infobar-projects-chart")).not.toBeNull();
       expect(usage.textContent).toContain("Total Tokens");
-      expect(usage.textContent).toContain("3.6K");
+      // Intl compact is locale-dependent — "3.6K" in en-US, "3550" in zh-CN
+      // (this machine) — so assert the total rendered, not its spelling.
+      expect(usage.textContent).toMatch(/Total Tokens\s+(?:3\.6K|3[,.']?550)/);
       expect(toolCost.textContent).toContain("read_file");
       expect(toolCostMeta.textContent).toContain("2 tracked");
     } finally {
@@ -174,9 +178,15 @@ describe("cost infobar renderers", () => {
 
       expect(chartCalls).toHaveLength(1);
       const datasets = chartCalls[0].data.datasets;
-      expect(datasets[0].backgroundColor).toBe("#4f8ff7");
-      expect(datasets[1].backgroundColor).toBe("#67c587");
-      expect(datasets[2].backgroundColor).toBe("#f3a64f");
+      // Chart bars and legend dots read the same palette (they used to be a
+      // JS list here and a second, drifted copy in cost.css).
+      expect(datasets.map((dataset) => dataset.backgroundColor)).toEqual(MODEL_CHART_PALETTE);
+      const dots = Array.from(
+        models.querySelectorAll(".infobar-model-legend-row .infobar-tool-legend-dot"),
+      );
+      expect(dots.map((dot) => dot.getAttribute("style"))).toEqual(
+        MODEL_CHART_PALETTE.map((color) => `background:${color}`),
+      );
       expect(datasets[0].borderRadius({ dataIndex: 0 })).toEqual({
         topLeft: 6,
         topRight: 6,
@@ -184,6 +194,88 @@ describe("cost infobar renderers", () => {
         bottomRight: 6,
       });
       expect(datasets[1].borderRadius({ dataIndex: 0 })).toBe(0);
+    } finally {
+      window.Chart = OriginalChart;
+    }
+  });
+
+  it("charts the top three models, one palette colour each", () => {
+    const models = document.createElement("div");
+    const chartCalls = [];
+    const OriginalChart = window.Chart;
+    window.Chart = function MockChart(_canvas, config) {
+      chartCalls.push(config);
+      return { destroy() {} };
+    };
+
+    try {
+      // The summary caps the list at three (`buildModelSummary`), which is
+      // exactly the palette's length — the legend rows and the stacked series
+      // stay in step, one colour each.
+      renderInfobarModels(
+        models,
+        ["a", "b", "c", "d"].map((name, index) => ({
+          name: `model-${name}`,
+          cost: 4 - index,
+          count: 1,
+          fraction: 0.25 * (4 - index),
+        })),
+        {
+          sessions: ["a", "b", "c", "d"].map((name, index) => ({
+            model: `model-${name}`,
+            time: `2026-06-0${index + 1}T10:00:00.000Z`,
+            totalTokens: 1000,
+            inputTokens: 600,
+            outputTokens: 400,
+          })),
+        },
+      );
+
+      const colors = chartCalls[0].data.datasets.map((dataset) => dataset.backgroundColor);
+      expect(colors).toEqual(MODEL_CHART_PALETTE);
+      const dots = Array.from(
+        models.querySelectorAll(".infobar-model-legend-row .infobar-tool-legend-dot"),
+      );
+      expect(dots).toHaveLength(MODEL_CHART_PALETTE.length);
+      expect(dots.map((dot) => dot.getAttribute("style"))).toEqual(
+        MODEL_CHART_PALETTE.map((color) => `background:${color}`),
+      );
+    } finally {
+      window.Chart = OriginalChart;
+    }
+  });
+
+  it("uses the same tool palette for the project ring and its legend dots", () => {
+    const projects = document.createElement("div");
+    const chartCalls = [];
+    const OriginalChart = window.Chart;
+    window.Chart = function MockChart(_canvas, config) {
+      chartCalls.push(config);
+      return { destroy() {} };
+    };
+
+    try {
+      renderInfobarProjects(
+        projects,
+        ["one", "two", "three", "four", "five", "six", "seven"].map((name, index) => ({
+          name,
+          path: `/work/${name}`,
+          cost: 7 - index,
+          sessions: 1,
+          fraction: (7 - index) / 28,
+        })),
+      );
+
+      const colors = chartCalls[0].data.datasets[0].backgroundColor;
+      // The ring (and its legend) shows the top six; the palette wraps inside
+      // that list rather than running out.
+      expect(colors).toEqual(TOOL_CHART_PALETTE);
+      const dots = Array.from(
+        projects.querySelectorAll(".infobar-tool-legend-row .infobar-tool-legend-dot"),
+      );
+      expect(dots.map((dot) => dot.getAttribute("style"))).toEqual(
+        colors.map((color) => `background:${color}`),
+      );
     } finally {
       window.Chart = OriginalChart;
     }

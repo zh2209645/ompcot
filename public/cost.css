@@ -593,32 +593,8 @@ body {
   flex: 0 0 auto;
 }
 
-.infobar-tool-legend-dot[data-tool-color="0"],
-.infobar-model-color-1 {
-  background: #3b82f6;
-}
-
-.infobar-tool-legend-dot[data-tool-color="1"],
-.infobar-model-color-2 {
-  background: #10b981;
-}
-
-.infobar-tool-legend-dot[data-tool-color="2"],
-.infobar-model-color-3 {
-  background: #f59e0b;
-}
-
-.infobar-tool-legend-dot[data-tool-color="3"] {
-  background: #8b5cf6;
-}
-
-.infobar-tool-legend-dot[data-tool-color="4"] {
-  background: #fb7185;
-}
-
-.infobar-tool-legend-dot[data-tool-color="5"] {
-  background: #06b6d4;
-}
+/* Legend dot colours come from the chart palettes in cost-infobar.js (inline
+   `style="background:…"`); a second copy here drifted from them. */
 
 .infobar-tool-legend-title {
   font-size: calc(12px * var(--font-scale));

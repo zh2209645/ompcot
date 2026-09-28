@@ -97,7 +97,7 @@ export function renderInfobarModels(target, rows = [], payload = {}) {
             return `
               <div class="infobar-model-legend-row">
                 <div class="infobar-model-legend-main">
-                  <span class="infobar-tool-legend-dot infobar-model-color-${index + 1}"></span>
+                  <span class="infobar-tool-legend-dot" style="background:${paletteColor(MODEL_CHART_PALETTE, index)}"></span>
                   <span class="infobar-model-legend-name">${escapeHtml(model.name)}</span>
                 </div>
                 <div class="infobar-model-legend-meta">
@@ -135,7 +135,7 @@ export function renderInfobarProjects(target, rows = []) {
               return `
                 <div class="infobar-tool-legend-row">
                   <div class="infobar-tool-legend-main">
-                    <span class="infobar-tool-legend-dot" data-tool-color="${index}"></span>
+                    <span class="infobar-tool-legend-dot" style="background:${paletteColor(TOOL_CHART_PALETTE, index)}"></span>
                     <div>
                       <div class="infobar-tool-legend-title">${escapeHtml(row.name || "unknown")}</div>
                       <div class="infobar-tool-legend-subtitle">${formatInt(row.sessions || 0)} sessions</div>
@@ -195,7 +195,7 @@ export function renderInfobarToolCost(target, usage = {}, metaTarget = null) {
                 return `
                   <div class="infobar-tool-legend-row">
                     <div class="infobar-tool-legend-main">
-                      <span class="infobar-tool-legend-dot" data-tool-color="${index}"></span>
+                      <span class="infobar-tool-legend-dot" style="background:${paletteColor(TOOL_CHART_PALETTE, index)}"></span>
                       <div>
                         <div class="infobar-tool-legend-title">${escapeHtml(row.name || "unknown")}</div>
                         <div class="infobar-tool-legend-subtitle">${formatInt(row.count)} sessions</div>
@@ -474,8 +474,26 @@ function _makeBarGradient(ctx, chartArea, color) {
   return gradient;
 }
 
-function getModelChartPalette() {
-  return ["#3b82f6", "#10b981", "#f59e0b"];
+/**
+ * Chart colours, in series order — the single source for the chart datasets and
+ * the legend dots beside them. The dots used to read a second copy out of
+ * `cost.css`, and the copies drifted: the projects chart drew `#4f8ff7…` bars
+ * next to `#3b82f6…` dots, and a fourth model's dot had no colour at all.
+ * `paletteColor` wraps, so a series list longer than the palette keeps cycling
+ * instead of falling back to Chart.js's default grey.
+ */
+export const MODEL_CHART_PALETTE = ["#3b82f6", "#10b981", "#f59e0b"];
+export const TOOL_CHART_PALETTE = [
+  "#3b82f6",
+  "#10b981",
+  "#f59e0b",
+  "#8b5cf6",
+  "#fb7185",
+  "#06b6d4",
+];
+
+function paletteColor(palette, index) {
+  return palette[((index % palette.length) + palette.length) % palette.length];
 }
 
 function getStackSegmentRadius(seriesList, datasetIndex, dataIndex) {
@@ -508,7 +526,7 @@ function getStackSegmentRadius(seriesList, datasetIndex, dataIndex) {
 
 function renderModelsChart(canvas, modelSummary) {
   if (!canvas || !modelSummary) return;
-  const colors = getModelChartPalette();
+  const colors = MODEL_CHART_PALETTE;
   if (typeof window.Chart === "function") {
     const previous = canvas._modelsChart;
     if (previous && typeof previous.destroy === "function") {
@@ -521,7 +539,7 @@ function renderModelsChart(canvas, modelSummary) {
         datasets: modelSummary.series.map((series, index) => ({
           label: series.name,
           data: series.data,
-          backgroundColor: colors[index] || colors[colors.length - 1],
+          backgroundColor: paletteColor(colors, index),
           borderRadius(context) {
             return getStackSegmentRadius(modelSummary.series, index, context.dataIndex);
           },
@@ -589,15 +607,11 @@ function renderModelsChart(canvas, modelSummary) {
   );
 }
 
-function getToolChartPalette() {
-  return ["#4f8ff7", "#67c587", "#f3a64f", "#8c7cf7", "#ef6b73", "#4fc3d9"];
-}
-
 function renderProjectsChart(canvas, rows) {
   if (!canvas || !Array.isArray(rows) || rows.length === 0) return;
   const labels = rows.map((row) => row.name || "unknown");
   const data = rows.map((row) => Number(row.cost || 0));
-  const colors = getToolChartPalette().slice(0, rows.length);
+  const colors = rows.map((_, index) => paletteColor(TOOL_CHART_PALETTE, index));
 
   if (typeof window.Chart === "function") {
     const previous = canvas._projectsChart;
@@ -650,7 +664,7 @@ function renderToolCostChart(canvas, tools) {
   if (!canvas || !Array.isArray(tools) || tools.length === 0) return;
   const labels = tools.map((tool) => tool.name || "unknown");
   const data = tools.map((tool) => Number(tool.cost || 0));
-  const colors = getToolChartPalette().slice(0, tools.length);
+  const colors = tools.map((_, index) => paletteColor(TOOL_CHART_PALETTE, index));
 
   if (typeof window.Chart === "function") {
     const previous = canvas._toolCostChart;
