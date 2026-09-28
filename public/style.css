@@ -1745,10 +1745,27 @@ body {
   box-shadow: 0 0 8px rgba(248, 113, 113, 0.4);
 }
 
+/* The run is active — including the stretches where the model is only thinking
+   or running tools, which no longer show a transcript caret. A slow breathe (not
+   the 1.5s pulse other elements use) keeps that signal calm and unmistakable;
+   under `prefers-reduced-motion` the global iteration cap leaves it resting at
+   full opacity, so it reads as a steady lit dot. */
 .status-indicator.streaming {
   background: var(--accent);
-  animation: pulse 1.5s infinite;
+  animation: statusBreathe 2.8s ease-in-out infinite;
   box-shadow: 0 0 12px var(--accent-glow);
+}
+
+@keyframes statusBreathe {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 12px var(--accent-glow);
+  }
+  50% {
+    opacity: 0.35;
+    box-shadow: 0 0 4px var(--accent-glow);
+  }
 }
 
 @keyframes pulse {
@@ -3979,10 +3996,15 @@ code {
    is drawn by the last block inside `.streaming-text` (the markdown renderer
    wraps text in <p>/<pre>/… blocks; a ::after on .message-content itself is
    laid out as its own line box below those blocks, which left the caret
-   floating on a line of its own instead of trailing the text). The :empty
-   variant covers "message started, nothing streamed yet". */
-.message-content.streaming .streaming-text:empty::after,
-.message-content.streaming .streaming-text > :last-child::after {
+   floating on a line of its own instead of trailing the text).
+ *
+ * `.typing` is set per frame by app.js (`isTypingUserText`): the caret means
+ * "the model is writing you something right now". A thinking or tool frame
+ * clears it, so a reasoning-only stretch (which renders an empty
+ * `.streaming-text` below the thinking block) no longer shows a caret, and the
+ * caret never means "busy" — the header's status dot carries that instead. */
+.message-content.streaming .streaming-text.typing:empty::after,
+.message-content.streaming .streaming-text.typing > :last-child::after {
   content: "▋";
   animation: blink 1s infinite;
   margin-left: 1px;
@@ -6240,9 +6262,19 @@ body.hide-thinking .thinking-block {
        status pill's pulse, the sidebar/Agent-Hub dots, the streaming caret)
        becomes a 0.01ms loop: a ~100 kHz strobe instead of "no motion". With
        the count capped each of them runs once, instantly, and rests at its
-       base style. */
+       base style. The activity dot below is the one deliberate exception. */
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  /* Exception: the header's "session is active" dot. Since the transcript caret
+     no longer shows while the model thinks or runs tools, this dot is the only
+     signal that the run is still alive, and an activity light that cannot move
+     is not one. It breathes slower and never faster than the default, so it
+     cannot strobe the way the capped animations did. */
+  .status-indicator.streaming {
+    animation-duration: 4.5s !important;
+    animation-iteration-count: infinite !important;
   }
 }
 

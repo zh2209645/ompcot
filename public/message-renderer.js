@@ -409,7 +409,7 @@ export class MessageRenderer {
     }
   }
 
-  updateStreamingMessage(messageElement, content) {
+  updateStreamingMessage(messageElement, content, { typing = null } = {}) {
     const contentDiv = messageElement?.querySelector(".message-content");
     if (!contentDiv) return;
     // See updateStreamingThinking: never write into a settled element.
@@ -422,7 +422,22 @@ export class MessageRenderer {
       contentDiv.appendChild(textDiv);
     }
     textDiv.innerHTML = renderStreamingMarkdown(content);
+    // The caret lives on this element only (see the .typing rules in
+    // style.css) and only while the model is writing user-facing text; `null`
+    // leaves the caller's last decision alone (seed writes, adoptions).
+    if (typing !== null) this.setStreamingTyping(messageElement, typing);
     this.scrollToBottom();
+  }
+
+  /**
+   * Show or hide the live caret on a streaming message. The caller decides from
+   * the frame it just handled (`isTypingUserText`, public/state.js); thinking and
+   * tool frames clear it so the caret never means "busy".
+   */
+  setStreamingTyping(messageElement, typing) {
+    const textDiv = messageElement?.querySelector?.(".streaming-text");
+    if (!textDiv) return;
+    textDiv.classList.toggle("typing", Boolean(typing));
   }
 
   /**

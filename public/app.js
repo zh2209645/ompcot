@@ -67,7 +67,7 @@ import {
   showSettingsSaveSuccess,
 } from "./settings-save-status.js";
 import { setupSidebarSearchControl } from "./sidebar-search-control.js";
-import { agentEndContinues, StateManager } from "./state.js";
+import { agentEndContinues, isTypingUserText, StateManager } from "./state.js";
 import { loadImportedThemes, removeImportedTheme, setupThemeImport } from "./theme-import.js";
 import { applyTheme, getCurrentTheme, registerImportedThemes, themes } from "./themes.js";
 import { setupThinkingLevelMenu } from "./thinking-level-menu.js";
@@ -1608,6 +1608,7 @@ function handleMessageUpdate(event) {
       }
     }
 
+    const textBefore = currentStreamingText.length;
     const snapshotText = getAssistantText(message);
     if (snapshotText || assistantMessageEvent?.type === "text_delta") {
       currentStreamingText =
@@ -1615,6 +1616,18 @@ function handleMessageUpdate(event) {
       if (currentStreamingElement) {
         messageRenderer.updateStreamingMessage(currentStreamingElement, currentStreamingText);
       }
+    }
+    // The caret means "the model is writing you something", never "busy": a
+    // thinking or tool frame clears it (the header dot carries the activity),
+    // so a reasoning-only stretch no longer looks like output.
+    if (currentStreamingElement) {
+      messageRenderer.setStreamingTyping(
+        currentStreamingElement,
+        isTypingUserText({
+          eventType: assistantMessageEvent?.type ?? null,
+          textGrew: currentStreamingText.length > textBefore,
+        }),
+      );
     }
   }
 }

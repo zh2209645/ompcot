@@ -1,5 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { agentEndContinues, mergeToolExecution, nextToolStatus, StateManager } from "./state.js";
+import {
+  agentEndContinues,
+  isTypingUserText,
+  mergeToolExecution,
+  nextToolStatus,
+  StateManager,
+} from "./state.js";
 
 describe("agentEndContinues", () => {
   test("a scheduled continuation is not the end of the run", () => {
@@ -101,5 +107,25 @@ describe("StateManager tool executions", () => {
     state.updateToolExecution("call_1", { status: "streaming", output: "" });
     expect(state.getToolExecution("call_1").status).toBe("complete");
     expect(state.getToolExecution("call_1").output).toBe("done");
+  });
+});
+
+describe("isTypingUserText (the live caret's meaning)", () => {
+  test("only a user-facing text delta types", () => {
+    expect(isTypingUserText({ eventType: "text_delta", textGrew: true })).toBe(true);
+    // Thinking and tool frames are output the user does not see being written:
+    // the caret must not claim "typing" for them.
+    expect(isTypingUserText({ eventType: "thinking_delta", textGrew: true })).toBe(false);
+    expect(isTypingUserText({ eventType: "thinking_start", textGrew: false })).toBe(false);
+    expect(isTypingUserText({ eventType: "toolcall_delta", textGrew: false })).toBe(false);
+    expect(isTypingUserText({ eventType: "text_end", textGrew: false })).toBe(false);
+  });
+
+  test("frames without an event type fall back to whether the text grew", () => {
+    // Snapshots and replays carry no delta kind; growth is the only signal.
+    expect(isTypingUserText({ eventType: null, textGrew: true })).toBe(true);
+    expect(isTypingUserText({ eventType: null, textGrew: false })).toBe(false);
+    expect(isTypingUserText({})).toBe(false);
+    expect(isTypingUserText()).toBe(false);
   });
 });

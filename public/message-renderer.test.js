@@ -64,6 +64,29 @@ describe("MessageRenderer streaming markdown preview", () => {
     expect(el.dataset.messageId).toBe("msg_entry_42");
   });
 
+  it("shows the caret only while user-facing text is being written", () => {
+    const el = renderer.renderAssistantMessage({ content: "" }, true);
+    const text = () => el.querySelector(".streaming-text");
+
+    // A fresh streaming message (thinking only, nothing said yet): no caret.
+    expect(text().classList.contains("typing")).toBe(false);
+
+    renderer.updateStreamingMessage(el, "hello", { typing: true });
+    expect(text().classList.contains("typing")).toBe(true);
+    expect(text().className).toBe("streaming-text typing");
+
+    // The model moved on to thinking / a tool call: the caret goes away.
+    renderer.setStreamingTyping(el, false);
+    expect(text().classList.contains("typing")).toBe(false);
+
+    // `typing: null` (seed/adoption writes) leaves the last decision alone.
+    renderer.updateStreamingMessage(el, "hello again");
+    expect(text().classList.contains("typing")).toBe(false);
+    renderer.updateStreamingMessage(el, "hello again", { typing: true });
+    renderer.updateStreamingMessage(el, "hello again once more");
+    expect(text().classList.contains("typing")).toBe(true);
+  });
+
   it("streams text into the block the caret is drawn in (CSS contract)", () => {
     const el = renderer.renderAssistantMessage({ content: "" }, true);
 

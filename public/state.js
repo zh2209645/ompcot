@@ -44,6 +44,22 @@ export function nextToolStatus(current, next) {
  * `agent_start` re-lit the UI ("the run ended, then resurrected"). Exported for
  * tests.
  */
+/**
+ * Whether the live caret should be showing: it marks "the model is writing you
+ * something right now", so it belongs to user-facing text only. A frame that
+ * carries thinking or a tool call means the model is not writing prose this
+ * instant and the caret goes away — the header's status dot carries "the run is
+ * still active" instead, so a thinking-only stretch no longer looks like typing.
+ *
+ * `eventType` is the runtime's assistant-message event (`text_delta`,
+ * `thinking_delta`, `toolcall_delta`, …) when the frame carries one. Frames that
+ * do not (snapshots, replays) fall back to whether the user-visible text grew.
+ */
+export function isTypingUserText({ eventType = null, textGrew = false } = {}) {
+  if (typeof eventType === "string" && eventType.length > 0) return eventType === "text_delta";
+  return Boolean(textGrew);
+}
+
 export function agentEndContinues(event) {
   return event?.willContinue === true;
 }
