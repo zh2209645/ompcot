@@ -179,6 +179,32 @@ describe("hydrateTranscriptTailFirst", () => {
     expect(container.querySelector(".earlier-loader")).toBe(null);
   });
 
+  test("stops when the transcript is emptied out from under it", async () => {
+    const container = makeContainer();
+    const { render } = makeRender(container);
+
+    await hydrateTranscriptTailFirst({
+      container,
+      entries: entries(200),
+      render,
+      sliceSize: 20,
+      isViewportFilled: () => true,
+    });
+
+    // A session switch cleared the transcript (and whatever replaced it is the
+    // other render's business): the stale slices must not be prepended into it.
+    container.innerHTML = "";
+    container.scrollTop = 0;
+    container.dispatchEvent(new Event("scroll"));
+
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(container.children.length).toBe(0);
+
+    // …and it is disposed, not merely skipped once.
+    container.dispatchEvent(new Event("scroll"));
+    expect(render).toHaveBeenCalledTimes(1);
+  });
+
   test("a new hydration disposes the previous one and its row", async () => {
     const first = makeContainer();
     const second = makeContainer();

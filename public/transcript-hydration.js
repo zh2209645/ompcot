@@ -159,6 +159,14 @@ export async function hydrateTranscriptTailFirst({
   /** Pull in one earlier slice and give the reader's anchor back its height. */
   async function loadEarlier() {
     if (disposed || loading || nextEnd <= 0) return false;
+    // The transcript was emptied out from under this hydration (a session
+    // switch, a failed load that fell back to the welcome view). Prepending
+    // into whatever replaced it would be another session's history — stop, and
+    // let the render that owns the surface hydrate it instead.
+    if (painted && container && !container.firstElementChild) {
+      dispose();
+      return false;
+    }
     if (shouldContinue && !shouldContinue()) {
       dispose();
       return false;
