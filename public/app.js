@@ -1120,6 +1120,11 @@ function handleRPCEvent(event) {
     return;
   }
 
+  // Any foreground frame is evidence the runtime is alive — including the ones
+  // the guards below suppress. The registry-driven settle only fires after a
+  // stretch of silence (see `reconcileSidebarStreaming`).
+  lastRunFrameAt = Date.now();
+
   // While the user is previewing a different session, suppress all live
   // rendering so the history view isn't overwritten by streaming output.
   // agent_end still needs to fire so we can complete the deferred switch; tool
@@ -1349,8 +1354,6 @@ function handleAgentStart(event = null) {
 }
 
 function handleAgentEnd(event = null) {
-  const continues = agentEndContinues(event);
-  if (!continues) debugLog.log("run.end", { willContinue: false, terminal: true });
   // A `willContinue` end is not the end of the run: the session has already
   // scheduled its own continuation (auto-retry, empty-stop retry, compaction
   // continuation, or — 18.3.3 — a pause awaiting background work). The host's
@@ -1396,6 +1399,32 @@ function handleAgentEnd(event = null) {
     return;
   }
 
+  settleFinishedRun({ liveFile: getCurrentLiveSessionFile(event) });
+}
+
+// A run the *runtime* has closed but whose end frame this window never saw
+// (see `settleFinishedRun`): how long the foreground transcript must be
+// frame-silent before the registry's idle sample may settle it. Eight seconds
+// cannot hide a live run — a streaming turn emits frames continuously, and a
+// silent tool call keeps `session.isStreaming` true, so the registry would not
+// be reporting idle at all.
+const RUN_IDLE_SETTLE_MS = 8000;
+let lastRunFrameAt = 0;
+
+/**
+ * Settle the UI for a run that is over.
+ *
+ * Called from the terminal `agent_end` and from the runtime's own idle sample
+ * (through the instance registry, see `reconcileSidebarStreaming`). The second
+ * path exists because a non-terminal settle can be the last frame a run ever
+ * emits: omp 18.3.3+'s `awaitingAsyncWork` pause wakes only if the background
+ * work reports back, and the host explicitly does not guarantee that wake. The
+ * TUI closes a run on the same predicate (`!session.isStreaming`), which its
+ * shared event ctx exposes to extensions as `isIdle()` — the value the registry
+ * mirrors.
+ */
+function settleFinishedRun({ liveFile = null, source = "agent_end" } = {}) {
+  debugLog.log("run.end", { willContinue: false, terminal: true, source });
   state.setStreaming(false);
   showTypingIndicator(false);
   // Nothing can still be running now, so nothing may keep pulsing: a call whose
@@ -1437,7 +1466,7 @@ function handleAgentEnd(event = null) {
     return;
   }
 
-  const live = getCurrentLiveSessionFile(event);
+  const live = liveFile ?? getCurrentLiveSessionFile();
   // Also unmark the resolved file directly: a mark set by a snapshot for the
   // session we are now viewing is not necessarily in the tracked set.
   setForegroundStreaming(live, false);
@@ -4020,6 +4049,23 @@ function reconcileSidebarStreaming() {
     sidebar.setStreaming(filePath, false);
   }
   for (const filePath of start) sidebar.setStreaming(filePath, true);
+
+  // Did the runtime close the run this window is streaming? The registry only
+  // stores `!ctx.isIdle()` after three consecutive samples (or a terminal end's
+  // explicit hint), so an idle entry for the window's own process — after a
+  // stretch without a single frame — is the runtime's own verdict, not a
+  // momentary sample. Settling on it is what makes a non-terminal settle whose
+  // wake never comes (18.3.3's `awaitingAsyncWork`) let go of "Waiting…" and the
+  // streaming composer instead of holding them for good. The port is the
+  // identity: the live file may be unknown to the sidebar (`activeSessionFile`
+  // is empty for a session this window started but never selected), while the
+  // entry's port is the process this window is attached to.
+  const foregroundIdle =
+    typeof foregroundPort === "number" &&
+    liveInstances.some((i) => i?.port === foregroundPort && i.isStreaming === false);
+  if (state.isStreaming && foregroundIdle && Date.now() - lastRunFrameAt >= RUN_IDLE_SETTLE_MS) {
+    settleFinishedRun({ liveFile: getCurrentLiveSessionFile(), source: "runtime-idle" });
+  }
 }
 
 // Poll for running instances to mark all live sessions

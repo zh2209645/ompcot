@@ -24,20 +24,22 @@
  * idleness, while a missing *instance* is (a session cannot run without a
  * process behind it).
  *
- * The window's own process is the exception. For it the live event stream is
- * strictly better evidence than the registry: a run this window watched finish
- * must not be resurrected by a registry flag that was never corrected (a lost
- * `agent_end` write, a stale `${pid}.json`). `foreground` therefore disables the
- * registry's vote to *stop* that one process — but it must not read a momentary
- * `isStreaming:false` as proof of idleness either: the registry samples
- * `!ctx.isIdle()` (false between messages and tool calls) and the window's own
- * flag is cleared by non-terminal events (`state.reset()` on a selection, a
- * suppressed `agent_start`). So the entry for the foreground port may only
- * *add* a mark; when the local flag says idle, the entry is treated as unknown
- * (keep whatever the marks say) instead of dropping them. The foreground *file*
- * is immune from the stop rule entirely while the local flag says running, so a
- * clobbered or never-recreated registry entry cannot unmark a run the event
- * stream still reports.
+ * The window's own process gets a split vote. Its live event stream is the fast
+ * path: a run this window watched start is marked from `agent_start` even when
+ * the registry entry is missing, clobbered or stale — a registry `true` alone
+ * never *adds* a mark the local flag does not back, and the foreground file is
+ * protected from the missing-entry rule while the flag says running.
+ *
+ * A stored `isStreaming:false` is different: the registry only ever stores the
+ * debounced sample (`!ctx.isIdle()` three times in a row, or a terminal end's
+ * explicit hint), so it is the runtime's own verdict that the turn is over —
+ * the same predicate the TUI closes a run on. It may therefore *stop* the
+ * window's own run even while the local flag still says streaming: that flag is
+ * latched by the event stream, and a non-terminal settle (`willContinue`) can
+ * be the last frame a run ever emits — omp 18.3.3+'s `awaitingAsyncWork` pause
+ * wakes only if the background work reports back, and its wake is explicitly
+ * not guaranteed. Without this the dot and the header kept saying the session
+ * was running for good.
  *
  * @param {Iterable<string>} markedFiles session files currently marked as running
  * @param {Array<{sessionFile?: unknown, isStreaming?: unknown, port?: number}>} instances `/api/instances` payload
@@ -51,13 +53,20 @@ export function reconcileSessionActivity(markedFiles, instances, foreground = {}
     typeof foreground?.file === "string" && foreground.file ? foreground.file : null;
   const streaming = new Set();
   const unknown = new Set();
+  let foregroundFileSaysIdle = false;
   for (const instance of Array.isArray(instances) ? instances : []) {
     const file = instance?.sessionFile;
     if (typeof file !== "string" || file.length === 0) continue;
     if (foregroundPort !== null && instance?.port === foregroundPort) {
-      // Own process: the event stream decides. Running → the mark came from
-      // `agent_start` already; idle while the registry says streaming → keep the
-      // existing marks rather than trusting either side alone.
+      // Own process. A stored idle wins outright: it is debounced evidence from
+      // the runtime itself, so falling through here stops the mark even when
+      // the local flag still says streaming. Otherwise the event stream leads:
+      // running → the mark came from `agent_start`; a stored `true` while the
+      // local flag says idle is not proof the run resumed → unknown (keep).
+      if (instance.isStreaming === false) {
+        if (file === foregroundFile) foregroundFileSaysIdle = true;
+        continue;
+      }
       if (foregroundStreaming) streaming.add(file);
       else if (instance.isStreaming === true) unknown.add(file);
       continue;
@@ -65,7 +74,10 @@ export function reconcileSessionActivity(markedFiles, instances, foreground = {}
     if (instance.isStreaming === true) streaming.add(file);
     else if (instance.isStreaming !== false) unknown.add(file);
   }
-  if (foregroundFile && foregroundStreaming) unknown.add(foregroundFile);
+  // The foreground file survives a *missing* entry (the registry may never have
+  // been written for it), but not one that reports it idle: that is the
+  // runtime's own verdict, not a gap.
+  if (foregroundFile && foregroundStreaming && !foregroundFileSaysIdle) unknown.add(foregroundFile);
 
   const marked = new Set(markedFiles || []);
   const start = [];

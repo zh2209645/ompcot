@@ -124,8 +124,36 @@ describe("reconcileSessionActivity", () => {
     expect(stop).toEqual([RUNNING]);
   });
 
-  test("while the window streams, its session stays authoritative either way", () => {
-    const { start, stop } = reconcileSessionActivity([], [instance(RUNNING, false)], {
+  test("a stored idle from the runtime closes a run the event stream never ended", () => {
+    // The stuck case: a non-terminal settle (`willContinue`) is the last frame
+    // the run emits (`awaitingAsyncWork`, 18.3.3+), so the window's own flag
+    // never clears — but the runtime is idle and the registry says so. The
+    // stored `false` is debounced (`!ctx.isIdle()` three times in a row), so it
+    // outranks the latched local flag.
+    const { start, stop } = reconcileSessionActivity([RUNNING], [instance(RUNNING, false)], {
+      port: 47821,
+      streaming: true,
+      file: RUNNING,
+    });
+
+    expect(start).toEqual([]);
+    expect(stop).toEqual([RUNNING]);
+  });
+
+  test("a registry idle cannot unmark a session it does not name", () => {
+    const other = "/ws/.omp/sessions/proj/other.jsonl";
+    const { start, stop } = reconcileSessionActivity([RUNNING], [instance(other, false)], {
+      port: 47821,
+      streaming: true,
+      file: RUNNING,
+    });
+
+    expect(start).toEqual([]);
+    expect(stop).toEqual([]);
+  });
+
+  test("while the window streams a *different* session, the registry only adds", () => {
+    const { start, stop } = reconcileSessionActivity([], [instance(RUNNING, true)], {
       port: 47821,
       streaming: true,
     });
