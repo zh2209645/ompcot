@@ -29,6 +29,22 @@
  *   position to preserve, so a stale unpinned flag must not suppress the next
  *   follow (that is the self-heal for the second failure above).
  */
+/**
+ * Move a scroller to its content end in this frame.
+ *
+ * `#messages` sets `scroll-behavior: smooth`, so a plain `scrollTop` write
+ * animates — and while it animates the geometry still reports "far from the
+ * bottom", which is exactly what the follow policy must not read as a user
+ * scroll. Instant is also what a *re-pin* needs (see `layout-insets.js`).
+ */
+export function jumpToBottom(element) {
+  if (!element) return;
+  const previousBehavior = element.style?.scrollBehavior;
+  if (element.style) element.style.scrollBehavior = "auto";
+  element.scrollTop = element.scrollHeight;
+  if (element.style) element.style.scrollBehavior = previousBehavior;
+}
+
 export const NEAR_BOTTOM_THRESHOLD = 100;
 
 /** Distance in pixels between the viewport's bottom edge and the content end. */
@@ -82,12 +98,7 @@ export class ScrollFollow {
 
   /** Instant jump, bypassing `scroll-behavior: smooth`. */
   jump() {
-    const el = this.container;
-    if (!el) return;
-    const previousBehavior = el.style?.scrollBehavior;
-    if (el.style) el.style.scrollBehavior = "auto";
-    el.scrollTop = el.scrollHeight;
-    if (el.style) el.style.scrollBehavior = previousBehavior;
+    jumpToBottom(this.container);
   }
 
   /**
