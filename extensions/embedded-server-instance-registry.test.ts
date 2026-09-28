@@ -7,6 +7,7 @@ import {
   mergeInstanceEntry,
   parseInstanceEntry,
   runStateHintForEvent,
+  runtimeSettled,
 } from "./embedded-server.ts";
 
 const base: InstanceEntry = {
@@ -122,5 +123,44 @@ describe("runStateHintForEvent", () => {
   it("leaves the published flag alone for every other event", () => {
     expect(runStateHintForEvent("message_end", { willContinue: true })).toBeUndefined();
     expect(runStateHintForEvent("tool_execution_end", {})).toBeUndefined();
+  });
+});
+
+describe("runtimeSettled", () => {
+  it("is not settled while a run is live, whatever the jobs say", () => {
+    expect(runtimeSettled(false, null)).toBe(false);
+    expect(runtimeSettled(false, { running: [], delivery: { queued: 0, pendingJobIds: [] } })).toBe(
+      false,
+    );
+  });
+
+  it("is settled when idle with nothing that could wake the session", () => {
+    expect(runtimeSettled(true, null)).toBe(true);
+    expect(runtimeSettled(true, { running: [], delivery: { queued: 0, pendingJobIds: [] } })).toBe(
+      true,
+    );
+    // A build without the surface (or a session without a job manager) hides no work.
+    expect(runtimeSettled(true, undefined)).toBe(true);
+    expect(runtimeSettled(true, {})).toBe(true);
+  });
+
+  it("holds the run open while background work can still report back", () => {
+    // The pause 18.3.3+ can leave behind: idle per `ctx.isIdle()` only once the
+    // prompt ends, but a running job or an undelivered result is exactly the
+    // wake the host is waiting for — the TUI's loader and the RPC's
+    // `session_settled` wait for it too.
+    expect(runtimeSettled(true, { running: [{ id: "job-1" }] })).toBe(false);
+    expect(runtimeSettled(true, { running: [], delivery: { queued: 1, pendingJobIds: [] } })).toBe(
+      false,
+    );
+    expect(
+      runtimeSettled(true, { running: [], delivery: { queued: 0, pendingJobIds: ["job-2"] } }),
+    ).toBe(false);
+    expect(
+      runtimeSettled(true, {
+        running: [],
+        delivery: { delivering: true, pendingJobIds: ["job-2"] },
+      }),
+    ).toBe(false);
   });
 });

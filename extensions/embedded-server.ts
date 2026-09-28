@@ -464,6 +464,44 @@ export function mergeInstanceEntry(
  * window's view of this process while the run was still going, and the deduped
  * pair kept it wrong until the next lifecycle frame. Exported for tests.
  */
+/**
+ * The runtime's own "this session is settled" verdict.
+ *
+ * Mirrors `isRpcSessionSettled` (`modes/rpc/rpc-session-settle.ts`), which backs
+ * the RPC mode's `session_settled` frame and `get_state.isSettled`, and the
+ * TUI's own teardown rule: the agent is not streaming, nothing is queued, and
+ * no background work can still wake it. A `willContinue` pause *with* work in
+ * flight is therefore not settled — the wake may yet come — while a pause whose
+ * job already finished (or was cancelled, whose delivery is suppressed by the
+ * host) is: the wake the host was waiting for can never arrive, and every
+ * source of truth the runtime exposes — TUI title, RPC settle frame, this
+ * verdict — says the run is over.
+ *
+ * `snapshot` is `ctx.getAsyncJobSnapshot()`, the only leg of the host's
+ * `hasPendingAsyncWork()` an extension can read; `null` (no job manager, or an
+ * older build without the surface) means nothing visible can wake it.
+ *
+ * Exported for tests.
+ */
+export function runtimeSettled(
+  idle: boolean,
+  snapshot:
+    | {
+        running?: unknown[] | null;
+        delivery?: { queued?: number; pendingJobIds?: unknown[] | null } | null;
+      }
+    | null
+    | undefined,
+): boolean {
+  if (!idle) return false;
+  if (!snapshot) return true;
+  const running = Array.isArray(snapshot.running) ? snapshot.running.length : 0;
+  const delivery = snapshot.delivery ?? null;
+  const queued = typeof delivery?.queued === "number" ? delivery.queued : 0;
+  const pending = Array.isArray(delivery?.pendingJobIds) ? delivery.pendingJobIds.length : 0;
+  return running === 0 && queued === 0 && pending === 0;
+}
+
 export function runStateHintForEvent(eventType: string, event: unknown): boolean | undefined {
   if (eventType === "agent_start") return true;
   if (eventType !== "agent_end") return undefined;
@@ -2262,7 +2300,15 @@ export default function (omp: ExtensionAPI) {
    * the runtime's real state whenever the two disagree, so a stale flag cannot
    * outlive one tick.
    */
-  const ACTIVITY_RECONCILE_MS = 10000;
+  // The audit's own cadence. `IDLE_SAMPLES_BEFORE_STOP` of these must confirm
+  // an idle sample before it is written, so the stored `false` the windows
+  // settle on is always a debounced `!ctx.isIdle()` (9s at this rate) rather
+  // than a momentary gap between messages. Kept short because a non-terminal
+  // settle (`willContinue`) can be the last frame a run emits — 18.3.3's
+  // `awaitingAsyncWork` pause whose wake never comes — and the registry's idle
+  // is then the only thing that tells the UI the run is over. The sample is
+  // in-process and the write only happens on a change.
+  const ACTIVITY_RECONCILE_MS = 3000;
 
   /** `<sessionFile>|<isStreaming>` as stored on disk, or null when unreadable. */
   function readStoredActivityPair(): string | null {
@@ -2310,7 +2356,10 @@ export default function (omp: ExtensionAPI) {
   function sampleStreaming(ctx: ExtensionContext): boolean | undefined {
     let idle: boolean;
     try {
-      idle = ctx.isIdle();
+      // The runtime's settled verdict, not just `isIdle()`: a session paused on
+      // background work is *not* idle, but once that work is gone nothing can
+      // wake it and the run is over (see `runtimeSettled`).
+      idle = runtimeSettled(ctx.isIdle(), ctx.getAsyncJobSnapshot?.() ?? null);
     } catch {
       return undefined; // torn-down ctx: the next instance re-publishes its bindings
     }
