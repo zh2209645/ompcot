@@ -150,7 +150,10 @@ After every edit under `src-tauri/`, run `bun run check:rust` (cargo check + cli
 
 ## Auto-updater & releases
 
-See **docs/AUTO_UPDATER.md** for the updater architecture, the release pipeline's manifest design (per-job fragments + single-writer publish + never-dark-endpoint guarantees), the manual repair runbook, and the step-by-step release procedure. Releases are cut by: bump the 4 version files → `chore(release): vX.Y.Z` commit + tag → push → `gh workflow run Release --ref vX.Y.Z` (tag-push triggering does not work in this repo; releases are manually dispatched).
+See **docs/AUTO_UPDATER.md** for the updater architecture, the release pipeline's manifest design (per-job fragments + single-writer publish + never-dark-endpoint guarantees), the manual repair runbook, and the step-by-step release procedure. Releases are cut by: bump the 4 version files → `chore(release): vX.Y.Z` commit + tag → push → `gh workflow run Release --ref vX.Y.Z` (tag-push triggering does not work in this repo; releases are manually dispatched). The workflow creates the release
+itself before the build matrix (`prepare-release`): every matrix job invokes `tauri-action`, which *creates* a release
+when it cannot find one, and the second creation used to discard the first job's uploaded assets (v0.8.24's
+linux-aarch64 loss — incident list in `docs/AUTO_UPDATER.md`).
 
 ## Tests
 

@@ -57,6 +57,7 @@ Ompcot 为 OMP 提供完整的可视化界面。打开任意项目文件夹，�
 ### 🗂️ 会话 & Agent
 
 - 会话历史：**全文搜索**、收藏、归档、重命名、批量删除、**导出 HTML**
+- **回退（rewind）** 到任意用户消息（文本回到输入框），以及从运行中的 Agent **重新同步**转录
 - **超长会话即时打开** —— 最新消息先渲染、视口直接停在底部，更早的历史在向上滚动时逐步加载，6000 条记录的会话不再等待整体重建
 - 从任意消息**分叉对话**（已接线；当你的 omp 版本支持时自动生效）
 - 从 Claude Code / Codex **导入**会话 —— 引导式入口
@@ -76,10 +77,10 @@ Ompcot 为 OMP 提供完整的可视化界面。打开任意项目文件夹，�
 
 ### ⚙️ 设置
 
-- **通用** —— 外观主题与界面语言
+- **通用** —— 外观主题、界面语言与字体（UI/等宽字体族 + 全局字号缩放）
 - **扩展** —— 包浏览器，支持自定义注册表与离线缓存
 - **用量** —— 账户用量配额与本地**费用面板**（按会话 Token/费用、趋势、按模型分类、上下文窗口可视化）
-- **配置** —— Providers（API 密钥 + 通过 `omp login` 的 **OAuth 登录**）、**Models & Reasoning**（默认模型与思考深度、15 个模型角色、按 Agent 的模型覆盖）、MCP，以及 Advanced 原始 `config.yml`
+- **配置** —— Providers（API 密钥 + 通过 `omp login` 的 **OAuth 登录**）、**Models & Reasoning**（默认模型与思考深度、15 个模型角色、按 Agent 的模型覆盖）、MCP 服务器、外观、交互、上下文、记忆、文件、Shell、工具、任务、**调试**（实时捕获 + 一键导出诊断包），以及原始 `config.yml` 编辑器
 
 ### 🎨 主题
 
@@ -145,7 +146,7 @@ Ompcot 不重新实现 Agent 逻辑——它驱动你已安装的 omp CLI，并�
 2. 启动 **Ompcot** 并选择一个文件夹
 3. 开始对话 —— Ompcot 会自动为该工作区启动 omp Agent
 
-通过**设置 → 配置 → Providers**（API 密钥或 OAuth 登录）或终端中的 `omp /login` 提供模型凭证。Ompcot 将所有凭证处理委托给 omp 本身。
+通过**设置 → 配置 → Providers**（API 密钥或 OAuth 登录）或终端中的 `omp login` 提供模型凭证。Ompcot 将所有凭证处理委托给 omp 本身。
 
 ---
 
@@ -186,7 +187,8 @@ Ompcot 是 [Picot](https://github.com/shixin-guo/picot)（Picot 又是 Tau 的 f
 
 - **Pi → OMP 迁移** —— 所有二进制引用、包名、路径、环境变量已更新
 - **系统 omp 运行时** —— 从 PATH 启动系统 omp（`OMP_BIN` 可覆盖）；`brew upgrade omp` 即可升级，无需重建应用
-- **OMP SDK 包** —— `@oh-my-pi/pi-coding-agent` 及相关包
+- **应用内不含 Agent 代码** —— Ompcot 不重复实现运行时逻辑：提示、斜杠命令、会话与凭证全部经由生成的
+  `omp --mode rpc` 进程
 
 ---
 

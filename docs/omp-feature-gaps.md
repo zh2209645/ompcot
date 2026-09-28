@@ -10,6 +10,10 @@
 
 > Method: cross-reference of the omp 18.x changelog against the GUI's actual consumption surface (RPC commands sent, broker controls, HTTP endpoints used, UI affordances) in `public/` and `extensions/embedded-server.ts`.
 
+> **Current state (2026-09-28, Ompcot v0.8.27 / omp 18.4.0):** the dated reviews below are snapshots tied to the omp
+> version named in each — read [`../ROADMAP.md`](../ROADMAP.md) for what the GUI ships today and what is still blocked
+> upstream.
+>
 > Status review 2026-09-26 (v0.8.3): B4's interactive dialogs shipped via omp's `extension_ui_request` loop (already reflected in the B4 row). Post-audit v0.8.x additions — the **Models & Reasoning** configuration page and **registry-resilience Extensions** browsing — are beyond the original audit scope and are not scored here.
 >
 > Status review 2026-09-27 (omp 18.3.1 → 18.3.2 delta vs Ompcot v0.8.4): no breaking change reaches the GUI's consumption surface (all subscribed extension events still exist; no edit-header parsing; the embedded server boots unchanged on 18.3.2). New upstream surfaces judged not-gaps: `ctx.agent` (18.3.2; subagent detection already shipped via `isChildAgentSession` in the v0.8.4 fix), `ctx.runEphemeralTurn`/`ctx.addAdditionalContext`, `/slow` + usage wrap-up status (TUI status-line), MCP `instructions:false`, per-server MCP `test`/`reauth`, `local://`/`omp://` filesystem, `cp` builtin, IDA config keys, `get_messages_page` pagination — all agent-side or config-catalog-fed (new settings surface automatically in the generic settings pages). New optional polish (not scored): native RPC `prompt_result`/session-settled acks could harden prompt lifecycle reporting, and `available_commands_update` exposes the full builtin command list the composer could merge (builtin TUI commands are not prompt-executable, so today's filtered `list_commands` stays correct).

@@ -60,6 +60,7 @@ Ompcot gives you a full visual interface for OMP. Open any project folder, start
 ### 🗂️ Sessions & Agents
 
 - Session history with **full-text search**, favourites, archive, rename, batch delete, and **HTML export**
+- **Rewind** to any user message (its text returns to the composer) and **re-sync** the transcript from the running agent
 - **Long sessions open instantly** — the newest messages render first and the viewport starts at the bottom; earlier
   history hydrates as you scroll up, so a 6000-entry session never waits on a full rebuild
 - **Fork a conversation** from any message (wired up; activates automatically when your omp build supports it)
@@ -80,10 +81,12 @@ Ompcot gives you a full visual interface for OMP. Open any project folder, start
 
 ### ⚙️ Settings
 
-- **General** — appearance themes and UI language
+- **General** — appearance themes, UI language, and fonts (UI/mono families plus a global size scale)
 - **Extensions** — package browser with configurable registry and offline cache
 - **Usage** — account usage quotas plus a local **cost dashboard** (per-session token/cost, trends, per-model breakdown, context-window visualiser)
-- **Configuration** — Providers (API keys + **OAuth login** via `omp login`), **Models & Reasoning** (default model & thinking depth, 15 model roles, per-agent model overrides), MCP, and Advanced raw `config.yml`
+- **Configuration** — Providers (API keys + **OAuth login** via `omp login`), **Models & Reasoning** (default model &
+  thinking depth, 15 model roles, per-agent model overrides), MCP servers, Appearance, Interaction, Context, Memory,
+  Files, Shell, Tools, Tasks, **Debug** (live capture + one-click bundle export), and the raw `config.yml` editor
 
 ### 🎨 Themes
 
@@ -149,7 +152,7 @@ Each omp process loads `embedded-server.mjs` at startup. That extension owns the
 2. Launch **Ompcot** and pick a folder
 3. Start chatting — Ompcot spawns the omp agent for that workspace automatically
 
-Provide model credentials via **Settings → Configuration → Providers** (API keys or OAuth login), or via `omp /login` in a terminal. Ompcot delegates all credential handling to omp itself.
+Provide model credentials via **Settings → Configuration → Providers** (API keys or OAuth login), or via `omp login` in a terminal. Ompcot delegates all credential handling to omp itself.
 
 ---
 
@@ -176,6 +179,14 @@ To make a release build:
 bun run build        # build:extensions + tauri build
 ```
 
+Verification commands used while developing:
+
+```bash
+bun run test         # vitest suite + Tauri permission check
+bun run check        # Biome lint/format (JS/TS)
+bun run build:extensions   # rebuild extensions/dist/embedded-server.mjs only
+```
+
 After any changes under `src-tauri/`:
 
 ```bash
@@ -190,7 +201,8 @@ Ompcot is a fork of [Picot](https://github.com/shixin-guo/picot) (which was a fo
 
 - **Pi → OMP migration** — all binary references, package names, paths, and env vars updated
 - **System omp runtime** — spawns the omp from your PATH (`OMP_BIN` to override); `brew upgrade omp` picks up new versions without rebuilding the app
-- **OMP SDK packages** — `@oh-my-pi/pi-coding-agent` and related packages
+- **No agent code in the app** — Ompcot never re-implements runtime logic: prompts, slash commands, sessions and
+  credentials all go through the spawned `omp --mode rpc` process
 
 ---
 
