@@ -59,6 +59,14 @@ export function summarizeEvent(event: Record<string, unknown> | null | undefined
     entryId: event?.entryId ?? event?.messageId ?? null,
     blocks: message ? summarizeBlocks(message.content) : null,
     stopReason: message?.stopReason ?? null,
+    // Run-lifecycle flags: an `agent_end` that is a *pause* (a scheduled
+    // continuation, or 18.3.3+'s `awaitingAsyncWork` whose wake is not
+    // guaranteed) is only distinguishable here — the GUI keeps the run marked
+    // live for it, so an export without these fields cannot explain a session
+    // that "never stopped".
+    willContinue: event?.willContinue ?? null,
+    awaitingAsyncWork: event?.awaitingAsyncWork ?? null,
+    isTerminal: event?.isTerminal ?? null,
     toolCallId: event?.toolCallId ?? null,
     toolName: event?.toolName ?? null,
     isError: event?.isError ?? null,

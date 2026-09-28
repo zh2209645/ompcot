@@ -63,6 +63,7 @@ export const zhCN = {
   "status.failed": "失败",
   "status.error": "错误",
   "status.compacting": "正在压缩...",
+  "status.waiting": "等待中...",
   "status.exporting": "正在导出...",
   "status.exported": "已导出：{path}",
   "status.loadingStats": "正在加载统计...",

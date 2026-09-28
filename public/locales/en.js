@@ -67,6 +67,7 @@ export const en = {
   "status.failed": "Failed",
   "status.error": "Error",
   "status.compacting": "Compacting...",
+  "status.waiting": "Waiting...",
   "status.exporting": "Exporting...",
   "status.exported": "Exported: {path}",
   "status.loadingStats": "Loading stats...",

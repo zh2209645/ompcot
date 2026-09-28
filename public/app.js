@@ -1349,6 +1349,8 @@ function handleAgentStart(event = null) {
 }
 
 function handleAgentEnd(event = null) {
+  const continues = agentEndContinues(event);
+  if (!continues) debugLog.log("run.end", { willContinue: false, terminal: true });
   // A `willContinue` end is not the end of the run: the session has already
   // scheduled its own continuation (auto-retry, empty-stop retry, compaction
   // continuation, or — 18.3.3 — a pause awaiting background work). The host's
@@ -1380,6 +1382,16 @@ function handleAgentEnd(event = null) {
     // unread flag and the composer queue alone. The cards that were waiting for
     // this message are released (the message is finalized), but the calls
     // themselves stay open — the continuation can still end them.
+    //
+    // The label says "Waiting…" rather than "Working…": a continuing end is a
+    // pause (auto-retry, a compaction continuation, or 18.3.3+'s
+    // `awaitingAsyncWork` whose wake is not guaranteed), and this host contract
+    // explicitly says not to treat it as a terminal settle — so the session can
+    // legitimately sit here for a long time with nothing to show. The dot keeps
+    // breathing (it is the activity light), and the abort button stays up as the
+    // way out.
+    setStatusText(t("status.waiting"));
+    debugLog.log("run.end", { willContinue: true, terminal: false });
     flushDeferredToolCards();
     return;
   }
