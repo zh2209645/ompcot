@@ -22,11 +22,10 @@ export const RESYNC_TIMEOUT_MS = 15000;
  * @param {object} deps.messageRenderer - MessageRenderer instance
  * @param {object} deps.toolCardRenderer - ToolCardRenderer instance
  * @param {string} [deps.searchQuery] - highlight query after rendering
- * @param {(usage: object) => void} [deps.onAssistantUsage] - usage/cost sink
  */
 export function renderTranscriptFromEntries(
   entries,
-  { messageRenderer, toolCardRenderer, searchQuery = "", onAssistantUsage = null } = {},
+  { messageRenderer, toolCardRenderer, searchQuery = "" } = {},
 ) {
   const counts = {
     user: 0,
@@ -125,7 +124,6 @@ export function renderTranscriptFromEntries(
           false,
           true,
         );
-        onAssistantUsage?.(msg.usage);
       }
 
       // Show tool calls as compact history cards

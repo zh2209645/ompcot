@@ -56,7 +56,11 @@ import {
 } from "./pkg-registry.js";
 import { ScrollFollow } from "./scroll-follow.js";
 import { reconcileSessionActivity } from "./session-activity.js";
-import { renderTranscriptFromEntriesChunked, resyncTranscript } from "./session-resync.js";
+import {
+  renderTranscriptFromEntries,
+  renderTranscriptFromEntriesChunked,
+  resyncTranscript,
+} from "./session-resync.js";
 import { findPortForSession, getWorkspacePathForPort } from "./session-routing.js";
 import { SessionSidebar } from "./session-sidebar.js";
 import { SessionSwitchGate, sameWorkspacePath } from "./session-switch.js";
@@ -73,6 +77,7 @@ import { loadImportedThemes, removeImportedTheme, setupThemeImport } from "./the
 import { applyTheme, getCurrentTheme, registerImportedThemes, themes } from "./themes.js";
 import { setupThinkingLevelMenu } from "./thinking-level-menu.js";
 import { ToolCardRenderer } from "./tool-card.js";
+import { cancelHydration, hydrateTranscriptTailFirst } from "./transcript-hydration.js";
 import { resolveTranscriptOpenAction } from "./transcript-open.js";
 import { createTranscriptView } from "./transcript-view.js";
 import { initTransport } from "./transport.js";
@@ -2730,10 +2735,36 @@ function resetTranscriptTotals() {
   sessionTotalCost = 0;
   lastInputTokens = 0;
   // The usage object belongs to the same totals: the re-render that follows
-  // restores both from the transcript it paints (see `onAssistantUsage`).
+  // restores both from the transcript it paints (see `applyTranscriptTotals`).
   lastUsage = null;
   updateCostDisplay();
   updateTokenUsage();
+}
+
+/**
+ * Fold the session's cost and context size out of its entries.
+ *
+ * These used to be accumulated by the render walk (`onAssistantUsage`), which
+ * works only while the walk covers every entry. Tail-first hydration leaves
+ * most of the transcript unrendered — the cost of a session must not depend on
+ * how far the reader has scrolled — so the numbers come from one pass over the
+ * entries (no DOM, no layout) and the renderers only paint.
+ *
+ * Runs after `resetTranscriptTotals()`: it assigns, never adds to, the
+ * previous session's numbers.
+ */
+function applyTranscriptTotals(entries) {
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const usage = entry?.message?.usage;
+    if (!usage) continue;
+    if (usage.cost?.total) {
+      sessionTotalCost += usage.cost.total;
+    }
+    if (usage.input) {
+      lastInputTokens = usage.input + (usage.cacheRead || 0);
+      lastUsage = usage;
+    }
+  }
 }
 
 // Transient header status (fork / import feedback): show a message, then
@@ -4604,6 +4635,11 @@ async function renderSessionHistory(
   { searchQuery = "", viewToken = null, anchor = true, sessionFile = null } = {},
 ) {
   console.log(`[History] Rendering ${entries.length} entries`);
+  // Hydration started by an earlier render must not prepend into the DOM this
+  // one is about to paint: the callers' view tokens cover selections and peeks,
+  // but a resync or a snapshot repaint renders without one, and its row would
+  // otherwise be left at the top of somebody else's transcript.
+  cancelHydration();
   // The id/role sequence of a render is what tells a duplicated draw (one entry,
   // two elements) from a duplicated entry (two entries, two elements).
   debugLog.log("transcript.render", {
@@ -4617,44 +4653,80 @@ async function renderSessionHistory(
     peeking: transcriptView.active ? transcriptView.file : null,
   });
   // Entry→renderer mapping lives in session-resync.js so the palette
-  // "Resync transcript" action re-renders exactly like history loads. The
-  // render is time-sliced: a huge session (measured: 4826 entries / 16.5 MB)
-  // blocked the main thread for ~5 s in one pass, which is the "page freezes
-  // while a session loads" report — and the token abort keeps a newer view
-  // (another selection, a subagent peek) from being painted over by the rest
-  // of a render that started before it.
+  // "Resync transcript" action re-renders exactly like history loads.
   // The DOM this draws belongs to this session — set before the first slice, so
   // an aborted or partial paint is never mistaken for "nothing rendered here"
   // by the truncated-snapshot rule in `handleMirrorSync`.
   if (sessionFile) renderedTranscriptFile = sessionFile;
-  const counts = await renderTranscriptFromEntriesChunked(
-    entriesWithMessageIds(entries),
-    {
-      messageRenderer,
-      toolCardRenderer,
-      searchQuery,
-      onAssistantUsage: (usage) => {
-        // Track cost and tokens from history
-        if (usage?.cost?.total) {
-          sessionTotalCost += usage.cost.total;
-        }
-        if (usage?.input) {
-          lastInputTokens = usage.input + (usage.cacheRead || 0);
-          lastUsage = usage;
-        }
-      },
-    },
-    {
+
+  const list = entriesWithMessageIds(entries);
+  // Both paints are followed by the same recompute: totals belong to the
+  // session file, not to the DOM (see `applyTranscriptTotals`).
+  resetTranscriptTotals();
+  applyTranscriptTotals(list);
+
+  const messagesEl = document.getElementById("messages");
+  const continueRender = () =>
+    !(viewToken !== null && !transcriptView.isCurrent(viewToken)) && !compactionHoldActive();
+  // One anchor decision, two moments: the forward paint anchors once the last
+  // slice is down, tail-first hydration as soon as the newest slice is up
+  // (everything after that is inserted above it).
+  const anchorBottom = () => {
+    if (anchor) anchorHistoryToBottom(messagesEl, { preserveScrollTarget: Boolean(searchQuery) });
+  };
+  const renderOptions = { messageRenderer, toolCardRenderer, searchQuery };
+
+  let counts;
+  if (searchQuery) {
+    // A search highlights a match anywhere in the session, so the whole
+    // transcript has to be in the DOM — the forward, time-sliced paint. (A huge
+    // session measured 5.4 s of blocked main thread in one pass, which is the
+    // "page freezes while a session loads" report; the token abort keeps a
+    // newer view from being painted over by the rest of a render that started
+    // before it.)
+    counts = await renderTranscriptFromEntriesChunked(list, renderOptions, {
       onProgress: (done, total) => {
         setStatusText(t("status.renderingTranscript", { done, total }));
       },
-      shouldContinue: () =>
-        !(viewToken !== null && !transcriptView.isCurrent(viewToken)) && !compactionHoldActive(),
-    },
-  );
+      shouldContinue: continueRender,
+    });
+    if (!continueRender()) return counts;
+    anchorBottom();
+  } else {
+    // Everything else paints newest-first: the newest slice is on screen in the
+    // first frame and the viewport anchors to it, then earlier entries are
+    // hydrated as the reader scrolls up (transcript-hydration.js). On a huge
+    // session that is the whole difference: the forward pass laid out every
+    // entry whether or not it was ever read, and the viewport sat at the *top*
+    // of the half-built transcript until the last slice landed.
+    const drawn = {
+      user: 0,
+      assistant: 0,
+      toolCards: 0,
+      toolResults: 0,
+      notices: 0,
+      compactions: 0,
+    };
+    const hydrated = await hydrateTranscriptTailFirst({
+      container: messagesEl,
+      entries: list,
+      render: (slice) => {
+        const partial = renderTranscriptFromEntries(slice, renderOptions);
+        for (const kind of Object.keys(drawn)) drawn[kind] += partial[kind] || 0;
+      },
+      earlierLabel: t("transcript.loadEarlier"),
+      loadingLabel: t("transcript.loadingEarlier"),
+      shouldContinue: continueRender,
+      onTailRendered: anchorBottom,
+    });
+    counts = { ...drawn, hydrated: hydrated.loaded, totalEntries: hydrated.total };
+    if (!continueRender()) return counts;
+  }
 
   console.log(
-    `[History] Done: ${counts.user} users, ${counts.assistant} assistants, ${counts.toolCards} tools, ${counts.toolResults} results`,
+    counts.hydrated === undefined
+      ? `[History] Done: ${counts.user} users, ${counts.assistant} assistants, ${counts.toolCards} tools, ${counts.toolResults} results`
+      : `[History] Tail ready: ${counts.hydrated}/${counts.totalEntries} entries drawn (${counts.user} users, ${counts.assistant} assistants, ${counts.toolCards} tools); earlier entries load on scroll`,
   );
   // The progress line ("Rendering N/M…") loses to whatever is true now: a
   // running compaction, a live run, a transient status.
@@ -4665,15 +4737,12 @@ async function renderSessionHistory(
     document.querySelectorAll(".thinking-block").length,
   );
 
+  // The numbers are the whole session's (folded from its entries), not just
+  // what the tail has drawn.
   updateCostDisplay();
   updateTokenUsage();
   fetchContextWindow();
 
-  if (anchor) {
-    anchorHistoryToBottom(document.getElementById("messages"), {
-      preserveScrollTarget: Boolean(searchQuery),
-    });
-  }
   return counts;
 }
 

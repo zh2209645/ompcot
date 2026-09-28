@@ -64,6 +64,8 @@ export const zhCN = {
   "status.error": "错误",
   "status.compacting": "正在压缩...",
   "status.renderingTranscript": "正在渲染对话… {done}/{total}",
+  "transcript.loadEarlier": "加载更早的消息",
+  "transcript.loadingEarlier": "正在加载更早的消息…",
   "status.waiting": "等待中...",
   "status.exporting": "正在导出...",
   "status.exported": "已导出:{path}",

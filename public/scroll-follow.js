@@ -37,20 +37,28 @@
  *   re-pins them; a reader parked mid-history keeps their position untouched.
  */
 /**
- * Move a scroller to its content end in this frame.
+ * Write a scroll offset in this frame.
  *
  * `#messages` sets `scroll-behavior: smooth`, so a plain `scrollTop` write
  * animates — and while it animates the geometry still reports "far from the
  * bottom", which is exactly what the follow policy must not read as a user
  * scroll, and what keeps a programmatic follow from being misread as the user
- * scrolling away mid-animation.
+ * scrolling away mid-animation. The same write is how tail-first hydration
+ * keeps the reader's place while earlier entries are inserted above the
+ * viewport (see transcript-hydration.js).
  */
-export function jumpToBottom(element) {
+export function setScrollTopInstant(element, top) {
   if (!element) return;
   const previousBehavior = element.style?.scrollBehavior;
   if (element.style) element.style.scrollBehavior = "auto";
-  element.scrollTop = element.scrollHeight;
+  element.scrollTop = top;
   if (element.style) element.style.scrollBehavior = previousBehavior;
+}
+
+/** Move a scroller to its content end in this frame. */
+export function jumpToBottom(element) {
+  if (!element) return;
+  setScrollTopInstant(element, element.scrollHeight);
 }
 
 export const NEAR_BOTTOM_THRESHOLD = 100;

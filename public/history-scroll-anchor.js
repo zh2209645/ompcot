@@ -17,7 +17,16 @@ export function anchorHistoryToBottom(
   // During history hydration, we want deterministic bottom anchoring.
   messagesEl.style.scrollBehavior = "auto";
 
-  const applyBottomAnchor = () => {
+  const applyBottomAnchor = (settling = false) => {
+    // A later settle pass must not yank a reader who has left the bottom. With
+    // tail-first hydration the reader may be scrolling up through history
+    // within the settle window, where "anchor to the content end" is exactly
+    // the wrong move — a gap of a full viewport (or an immeasurable box) means
+    // they are gone, and the passes stop.
+    if (settling && messagesEl.clientHeight) {
+      const gap = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+      if (gap > messagesEl.clientHeight) return;
+    }
     messagesEl.scrollTop = messagesEl.scrollHeight;
   };
 
@@ -29,7 +38,7 @@ export function anchorHistoryToBottom(
   for (let pass = 0; pass < settlePasses; pass++) {
     setTimeout(
       () => {
-        requestAnimationFrame(applyBottomAnchor);
+        requestAnimationFrame(() => applyBottomAnchor(true));
       },
       settleDelayMs * (pass + 1),
     );

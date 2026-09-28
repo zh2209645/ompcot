@@ -65,8 +65,7 @@ afterEach(() => {
 describe("renderTranscriptFromEntries", () => {
   test("maps entries to user/assistant/tool-card renders and reports counts", () => {
     const renderers = makeRenderers();
-    const onAssistantUsage = vi.fn();
-    const counts = renderTranscriptFromEntries(fixture, { ...renderers, onAssistantUsage });
+    const counts = renderTranscriptFromEntries(fixture, renderers);
 
     expect(counts).toEqual({
       user: 1,
@@ -96,7 +95,6 @@ describe("renderTranscriptFromEntries", () => {
       false,
       true,
     ]);
-    expect(onAssistantUsage).toHaveBeenCalledWith(assistantArg.usage);
 
     // Tool call → compact history card; tool result attached to the card.
     expect(renderers.toolCardRenderer.createHistoryCard).toHaveBeenCalledWith({

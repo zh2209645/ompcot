@@ -68,6 +68,8 @@ export const en = {
   "status.error": "Error",
   "status.compacting": "Compacting...",
   "status.renderingTranscript": "Rendering transcript… {done}/{total}",
+  "transcript.loadEarlier": "Load earlier messages",
+  "transcript.loadingEarlier": "Loading earlier messages…",
   "status.waiting": "Waiting...",
   "status.exporting": "Exporting...",
   "status.exported": "Exported: {path}",

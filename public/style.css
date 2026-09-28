@@ -3586,6 +3586,11 @@ body {
   flex-direction: column;
   gap: 6px;
   scroll-behavior: smooth;
+  /* Hydrating a long session inserts earlier entries *above* the viewport and
+     compensates `scrollTop` itself (transcript-hydration.js). The browser's own
+     scroll anchoring would compensate a second time and slide the reader down
+     by exactly the inserted height, so it is switched off here. */
+  overflow-anchor: none;
 }
 
 #messages::-webkit-scrollbar {
@@ -3600,6 +3605,49 @@ body {
 }
 #messages::-webkit-scrollbar-thumb:hover {
   background: var(--border-bright);
+}
+
+/* Tail-first hydration row (transcript-hydration.js): it marks where the
+   loaded transcript begins, is the manual way to pull in earlier messages, and
+   carries the "still loading" state. The transcript renders the newest entries
+   first and only what is on screen, so this row is how the rest is reachable. */
+.earlier-loader {
+  display: block;
+  width: 100%;
+  margin: 4px 0 8px;
+  padding: 8px 12px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: calc(12px * var(--font-scale));
+  cursor: pointer;
+  transition:
+    color var(--ease),
+    border-color var(--ease);
+}
+
+.earlier-loader:hover,
+.earlier-loader:focus-visible {
+  color: var(--text-secondary);
+  border-color: var(--border-hover);
+}
+
+/* Spinner only while a slice is in flight — the row's label carries the text.
+   The animation is `infinite`, so the reduced-motion block's iteration cap
+   applies to it like every other one. */
+.earlier-loader[aria-busy="true"] .earlier-loader-label::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: spin 1s linear infinite;
 }
 
 /* Welcome */

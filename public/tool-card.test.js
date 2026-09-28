@@ -279,6 +279,38 @@ describe("ToolCardRenderer status settling", () => {
     expect(container.querySelector(".tool-status").className).toContain("error");
   });
 
+  it("holds a tool result until the card it belongs to is drawn", () => {
+    // Tail-first hydration paints slices newest-first, so the result of a call
+    // can be rendered before the assistant message that made it. Dropping it
+    // here left the card stuck on "Working…" with an empty body — the result is
+    // the only thing that settles a card drawn from the session file.
+    const renderer = new ToolCardRenderer(container);
+
+    renderer.addHistoryResult("call_11", { content: [{ type: "text", text: "file-a" }] }, false);
+    expect(container.querySelector(".tool-card")).toBe(null);
+
+    renderer.createHistoryCard({
+      toolCallId: "call_11",
+      toolName: "bash",
+      args: { command: "ls" },
+    });
+
+    const card = container.querySelector(".tool-card");
+    expect(card.querySelector(".tool-status").className).toContain("complete");
+    expect(card.querySelector(".tool-output").textContent).toBe("file-a");
+  });
+
+  it("drops held results when the transcript is cleared", () => {
+    const renderer = new ToolCardRenderer(container);
+    renderer.addHistoryResult("call_12", { content: [{ type: "text", text: "stale" }] }, false);
+    renderer.clear();
+    renderer.createHistoryCard({ toolCallId: "call_12", toolName: "bash", args: {} });
+
+    // A result from a session that is no longer on screen must not paint into a
+    // card of the one that is.
+    expect(container.querySelector(".tool-output").textContent).not.toBe("stale");
+  });
+
   it("finalizes the card on screen after a re-render dropped the renderer's index", () => {
     const renderer = new ToolCardRenderer(container);
     renderer.createToolCard({

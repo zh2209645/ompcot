@@ -26,6 +26,10 @@ export class ToolCardRenderer {
   constructor(container, { statusLookup = null, follow = null } = {}) {
     this.container = container;
     this.toolCards = new Map(); // toolCallId -> element
+    // Results whose card has not been drawn yet (tail-first hydration paints
+    // the newest slice first, so a result can precede the message that made the
+    // call). Drained by `createHistoryCard`.
+    this.pendingHistoryResults = new Map();
     // Follow policy shared with the message renderer when the app passes one
     // (both render into the same scroller); a private instance keeps the
     // renderer usable on its own. See scroll-follow.js for why the decision is
@@ -327,16 +331,38 @@ export class ToolCardRenderer {
     // the next live update only writes on a real transition.
     card.dataset.toolStatus = liveStatus;
 
+    // Tail-first hydration renders slices newest-first: a result is often drawn
+    // before the tool call that produced it (the call sits at the end of an
+    // earlier slice). Apply the held result now, or the card stays "Working…"
+    // with an empty body — nothing else settles a card drawn from the file.
+    const pending = this.pendingHistoryResults?.get(toolCallId);
+    if (pending) {
+      this.pendingHistoryResults.delete(toolCallId);
+      this.applyHistoryResult(card, pending.result, pending.isError);
+    }
+
     return card;
   }
 
   /**
-   * Add result to a history card (stays collapsed)
+   * Add result to a history card (stays collapsed).
+   *
+   * The card may not exist yet — see `pendingHistoryResults`. The result is
+   * held and applied when the card lands.
    */
   addHistoryResult(toolCallId, result, isError) {
     const card = this.resolveCard(toolCallId);
-    if (!card) return;
+    if (!card) {
+      if (typeof toolCallId === "string" && toolCallId) {
+        this.pendingHistoryResults?.set(toolCallId, { result, isError });
+      }
+      return;
+    }
+    this.applyHistoryResult(card, result, isError);
+  }
 
+  /** Settle a history card's pill and body from a session-file result. */
+  applyHistoryResult(card, result, isError) {
     // The session file knows this call finished — the live lookup may still say
     // `streaming` (its end frame was suppressed while a read-only agent
     // transcript owned the surface, or lost on a saturated client), and a card
@@ -465,5 +491,6 @@ export class ToolCardRenderer {
       card.remove();
     });
     this.toolCards.clear();
+    this.pendingHistoryResults?.clear();
   }
 }

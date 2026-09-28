@@ -64,4 +64,73 @@ describe("anchorHistoryToBottom", () => {
     expect(setTimeoutFn).not.toHaveBeenCalled();
     expect(messagesEl.style.scrollBehavior).toBe("smooth");
   });
+
+  test("leaves a reader who scrolled away alone during the settle window", () => {
+    const messagesEl = {
+      scrollTop: 0,
+      scrollHeight: 3000,
+      clientHeight: 300,
+      style: { scrollBehavior: "smooth" },
+    };
+
+    const timeouts = [];
+    const requestAnimationFrame = vi.fn((cb) => {
+      cb();
+      return 1;
+    });
+    const setTimeoutFn = vi.fn((cb, ms) => {
+      timeouts.push({ cb, ms });
+      return timeouts.length;
+    });
+
+    anchorHistoryToBottom(messagesEl, {
+      requestAnimationFrame,
+      setTimeout: setTimeoutFn,
+      settleDelayMs: 80,
+      settlePasses: 2,
+    });
+    // The immediate anchor runs …
+    expect(messagesEl.scrollTop).toBe(3000);
+
+    // … the reader scrolls up through history (with tail-first hydration that
+    // is where they are, and earlier entries keep loading above them) …
+    messagesEl.scrollTop = 400;
+    timeouts[0].cb();
+    timeouts[1].cb();
+
+    // … and the settle passes leave them exactly there.
+    expect(messagesEl.scrollTop).toBe(400);
+  });
+
+  test("still re-anchors settling layout while the reader is at the bottom", () => {
+    const messagesEl = {
+      scrollTop: 0,
+      scrollHeight: 900,
+      clientHeight: 300,
+      style: { scrollBehavior: "smooth" },
+    };
+
+    const timeouts = [];
+    const requestAnimationFrame = vi.fn((cb) => {
+      cb();
+      return 1;
+    });
+    const setTimeoutFn = vi.fn((cb) => {
+      timeouts.push({ cb });
+      return timeouts.length;
+    });
+
+    anchorHistoryToBottom(messagesEl, {
+      requestAnimationFrame,
+      setTimeout: setTimeoutFn,
+      settlePasses: 1,
+    });
+    expect(messagesEl.scrollTop).toBe(900);
+
+    // Late layout (images, markdown) grew the content while the reader stayed
+    // at the end: the settle pass follows it.
+    messagesEl.scrollHeight = 1500;
+    timeouts[0].cb();
+    expect(messagesEl.scrollTop).toBe(1500);
+  });
 });
