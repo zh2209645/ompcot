@@ -10,7 +10,32 @@ permissions:
   contents: write
 
 jobs:
+  # The release has to exist before the matrix starts.
+  #
+  # Every matrix job runs `tauri-action`, which *creates* the release when it
+  # cannot find one — and they run concurrently, so the second job to look
+  # re-creates it and the first job's already-uploaded assets go with the old
+  # release. v0.8.24 lost its linux-aarch64 deb/rpm exactly that way (its
+  # fragment step then reported the asset missing and the run went red with a
+  # 13-platform manifest). Creating it once here makes `tauri-action` find it.
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the release if the tag has none yet
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "Ompcot $GITHUB_REF_NAME" \
+              --notes "Automated release for \`$GITHUB_REF_NAME\`."
+          fi
+
   build-and-release:
+    needs: prepare-release
     strategy:
       fail-fast: false
       matrix:
