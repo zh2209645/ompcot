@@ -133,7 +133,7 @@ Ompcot 不重新实现 Agent 逻辑——它驱动你已安装的 omp CLI，并�
 ~/.omp/agent/
    ├─ sessions/   (对话历史)
    ├─ auth.json   (API 密钥)
-   └─ settings.json
+   └─ settings.json      （Ompcot 与 omp 的设置）
 ```
 
 每个 omp 进程启动时加载 `embedded-server.mjs`。该扩展负责 Tauri WebView 所通信的 HTTP + WebSocket 层：静态资源、会话 API、提示词 RPC 桥接等。Rust 层负责进程生命周期、端口分配和窗口管理。
@@ -155,6 +155,7 @@ Ompcot 不重新实现 Agent 逻辑——它驱动你已安装的 omp CLI，并�
 - [自动更新与发布](docs/AUTO_UPDATER.md) —— 更新器架构、发布流水线、事故处理手册
 - [OMP 功能差距审计](docs/omp-feature-gaps.md) —— GUI 覆盖了哪些 omp 能力、还缺什么
 - [macOS 发布策略](docs/release-macos.md) —— 本地打包签名策略检查
+- [路线图](ROADMAP.md) —— 已交付内容、受上游阻塞项与想法清单
 
 ---
 

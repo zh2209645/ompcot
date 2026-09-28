@@ -139,7 +139,7 @@ Ompcot does not re-implement agent logic — it drives the omp CLI you already h
 ~/.omp/agent/
    ├─ sessions/   (chat history)
    ├─ auth.json   (API keys)
-   └─ settings.json
+   └─ settings.json      (Ompcot + omp settings)
 ```
 
 Each omp process loads `embedded-server.mjs` at startup. That extension owns the HTTP + WebSocket surface the Tauri WebView talks to: static assets, session APIs, the RPC bridge for prompts, etc. Ompcot's Rust side controls process lifecycle, port allocation, and window management.
@@ -161,6 +161,7 @@ Provide model credentials via **Settings → Configuration → Providers** (API 
 - [Auto-updater & releases](docs/AUTO_UPDATER.md) — updater architecture, release pipeline, incident runbook
 - [OMP feature-gap audit](docs/omp-feature-gaps.md) — which omp capabilities the GUI exposes, and what's still missing
 - [macOS release policy](docs/release-macos.md) — local bundle-signing policy check
+- [Roadmap](ROADMAP.md) — what shipped, what is upstream-gated, and the ideas list
 
 ---
 
