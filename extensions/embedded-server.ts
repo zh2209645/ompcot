@@ -2441,6 +2441,11 @@ export default function (omp: ExtensionAPI) {
   // fall back to content matching. Frames that no later frame of the same
   // message can overtake (a user message's start, any message_end) wait for the
   // entry instead of broadcasting an id-less frame.
+  // How long an "interrupt now" waits for the aborted turn to unwind before
+  // delivering its prompt anyway (the runtime queues it at that point, which is
+  // still better than losing it).
+  const INTERRUPT_IDLE_WAIT_MS = 10_000;
+
   const ENTRY_ID_RESOLVE_ATTEMPTS = 12;
   const ENTRY_ID_RESOLVE_DELAY_MS = 5;
 
@@ -3434,6 +3439,24 @@ export default function (omp: ExtensionAPI) {
         case "abort": {
           if (ctx) ctx.abort();
           sendTo(ws, success("abort"));
+          break;
+        }
+
+        // Hard interrupt: `steer` is a *queue* injected at the agent's next step
+        // boundary — a long tool batch or provider stream can hold it for
+        // minutes — so "interrupt now" aborts the turn and waits for the
+        // session to go idle before delivering the prompt as a fresh one.
+        // Aborting is the point: whatever was in flight is dropped.
+        case "interrupt_prompt": {
+          const a = requireAomp("interrupt_prompt");
+          if (!a) break;
+          if (ctx) ctx.abort();
+          const deadline = Date.now() + INTERRUPT_IDLE_WAIT_MS;
+          while (ctx && !ctx.isIdle() && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          a.sendUserMessage(command.message);
+          sendTo(ws, success("interrupt_prompt"));
           break;
         }
 

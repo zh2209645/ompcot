@@ -334,6 +334,14 @@ describe("delivery mode (queue vs steer)", () => {
     expect(resolveDelivery({ message: "hi", isStreaming: true, deliveryMode: "steer" })).toBe(
       "steer",
     );
+    // A slash command still queues even in interrupt mode: an abort would kill
+    // the very command the user is queueing for idle delivery.
+    expect(
+      resolveDelivery({ message: "/compact", isStreaming: true, deliveryMode: "interrupt" }),
+    ).toBe("queue");
+    expect(resolveDelivery({ message: "hi", isStreaming: true, deliveryMode: "interrupt" })).toBe(
+      "interrupt",
+    );
   });
 
   test("toggle appears only while streaming with non-slash text; defaults to Queue", async () => {
@@ -385,6 +393,21 @@ describe("delivery mode (queue vs steer)", () => {
     expect(requestId).toBeNull();
     expect(ctx.showSteerQueued).not.toHaveBeenCalled();
     expect(ctx.onSteerUndeliverable).toHaveBeenCalledWith("please hold on");
+  });
+
+  test("sendInterruptNow aborts and resends over its own command", () => {
+    // Steer is the runtime's interrupting *queue* (injected at the next step
+    // boundary); this one aborts the turn and the process delivers the prompt
+    // once the session is idle.
+    const ctx = boot({ streaming: true });
+    ctx.api.sendInterruptNow("stop that, do this instead");
+
+    expect(ctx.ws.sent).toContainEqual({
+      type: "interrupt_prompt",
+      message: "stop that, do this instead",
+    });
+    expect(ctx.ws.sent.some((m) => m.type === "steer")).toBe(false);
+    expect(ctx.showSteerQueued).toHaveBeenCalledWith("stop that, do this instead", "interrupt");
   });
 
   test("takePendingSteer hands a tracked steer's text back exactly once", () => {

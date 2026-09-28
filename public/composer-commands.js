@@ -77,7 +77,9 @@ export function filterSlashCommands(commands, token) {
 export function resolveDelivery({ message, isStreaming, deliveryMode }) {
   if (!isStreaming) return "send";
   if (isSlashCommand(message)) return "queue";
-  return deliveryMode === "steer" ? "steer" : "queue";
+  if (deliveryMode === "steer") return "steer";
+  if (deliveryMode === "interrupt") return "interrupt";
+  return "queue";
 }
 
 // When a steer is not confirmed (delivered, rejected, or timed out) within
@@ -112,14 +114,16 @@ export function createComposerQueue() {
       if (images && images.length > 0) item.images = images;
       pending.push(item);
     },
-    /** Mirror an already-delivered steer in the strip (visual only). */
-    addSteerEcho(message) {
-      steerEchoes.push(message);
+    /** Mirror an already-delivered steer/interrupt in the strip (visual only). */
+    addSteerEcho(message, kind = "steer") {
+      steerEchoes.push({ message, kind });
     },
     /** Drop the echo once its user message lands in the transcript.
      *  Returns true when an echo was actually removed. */
     removeSteerEcho(message) {
-      const idx = steerEchoes.indexOf(message);
+      const idx = steerEchoes.findIndex(
+        (echo) => (typeof echo === "string" ? echo : echo.message) === message,
+      );
       if (idx === -1) return false;
       steerEchoes.splice(idx, 1);
       return true;
@@ -146,10 +150,10 @@ export function createComposerQueue() {
           kind: item.kind || "queue",
           flushable: true,
         })),
-        ...steerEchoes.map((message) => ({
+        ...steerEchoes.map((echo) => ({
           item: null,
-          message,
-          kind: "steer",
+          message: typeof echo === "string" ? echo : echo.message,
+          kind: typeof echo === "string" ? "steer" : echo.kind || "steer",
           flushable: false,
         })),
       ];
@@ -488,6 +492,34 @@ export function createComposerCommands(deps) {
    * slash-command rejection can be recovered into the queue (see
    * consumeStreamRejection).
    */
+  /**
+   * Hard interrupt: stop the running turn, then deliver this prompt as a fresh
+   * one.
+   *
+   * `steer` is the runtime's *interrupting* delivery, but it is still a queue:
+   * it is injected at the agent's next step boundary, which a long tool batch
+   * or provider stream can hold for minutes. This is the deliberate opposite —
+   * abort the turn (losing what is in flight, which is the point) and let the
+   * process deliver the prompt once the session is idle, so it starts a real
+   * turn instead of queueing behind the one being cancelled.
+   */
+  function sendInterruptNow(message) {
+    let requestId = null;
+    try {
+      requestId = wsClient.send({ type: "interrupt_prompt", message });
+    } catch (err) {
+      console.error("[Composer] interrupt failed:", err);
+    }
+    if (!requestId) {
+      onSteerUndeliverable(message);
+      return null;
+    }
+    const timer = setTimeout(() => pendingSteers.delete(requestId), STEER_EXPIRY_MS);
+    pendingSteers.set(requestId, { message, timer });
+    showSteerQueued(message, "interrupt");
+    return requestId;
+  }
+
   function sendSteerNow(message) {
     let requestId = null;
     try {
@@ -574,6 +606,7 @@ export function createComposerCommands(deps) {
     setDeliveryMode,
     beginSend,
     sendSteerNow,
+    sendInterruptNow,
     takePendingSteer,
     consumeStreamRejection,
     destroy: () => {

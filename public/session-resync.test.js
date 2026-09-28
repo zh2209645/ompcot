@@ -343,3 +343,48 @@ describe("resyncTranscript", () => {
     expect(onStatus.mock.calls.map((call) => call[0])).toEqual(["start", "failed"]);
   });
 });
+
+describe("history renders carry each entry's identity", () => {
+  test("passes the entry id and the message timestamp to the assistant render", () => {
+    // Every tree action (fork, rewind) and every adoption/lookup resolves an
+    // element by these two; a history render without them left the placeholder
+    // id on the element and no runtime identity at all.
+    const renderers = makeRenderers();
+    renderTranscriptFromEntries(
+      [
+        {
+          type: "message",
+          id: "entry-assistant-1",
+          message: {
+            id: "entry-assistant-1",
+            role: "assistant",
+            timestamp: 1790574085504,
+            content: [{ type: "text", text: "hello" }],
+          },
+        },
+      ],
+      renderers,
+    );
+
+    const [assistantArg] = renderers.messageRenderer.renderAssistantMessage.mock.calls[0];
+    expect(assistantArg.id).toBe("entry-assistant-1");
+    expect(assistantArg.timestamp).toBe(1790574085504);
+  });
+
+  test("falls back to the entry id when the message carries none", () => {
+    const renderers = makeRenderers();
+    renderTranscriptFromEntries(
+      [
+        {
+          type: "message",
+          id: "entry-assistant-2",
+          message: { role: "assistant", timestamp: 2, content: [{ type: "text", text: "hi" }] },
+        },
+      ],
+      renderers,
+    );
+
+    const [assistantArg] = renderers.messageRenderer.renderAssistantMessage.mock.calls[0];
+    expect(assistantArg.id).toBe("entry-assistant-2");
+  });
+});

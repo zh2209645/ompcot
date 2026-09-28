@@ -92,6 +92,13 @@ export function renderTranscriptFromEntries(
         counts.assistant++;
         messageRenderer.renderAssistantMessage(
           {
+            // The entry id is what every tree action (fork, rewind) and every
+            // adoption/lookup resolves the element by, and the timestamp is the
+            // runtime identity a late frame matches on — without them a history
+            // render left the placeholder id on the element (`streaming`) and no
+            // identity at all, so a replayed `message_end` could not adopt it.
+            id: msg.id || entry.id,
+            timestamp: msg.timestamp,
             content: contentBlocks.length > 0 ? contentBlocks : text,
             usage: msg.usage,
           },

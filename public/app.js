@@ -2019,13 +2019,13 @@ const composerCommands = createComposerCommands({
     lastSentMessage = message;
     renderQueuedMessages();
   },
-  showSteerQueued: (message) => {
+  showSteerQueued: (message, kind = "steer") => {
     // Visual-only echo (F15): the steer RPC already went out; this chip must
     // never be flushed. It is retired when the user message echoes back —
     // and that echo must RENDER: unlike a queued or immediate prompt, a steer
     // has no optimistic bubble of its own, so setting `lastSentMessage` here
     // suppressed the only copy of the message the user would ever see.
-    composerQueue.addSteerEcho(message);
+    composerQueue.addSteerEcho(message, kind);
     renderQueuedMessages();
   },
   onSteerUndeliverable: (message) => {
@@ -2175,6 +2175,11 @@ function sendMessage() {
     return;
   }
 
+  if (delivery === "interrupt") {
+    composerCommands.sendInterruptNow(message);
+    return;
+  }
+
   if (isSlashCommand(message) && nativeAvailable()) {
     // A command, not a prompt: omp executes it (and records no user message),
     // so there is nothing to render optimistically — the command's own output
@@ -2225,7 +2230,13 @@ function renderQueuedMessages() {
     // delivered when the agent idles), steer → already on its way (a
     // visual-only echo of an immediately-delivered steer, never flushed).
     const label =
-      kind === "slash" ? t("slash.queuedHint") : kind === "steer" ? t("slash.steerNow") : "Queued";
+      kind === "slash"
+        ? t("slash.queuedHint")
+        : kind === "steer"
+          ? t("slash.steerPending")
+          : kind === "interrupt"
+            ? t("slash.interrupting")
+            : "Queued";
     const el = document.createElement("div");
     el.className = `queued-msg queued-msg-${kind}`;
     el.innerHTML = `
