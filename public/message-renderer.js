@@ -112,22 +112,21 @@ export class MessageRenderer {
    */
   transcriptState(op, extra = {}) {
     if (!debugLog.isEnabled()) return;
-    const assistants = this.liveAssistants();
-    // The last few identities, not every element's: this line is written on
-    // every rendered entry and every streamed frame, and the full arrays cost
-    // more to build than the information they added (the duplicate detector
-    // below is what actually answers "is something drawn twice").
-    const tail = assistants.slice(-12);
+    // Counts and the last few identities only, and from the index itself: this
+    // line is written on every rendered entry and every streamed frame, so it
+    // must not walk the transcript. `assistantOrder` is append-only and reset
+    // by `clear()`, so its length *is* the live count.
+    const tail = this.assistantOrder.slice(-12);
     logDebug("transcript", {
       op,
-      assistants: assistants.length,
+      assistants: this.assistantOrder.length,
       users: this.userCount,
       ids: tail.map((el) => el.dataset.messageId || null),
       ts: tail.map((el) => el.dataset.messageTs || null),
       streaming: tail.filter((el) => el.dataset.finalized !== "true").length,
       // The automatic path throttles the one check that reads message text; an
       // explicit call (a debug dump, a test) always gets a full answer.
-      duplicates: this.reportDuplicateMessages(assistants, { throttleText: true }),
+      duplicates: this.reportDuplicateMessages(null, { throttleText: true }),
       ...extra,
     });
   }
@@ -676,9 +675,9 @@ export class MessageRenderer {
     const wanted = typeof messageId === "string" && messageId ? messageId : null;
     const wantedTs =
       typeof messageTs === "number" && Number.isFinite(messageTs) ? String(messageTs) : null;
-    const candidates = this.liveAssistants();
-    for (let i = candidates.length - 1; i >= 0; i--) {
-      const element = candidates[i];
+    for (let i = this.assistantOrder.length - 1; i >= 0; i--) {
+      const element = this.assistantOrder[i];
+      if (!this.isLiveAssistant(element)) continue;
       if (wanted && element.dataset.messageId !== wanted) continue;
       if (element.dataset.finalized === "true") continue;
       // Asked without an id (the live-streaming adoption), the element must
@@ -749,9 +748,9 @@ export class MessageRenderer {
     const wanted =
       typeof messageTs === "number" && Number.isFinite(messageTs) ? String(messageTs) : null;
     if (!wanted) return null;
-    const candidates = this.liveAssistants();
-    for (let i = candidates.length - 1; i >= 0; i--) {
-      const element = candidates[i];
+    for (let i = this.assistantOrder.length - 1; i >= 0; i--) {
+      const element = this.assistantOrder[i];
+      if (!this.isLiveAssistant(element)) continue;
       if (element.dataset.finalized !== "true") continue;
       const id = element.dataset.messageId || "";
       if (id && id !== "streaming") continue;

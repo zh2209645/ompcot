@@ -9,6 +9,35 @@ import { t } from "./i18n.js";
 import remend from "./vendor/remend.js";
 
 /**
+ * Longest slice of a partial message handed to the repair pass (`remend`).
+ *
+ * The repair only has to fix constructs that are still *open*, and this
+ * renderer's inline patterns never span a line break (`.` without the `s` flag:
+ * bold, italic, code spans, strikethrough and links all match within one line),
+ * so the last lines are the whole repairable region. `remend` itself is
+ * super-linear in its input — measured on a partial message of repeated
+ * `**bold** \`code\` [link](url)` lines: 10 KB 0.13 ms, 30 KB 92 ms, 50 KB
+ * 211 ms, 200 KB 2.9 s, while `renderMarkdown` needs 6.9 ms for the same 200 KB —
+ * so a long answer froze a frame per delta. Everything before the window is
+ * complete markdown, which the repair leaves alone anyway; a text shorter than
+ * the window (the common case) takes the original path unchanged.
+ */
+export const STREAM_REPAIR_WINDOW = 4096;
+
+/**
+ * Index the repair window starts at: the last two lines of `text`, capped at
+ * `STREAM_REPAIR_WINDOW` characters.
+ */
+export function streamRepairWindowStart(text) {
+  const length = text.length;
+  if (length <= STREAM_REPAIR_WINDOW) return 0;
+  let start = text.lastIndexOf("\n", length - 1);
+  start = start <= 0 ? 0 : text.lastIndexOf("\n", start - 1) + 1;
+  if (length - start > STREAM_REPAIR_WINDOW) start = length - STREAM_REPAIR_WINDOW;
+  return start;
+}
+
+/**
  * Streaming-tolerant renderer for partial markdown. remend closes unterminated
  * inline syntax (bold, italic, inline code, links, strikethrough) so mid-stream
  * text previews cleanly instead of showing raw markers. Falls back to escaped
@@ -17,7 +46,22 @@ import remend from "./vendor/remend.js";
 export function renderStreamingMarkdown(text) {
   if (!text) return "";
   try {
-    let repaired = remend(text);
+    const start = streamRepairWindowStart(text);
+    let repaired;
+    if (start === 0) {
+      repaired = remend(text);
+    } else {
+      // The window can start inside an open ``` fence. The repair pass has to
+      // know that, or it would read code as prose and could close constructs
+      // that are not open; feeding it an opening fence and dropping the marker
+      // again keeps its state machine honest. It leaves unterminated fences
+      // open, and the parity check below closes the whole text for the
+      // renderer (which only matches paired fences).
+      const head = text.slice(0, start);
+      const inFence = (head.match(/```/g) || []).length % 2 === 1;
+      const tail = remend(inFence ? `\`\`\`\n${text.slice(start)}` : text.slice(start));
+      repaired = head + (inFence ? tail.slice(4) : tail);
+    }
     // remend marks links whose URL hasn't finished streaming; show just the
     // label until the URL is complete.
     repaired = repaired.replace(/\[([^\]]*)\]\(streamdown:incomplete-link\)/g, "$1");
