@@ -450,6 +450,8 @@ export const zhCN = {
   "ctx.window": "上下文窗口",
   "ctx.compact": "压缩",
   "ctx.compactTitle": "上下文已超过 80% — 压缩以节省 token",
+  "ctx.compacted": "上下文已压缩",
+  "ctx.compactFailed": "压缩失败 — {error}",
   "ctx.usageTitle": "上下文：{used} / {total} token",
   "ctx.cached": "已缓存",
   "ctx.input": "输入",

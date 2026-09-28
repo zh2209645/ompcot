@@ -28,10 +28,30 @@ export function renderTranscriptFromEntries(
   entries,
   { messageRenderer, toolCardRenderer, searchQuery = "", onAssistantUsage = null } = {},
 ) {
-  const counts = { user: 0, assistant: 0, toolCards: 0, toolResults: 0, notices: 0 };
+  const counts = {
+    user: 0,
+    assistant: 0,
+    toolCards: 0,
+    toolResults: 0,
+    notices: 0,
+    compactions: 0,
+  };
   if (!Array.isArray(entries)) return counts;
 
   for (const entry of entries) {
+    // A committed compaction is a transcript item of its own: the session's
+    // branch continues from it and the history it summarized is gone from the
+    // file, so without a block here a compacted session (loaded, peeked, or
+    // repainted by the snapshot a manual compaction broadcasts) would show the
+    // kept tail with a silent hole where the rest of the conversation was. The
+    // summary is the only remaining record of it — same as omp's own TUI.
+    if (entry?.type === "compaction") {
+      if (typeof messageRenderer.renderCompaction === "function") {
+        const drawn = messageRenderer.renderCompaction({ id: entry.id, summary: entry.summary });
+        if (drawn) counts.compactions++;
+      }
+      continue;
+    }
     // Displayable session notices (`async-result` for a delivered background
     // job, `launch-completion`, late diagnostics) are entries of their own kind
     // and part of the transcript; `display: false` ones are hidden by design.

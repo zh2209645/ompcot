@@ -715,10 +715,10 @@ export class MessageRenderer {
    * and an entry that is already on screen (a snapshot repaint drew it, then
    * the extension forwarded it, or a resync replayed it) is not drawn twice.
    *
-   * @param {{id?: string|null, customType?: string, content?: unknown}} notice
+   * @param {{id?: string|null, customType?: string, content?: unknown, label?: string|null}} notice
    * @returns {HTMLElement|null} the appended element, or null when skipped
    */
-  renderNotice({ id = null, customType = "", content = null } = {}) {
+  renderNotice({ id = null, customType = "", content = null, label = null } = {}) {
     const text = noticeText(content);
     if (!text) return null;
     if (typeof id === "string" && id && this.findNoticeElement(id)) return null;
@@ -729,10 +729,10 @@ export class MessageRenderer {
 
     const head = document.createElement("div");
     head.className = "notice-head";
-    const label = document.createElement("span");
-    label.className = "notice-label";
-    label.textContent = t("notice.label");
-    head.appendChild(label);
+    const labelEl = document.createElement("span");
+    labelEl.className = "notice-label";
+    labelEl.textContent = label || t("notice.label");
+    head.appendChild(labelEl);
     if (customType) {
       // The producer's identifier (omp's own or an extension's) is data, not a
       // translatable label — shown as written, like a tool name.
@@ -752,6 +752,26 @@ export class MessageRenderer {
     this.container.appendChild(block);
     this.scrollToBottom();
     return block;
+  }
+
+  /**
+   * Append a committed compaction (`type:"compaction"` entry).
+   *
+   * The entry holds the summary that replaced the summarized history — the
+   * transcript's only record of that stretch of the conversation, since the
+   * entries it covered are no longer on the session's branch. It renders like
+   * a notice (id-keyed, clamped body) under a label that says what it is.
+   *
+   * @param {{id?: string|null, summary?: unknown}} compaction
+   * @returns {HTMLElement|null} the appended element, or null when skipped
+   */
+  renderCompaction({ id = null, summary = null } = {}) {
+    return this.renderNotice({
+      id,
+      customType: "compaction",
+      content: summary,
+      label: t("ctx.compacted"),
+    });
   }
 
   /** The notice element for a session-entry id, if it is on screen. */

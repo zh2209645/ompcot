@@ -616,6 +616,67 @@ export function newDisplayableNotices(
   return notices;
 }
 
+/** Callback options `ExtensionContext.compact` accepts in place of focus text. */
+export interface GuiCompactOptions {
+  onComplete?: (result: { summary?: string } | undefined) => void;
+  onError?: (error: unknown) => void;
+}
+
+/** Terminal outcome of a GUI-initiated manual compaction. */
+export interface GuiCompactOutcome {
+  summary?: string;
+  error?: string;
+}
+
+/**
+ * Drive a manual compaction for a GUI request and report exactly one outcome.
+ *
+ * `AgentSession.compact` rejects on every failure path — a no-op ("Already
+ * compacted", "Nothing to compact (session too small)"), a summarizer error, a
+ * pass already in flight — and `onError` only sees the failures raised inside
+ * its own try block, so the returned promise is the only *complete* signal.
+ * The host treats an unhandled rejection as fatal (the omp process exits and
+ * takes every window on that port with it), and the GUI call is deliberately
+ * fire-and-forget, so that rejection has to be consumed here: this is what
+ * turns a failed compaction into a message instead of a dead workspace.
+ *
+ * Extension-facing `compact` takes *either* focus instructions (a string — the
+ * positional `customInstructions` of `AgentSession.compact`; a
+ * `customInstructions` key inside the options object is ignored by the host)
+ * *or* the callback options, never both, so the focus path reports through the
+ * promise alone.
+ */
+export function startGuiCompaction(
+  compact: (instructionsOrOptions?: string | GuiCompactOptions) => Promise<unknown>,
+  report: (outcome: GuiCompactOutcome) => void,
+  instructions?: string,
+): void {
+  const focus = typeof instructions === "string" ? instructions.trim() : "";
+  let settled = false;
+  const finish = (outcome: GuiCompactOutcome): void => {
+    if (settled) return;
+    settled = true;
+    report(outcome);
+  };
+  try {
+    const pending = focus
+      ? compact(focus)
+      : compact({
+          onComplete: (result) =>
+            finish({
+              summary: typeof result?.summary === "string" ? result.summary : undefined,
+            }),
+          onError: (err) => finish({ error: errMessage(err) }),
+        });
+    void Promise.resolve(pending).then(
+      () => finish({}),
+      (err: unknown) => finish({ error: errMessage(err) }),
+    );
+  } catch (err) {
+    finish({ error: errMessage(err) });
+  }
+}
+
 /** Apply one patch to the published entry (a missing flag keeps its last value). */
 export function applyInstancePatch(
   entry: InstanceEntry,
@@ -4067,19 +4128,59 @@ export default function (omp: ExtensionAPI) {
         }
 
         case "compact": {
-          if (ctx) {
-            // Broadcast compaction start to all clients
-            broadcast({ type: "auto_compaction_start" });
-            ctx.compact({
-              customInstructions: command.customInstructions,
-              onComplete: (result: { summary?: string }) => {
-                broadcast({ type: "auto_compaction_end", summary: result?.summary });
-              },
-              onError: (err: unknown) => {
-                broadcast({ type: "auto_compaction_end", summary: `Error: ${errMessage(err)}` });
-              },
-            });
+          if (!ctx) {
+            sendTo(ws, error("compact", "No active session"));
+            break;
           }
+          // Broadcast compaction start to all clients. The frame must ride the
+          // `{type:"event", event:…}` envelope every other forwarded/synthetic
+          // event uses: the frontend's WS client routes only that shape to the
+          // app's event switch, so a bare `auto_compaction_start` fell into its
+          // "Unknown message type" branch and the GUI showed nothing at all for
+          // a manual compaction.
+          broadcast({ type: "event", event: { type: "auto_compaction_start" } });
+          startGuiCompaction(
+            (instructionsOrOptions) => ctx.compact(instructionsOrOptions),
+            (outcome) => {
+              const report = () => {
+                broadcast({
+                  type: "event",
+                  event: {
+                    type: "auto_compaction_end",
+                    ...outcome,
+                    // The runtime's live context usage: after a commit this is
+                    // the *post*-compaction size, while the repaint below
+                    // derives its number from the kept tail's last assistant
+                    // message (still the pre-compaction one). This frame is the
+                    // UI's last word.
+                    contextUsage: ctx.getContextUsage(),
+                  },
+                });
+              };
+              if (outcome.error) {
+                report();
+                return;
+              }
+              // A committed compaction rewrites the branch (the summary replaces
+              // the summarized history), so the transcript on screen no longer
+              // matches the session: broadcast the fresh snapshot — the same one
+              // a session swap or a rewind sends — and only then the terminal
+              // frame, so its usage wins over the repaint's history-derived one.
+              void buildStateSnapshot(ctx)
+                .catch((err: unknown) => {
+                  console.error(
+                    "[Embedded] compaction snapshot broadcast failed:",
+                    errMessage(err),
+                  );
+                  return null;
+                })
+                .then((snapshot) => {
+                  if (snapshot) broadcast(snapshot);
+                  report();
+                });
+            },
+            typeof command.customInstructions === "string" ? command.customInstructions : undefined,
+          );
           sendTo(ws, success("compact"));
           break;
         }
@@ -8158,7 +8259,11 @@ export default function (omp: ExtensionAPI) {
   // Rewinding moves the session's leaf, so the transcript on screen is now a
   // suffix of the new branch: broadcast the same snapshot a session swap
   // broadcasts and let the UI replay it. `rewind_done` tells the GUI what
-  // happened (and lets it restore the withdrawn message into the composer).
+  // happened (and lets it restore the withdrawn message into the composer);
+  // it rides the `{type:"event", event:{…}}` envelope because that is the only
+  // shape the frontend's WS client routes to the app's event switch — a bare
+  // frame lands in its "Unknown message type" branch, so a failed or cancelled
+  // rewind reported nothing at all.
   try {
     if (typeof omp.registerCommand === "function") {
       omp.registerCommand("ompcot-rewind", {
@@ -8174,24 +8279,29 @@ export default function (omp: ExtensionAPI) {
             }
           )?.navigateTree;
           if (!entryId) {
-            broadcast({ type: "rewind_done", ok: false, error: "entryId is required" });
+            broadcast({
+              type: "event",
+              event: { type: "rewind_done", ok: false, error: "entryId is required" },
+            });
             return;
           }
           if (typeof navigate !== "function") {
             broadcast({
-              type: "rewind_done",
-              ok: false,
-              error: "Rewind unavailable in this build",
+              type: "event",
+              event: { type: "rewind_done", ok: false, error: "Rewind unavailable in this build" },
             });
             return;
           }
           try {
             const result = await navigate.call(commandCtx, entryId, { summarize: false });
             broadcast({
-              type: "rewind_done",
-              ok: true,
-              entryId,
-              cancelled: Boolean(result?.cancelled),
+              type: "event",
+              event: {
+                type: "rewind_done",
+                ok: true,
+                entryId,
+                cancelled: Boolean(result?.cancelled),
+              },
             });
             try {
               broadcast(await buildStateSnapshot(commandCtx as ExtensionContext));
@@ -8199,7 +8309,10 @@ export default function (omp: ExtensionAPI) {
               console.error("[Embedded] rewind snapshot broadcast failed:", errMessage(err));
             }
           } catch (err) {
-            broadcast({ type: "rewind_done", ok: false, entryId, error: errMessage(err) });
+            broadcast({
+              type: "event",
+              event: { type: "rewind_done", ok: false, entryId, error: errMessage(err) },
+            });
           }
         },
       });

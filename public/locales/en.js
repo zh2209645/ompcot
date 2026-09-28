@@ -459,6 +459,8 @@ export const en = {
   "ctx.window": "Context Window",
   "ctx.compact": "Compact",
   "ctx.compactTitle": "Context is over 80% — compact to save tokens",
+  "ctx.compacted": "Context compacted",
+  "ctx.compactFailed": "Compaction failed — {error}",
   "ctx.usageTitle": "Context: {used} / {total} tokens",
   "ctx.cached": "Cached",
   "ctx.input": "Input",

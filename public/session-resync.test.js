@@ -64,7 +64,14 @@ describe("renderTranscriptFromEntries", () => {
     const onAssistantUsage = vi.fn();
     const counts = renderTranscriptFromEntries(fixture, { ...renderers, onAssistantUsage });
 
-    expect(counts).toEqual({ user: 1, assistant: 1, toolCards: 1, toolResults: 1, notices: 0 });
+    expect(counts).toEqual({
+      user: 1,
+      assistant: 1,
+      toolCards: 1,
+      toolResults: 1,
+      notices: 0,
+      compactions: 0,
+    });
 
     // User message: text + extracted image, rendered in history mode.
     expect(renderers.messageRenderer.renderUserMessage).toHaveBeenCalledTimes(1);
@@ -98,6 +105,30 @@ describe("renderTranscriptFromEntries", () => {
       { content: [{ type: "text", text: "file-a\nfile-b" }] },
       false,
     );
+  });
+
+  test("renders a committed compaction as its own transcript item", () => {
+    // The compacted-away history is gone from the branch, so the summary entry
+    // is the only record of it — dropping it leaves a silent hole where the
+    // earlier conversation was.
+    const renderers = makeRenderers();
+    renderers.messageRenderer.renderCompaction = vi.fn(() => document.createElement("div"));
+    const counts = renderTranscriptFromEntries(
+      [
+        { type: "message", message: { role: "user", content: "before" } },
+        { type: "compaction", id: "c1", summary: "## Goal\n- earlier work", method: "soft" },
+        { type: "message", message: { role: "user", content: "after" } },
+      ],
+      renderers,
+    );
+
+    expect(renderers.messageRenderer.renderCompaction).toHaveBeenCalledTimes(1);
+    expect(renderers.messageRenderer.renderCompaction).toHaveBeenCalledWith({
+      id: "c1",
+      summary: "## Goal\n- earlier work",
+    });
+    expect(counts.compactions).toBe(1);
+    expect(counts.user).toBe(2);
   });
 
   test("renders displayable notices and skips the hidden ones", () => {
@@ -179,7 +210,14 @@ describe("renderTranscriptFromEntries", () => {
       ],
       renderers,
     );
-    expect(counts).toEqual({ user: 0, assistant: 0, toolCards: 1, toolResults: 0, notices: 0 });
+    expect(counts).toEqual({
+      user: 0,
+      assistant: 0,
+      toolCards: 1,
+      toolResults: 0,
+      notices: 0,
+      compactions: 0,
+    });
     expect(renderers.messageRenderer.renderAssistantMessage).not.toHaveBeenCalled();
     expect(renderers.toolCardRenderer.createHistoryCard).toHaveBeenCalledTimes(1);
   });
@@ -192,6 +230,7 @@ describe("renderTranscriptFromEntries", () => {
       toolCards: 0,
       toolResults: 0,
       notices: 0,
+      compactions: 0,
     });
     expect(renderTranscriptFromEntries([], renderers)).toEqual({
       user: 0,
@@ -199,6 +238,7 @@ describe("renderTranscriptFromEntries", () => {
       toolCards: 0,
       toolResults: 0,
       notices: 0,
+      compactions: 0,
     });
     expect(renderers.messageRenderer.renderUserMessage).not.toHaveBeenCalled();
   });

@@ -1240,7 +1240,10 @@ function handleCompactionStart() {
   const el = document.createElement("div");
   el.className = "system-message compaction-message";
   el.id = "compaction-indicator";
-  el.innerHTML = '<span class="compaction-spinner">⟳</span> Compacting context…';
+  const spinner = document.createElement("span");
+  spinner.className = "compaction-spinner";
+  spinner.textContent = "⟳";
+  el.append(spinner, ` ${t("status.compacting")}`);
   messagesContainer.appendChild(el);
   // The compaction indicator is the newest item: keep it in view the same way
   // every other append does (the previous bare `scrollToBottom()` was an
@@ -1250,13 +1253,36 @@ function handleCompactionStart() {
 
 function handleCompactionEnd(event) {
   const indicator = document.getElementById("compaction-indicator");
+  const error = typeof event?.error === "string" ? event.error : "";
+  if (error) {
+    // A compaction can end without compacting: "Already compacted" and
+    // "Nothing to compact (session too small)" are how the runtime declines a
+    // no-op pass, and a summarizer failure lands here too. Nothing changed, so
+    // the transcript, the pill and the ≥80% compact button (which hides itself
+    // on click) must all stay where they were — only the outcome line moves.
+    if (indicator) {
+      indicator.textContent = t("ctx.compactFailed", { error });
+      indicator.classList.add("compaction-failed");
+    }
+    updateTokenUsage();
+    return;
+  }
   if (indicator) {
-    const summary = event.summary ? ` — ${event.summary}` : "";
-    indicator.innerHTML = `✓ Context compacted${summary}`;
+    indicator.textContent = `✓ ${t("ctx.compacted")}`;
     indicator.classList.add("compaction-done");
   }
-  // Reset token tracking — next message will update
-  lastInputTokens = 0;
+  // The runtime reports the *post*-compaction size on the frame; the snapshot
+  // that arrives just before it repainted the transcript from the kept tail,
+  // whose last assistant usage is still the pre-compaction number. Prefer the
+  // live value; without one, blank the stale numbers (the next message sets
+  // them) rather than showing a percentage the context no longer has.
+  if (!applyContextUsage(event.contextUsage)) {
+    lastInputTokens = 0;
+  }
+  // `lastUsage` is the pill's *breakdown* (cache read / input) and belongs to
+  // the last model request — the one that ran against the pre-compaction
+  // context. Keeping it would draw a full popover next to a small pill; the
+  // explicit "no usage yet" line is the honest state until the next request.
   lastUsage = null;
   updateTokenUsage();
   hideCompactButton();
@@ -4176,6 +4202,25 @@ function updateCostDisplay() {
   } else {
     sessionCostEl.classList.remove("visible");
   }
+}
+
+/**
+ * Adopt the runtime's live context usage (`ContextUsage`:
+ * `{tokens, contextWindow, percent}`) as the pill's state.
+ *
+ * It is the only post-compaction authority: the history pass derives its
+ * number from the last *kept* assistant message's request usage, which is the
+ * pre-compaction size until the next model request.
+ *
+ * @returns {boolean} true when the value was usable and applied
+ */
+function applyContextUsage(usage) {
+  if (!usage || typeof usage.tokens !== "number" || !Number.isFinite(usage.tokens)) return false;
+  lastInputTokens = usage.tokens;
+  if (typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
+    contextWindowSize = usage.contextWindow;
+  }
+  return true;
 }
 
 function updateTokenUsage() {
