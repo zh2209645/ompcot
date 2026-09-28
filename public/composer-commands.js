@@ -184,6 +184,7 @@ export function createComposerCommands(deps) {
     onSubmit = () => {},
     queueSlash = () => {},
     showSteerQueued = () => {},
+    onSteerUndeliverable = () => {},
     toggleEl = null,
   } = deps;
 
@@ -494,12 +495,29 @@ export function createComposerCommands(deps) {
     } catch (err) {
       console.error("[Composer] steer failed:", err);
     }
-    if (requestId) {
-      const timer = setTimeout(() => pendingSteers.delete(requestId), STEER_EXPIRY_MS);
-      pendingSteers.set(requestId, { message, timer });
+    if (!requestId) {
+      // Nothing left the client: no echo chip (it would never retire and the
+      // text would be gone), and the caller restores the draft.
+      onSteerUndeliverable(message);
+      return null;
     }
+    const timer = setTimeout(() => pendingSteers.delete(requestId), STEER_EXPIRY_MS);
+    pendingSteers.set(requestId, { message, timer });
     showSteerQueued(message);
     return requestId;
+  }
+
+  /**
+   * Drop a tracked steer and return its text, so a broker/upstream failure can
+   * restore the draft instead of losing the message (see the undeliverable and
+   * rejected-response handlers in app.js).
+   */
+  function takePendingSteer(requestId) {
+    const entry = requestId ? pendingSteers.get(requestId) : null;
+    if (!entry) return null;
+    clearTimeout(entry.timer);
+    pendingSteers.delete(requestId);
+    return entry.message;
   }
 
   /**
@@ -556,6 +574,7 @@ export function createComposerCommands(deps) {
     setDeliveryMode,
     beginSend,
     sendSteerNow,
+    takePendingSteer,
     consumeStreamRejection,
     destroy: () => {
       unsubscribeLanguage();

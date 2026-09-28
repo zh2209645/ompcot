@@ -3554,7 +3554,14 @@ body {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-top: var(--messages-top-inset);
-  padding-bottom: var(--messages-bottom-inset);
+  /* The composer is an opaque overlay pinned to the bottom of this column, so
+     the scroller ends where the composer begins (margin, not padding — the
+     composer's own background covered the transcript either way). With the
+     padding form the scroll bar ran on behind the input box: its last stretch
+     looked cut off and could not be dragged (clicks there landed on the
+     composer). The inset already carries the layout's 12px gap, so the last
+     message sits exactly as high as it did. */
+  margin-bottom: var(--messages-bottom-inset);
   padding-left: max(24px, calc((100% - 960px) / 2));
   padding-right: max(24px, calc((100% - 960px) / 2));
   display: flex;

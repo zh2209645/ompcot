@@ -62,6 +62,7 @@ function boot({ streaming = false } = {}) {
   const onSubmit = vi.fn();
   const queueSlash = vi.fn();
   const showSteerQueued = vi.fn();
+  const onSteerUndeliverable = vi.fn();
   let isStreaming = streaming;
 
   // Mirror app.js wiring: consumed keys skip the Enter-send path.
@@ -72,6 +73,7 @@ function boot({ streaming = false } = {}) {
     onSubmit,
     queueSlash,
     showSteerQueued,
+    onSteerUndeliverable,
     toggleEl,
   });
   input.addEventListener("keydown", (e) => {
@@ -92,6 +94,7 @@ function boot({ streaming = false } = {}) {
     onSubmit,
     queueSlash,
     showSteerQueued,
+    onSteerUndeliverable,
     setStreaming: (value) => {
       isStreaming = value;
     },
@@ -368,6 +371,31 @@ describe("delivery mode (queue vs steer)", () => {
     ctx.api.sendSteerNow("stop and reconsider");
     expect(ctx.ws.sent).toContainEqual({ type: "steer", message: "stop and reconsider" });
     expect(ctx.showSteerQueued).toHaveBeenCalledWith("stop and reconsider");
+  });
+
+  test("a steer that never left the client asks for the draft instead of chipping it", () => {
+    const ctx = boot({ streaming: true });
+    ctx.ws.send = () => {
+      throw new Error("WebSocket is not open");
+    };
+
+    const requestId = ctx.api.sendSteerNow("please hold on");
+
+    // No echo chip: it could never retire, and the text would be gone with it.
+    expect(requestId).toBeNull();
+    expect(ctx.showSteerQueued).not.toHaveBeenCalled();
+    expect(ctx.onSteerUndeliverable).toHaveBeenCalledWith("please hold on");
+  });
+
+  test("takePendingSteer hands a tracked steer's text back exactly once", () => {
+    const ctx = boot({ streaming: true });
+    const requestId = ctx.api.sendSteerNow("reconsider");
+
+    expect(requestId).toBeTruthy();
+    expect(ctx.api.takePendingSteer(requestId)).toBe("reconsider");
+    // Consumed: a repeated rejection cannot restore it twice.
+    expect(ctx.api.takePendingSteer(requestId)).toBeNull();
+    expect(ctx.api.takePendingSteer(null)).toBeNull();
   });
 
   test("F14: beginSend resolves Steer-now BEFORE the post-send refresh resets the toggle", () => {

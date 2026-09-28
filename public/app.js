@@ -993,6 +993,18 @@ wsClient.addEventListener("serverError", (e) => {
   pollInstances().catch(() => {});
 });
 
+/**
+ * A message that never reached the agent goes back to the composer (when the
+ * user has not started typing something else) with an explanation, so no send
+ * path can silently swallow text.
+ */
+function restoreUndeliveredMessage(message, reason) {
+  messageRenderer.renderError(reason);
+  if (message && !messageInput.value.trim()) {
+    setComposerText(messageInput, message);
+  }
+}
+
 // The broker could not deliver a command to any live omp process. For a tracked
 // prompt this means the user's message was dropped — surface it, clear the
 // optimistic streaming/typing state, and restore the text so it isn't lost.
@@ -1000,7 +1012,16 @@ wsClient.addEventListener("commandUndeliverable", (e) => {
   const { requestId, reason, command } = e.detail || {};
   const pending = requestId ? inFlightPrompts.get(requestId) : null;
   if (!pending) {
-    console.warn("[WS] command undeliverable:", { command, reason, requestId });
+    const steered = composerCommands.takePendingSteer(requestId);
+    if (steered === null) {
+      console.warn("[WS] command undeliverable:", { command, reason, requestId });
+      return;
+    }
+    const detail =
+      reason === "no_route"
+        ? "no running session to receive it"
+        : "the session process is no longer reachable";
+    restoreUndeliveredMessage(steered, `Message not delivered (${detail}).`);
     return;
   }
   clearTimeout(pending.timer);
@@ -1029,7 +1050,16 @@ wsClient.addEventListener("commandResponse", (e) => {
   const requestId = detail.requestId ?? detail.id;
   if (!requestId) return;
   const pending = inFlightPrompts.get(requestId);
-  if (!pending) return;
+  if (!pending) {
+    // Steers live in the composer module's own tracking (they are sent with a
+    // bare `steer` command, not a prompt envelope): a rejection must give the
+    // text back rather than leaving the chip and losing the message.
+    const steered = composerCommands.takePendingSteer(requestId);
+    if (steered !== null && detail.success === false) {
+      restoreUndeliveredMessage(steered, detail.error || "Message not delivered");
+    }
+    return;
+  }
   // Acknowledged either way — stop considering this command in flight.
   clearTimeout(pending.timer);
   inFlightPrompts.delete(requestId);
@@ -1866,10 +1896,18 @@ const composerCommands = createComposerCommands({
   },
   showSteerQueued: (message) => {
     // Visual-only echo (F15): the steer RPC already went out; this chip must
-    // never be flushed. It is retired when the user message echoes back.
+    // never be flushed. It is retired when the user message echoes back —
+    // and that echo must RENDER: unlike a queued or immediate prompt, a steer
+    // has no optimistic bubble of its own, so setting `lastSentMessage` here
+    // suppressed the only copy of the message the user would ever see.
     composerQueue.addSteerEcho(message);
-    lastSentMessage = message;
     renderQueuedMessages();
+  },
+  onSteerUndeliverable: (message) => {
+    restoreUndeliveredMessage(
+      message,
+      "Steer not delivered — the session may have closed. The text was put back in the composer.",
+    );
   },
   toggleEl: document.getElementById("delivery-toggle"),
 });
