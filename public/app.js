@@ -56,7 +56,7 @@ import {
 } from "./pkg-registry.js";
 import { ScrollFollow } from "./scroll-follow.js";
 import { reconcileSessionActivity } from "./session-activity.js";
-import { renderTranscriptFromEntries, resyncTranscript } from "./session-resync.js";
+import { renderTranscriptFromEntriesChunked, resyncTranscript } from "./session-resync.js";
 import { findPortForSession, getWorkspacePathForPort } from "./session-routing.js";
 import { SessionSidebar } from "./session-sidebar.js";
 import { SessionSwitchGate, sameWorkspacePath } from "./session-switch.js";
@@ -307,6 +307,16 @@ let isScrolledUp = false;
 let lastSentMessage = null; // Track to avoid duplicate rendering in mirror mode
 let lastUsage = null; // Full usage object for context visualiser
 let mirrorActiveSessionFile = null; // The live session file path from the TUI
+/**
+ * Session whose entries the transcript DOM was last drawn from, or null when
+ * the screen holds no transcript (a welcome view, a read-only subagent peek).
+ *
+ * A *truncated* snapshot (`SNAPSHOT_ENTRY_LIMIT`) is the live tail, not the
+ * transcript, so it may only fill a screen that does not already hold this
+ * session — replacing a full transcript with the tail would lose the
+ * conversation (see `handleMirrorSync`).
+ */
+let renderedTranscriptFile = null;
 let viewingActiveSession = true; // Whether we're viewing the live session or a historical one
 let isMirrorMode = false; // Set when mirror_sync received
 let liveInstances = []; // All running Ompcot instances [{port, sessionFile, cwd}]
@@ -663,14 +673,49 @@ function openSessionFromFile(sessionFile, kind = null) {
 function returnToLiveTranscript(sessionFile = null) {
   const file = sessionFile || mirrorActiveSessionFile || sidebar.activeSessionFile || null;
   transcriptView.claimLive(file);
-  try {
-    // The runtime answers with its authoritative snapshot, which repaints
-    // through the shared mirror_sync path; live frames resume painting too
-    // because the peek no longer owns the surface.
-    wsClient.send({ type: "mirror_sync_request" });
-  } catch (err) {
-    console.error("[AgentHub] mirror sync request failed:", err);
-  }
+  // The peek's DOM is not the live transcript: a truncated snapshot may not
+  // replace it (and a full one may not arrive at all — a snapshot is only sent
+  // on connect / request / commit), so the live view is rebuilt from the
+  // runtime's own entries, time-sliced like any other history paint.
+  renderedTranscriptFile = null;
+  void hydrateTranscriptFromRuntime(file);
+}
+
+/**
+ * Redraw the live transcript from the runtime's own entries.
+ *
+ * The path for every case a snapshot cannot serve: a *truncated* snapshot (the
+ * session is larger than `SNAPSHOT_ENTRY_LIMIT`, so the snapshot is only the
+ * live tail), a dropped peek (the screen holds another session's transcript),
+ * or a repaint the compaction hold deferred. `get_messages` returns the
+ * session's entries in full and the render is the same time-sliced path a
+ * history load uses, so a huge session stays responsive and a newer claim can
+ * still abort the paint.
+ */
+async function hydrateTranscriptFromRuntime(sessionFile = null) {
+  const file = sessionFile || mirrorActiveSessionFile || sidebar.activeSessionFile || null;
+  if (!file) return;
+  const viewToken = transcriptView.claimLive(file);
+  messageRenderer.clear();
+  toolCardRenderer.clear();
+  messageRenderer.renderSystemMessage(t("session.loadingSession"));
+  await resyncTranscript({
+    wsClient,
+    renderEntries: async (entries) => {
+      if (!transcriptView.isCurrent(viewToken)) return;
+      messageRenderer.clear();
+      await renderSessionHistory(entries, {
+        searchQuery: sidebar.searchQuery,
+        viewToken,
+        sessionFile: file,
+      });
+    },
+    onStatus: (kind) => {
+      if (kind === "failed" && transcriptView.isCurrent(viewToken)) {
+        showTransientStatus(t("session.loadFailed"));
+      }
+    },
+  });
 }
 
 const agentHub = createAgentHub({
@@ -1077,7 +1122,11 @@ wsClient.addEventListener("commandResponse", (e) => {
 
 // Mirror mode: receive full state snapshot on connect
 wsClient.addEventListener("mirrorSync", (e) => {
-  handleMirrorSync(e.detail);
+  // The handler paints the transcript in time-sliced chunks and can outlive a
+  // claim, so it is async; a rejection must not escape into the socket.
+  handleMirrorSync(e.detail).catch((err) => {
+    console.error("[Mirror] snapshot handling failed:", err);
+  });
 });
 
 // ═══════════════════════════════════════
@@ -1267,6 +1316,39 @@ const pendingCompaction = createPendingCompaction({
   },
 });
 
+/**
+ * Session the compaction in flight belongs to.
+ *
+ * The compaction frames are process-scoped and the broker relays every
+ * process's frames to every window, so a frame alone cannot say which session
+ * is compacting: the window records the session it was showing when the pass
+ * started, and `/api/instances` carries the authoritative per-process flag
+ * (`isCompacting`) for every other window and for a pass that began before this
+ * one connected.
+ */
+let compactionSessionFile = null;
+
+/**
+ * Is a compaction running for `sessionFile` right now?
+ *
+ * A pass rewrites the session's branch, so its transcript must neither be
+ * loaded nor repainted until the pass reports its end (the user-visible rule:
+ * show "compacting", hold the screen, then load and report the result).
+ */
+function isSessionCompacting(sessionFile) {
+  if (!sessionFile) return false;
+  if (compactionActive && compactionSessionFile === sessionFile) return true;
+  return liveInstances.some(
+    (instance) => instance.sessionFile === sessionFile && instance.isCompacting,
+  );
+}
+
+/** Is the session this window shows the one being compacted? */
+function compactionHoldActive() {
+  const file = mirrorActiveSessionFile || sidebar.activeSessionFile || null;
+  return Boolean(file) && isSessionCompacting(file);
+}
+
 /** i18n keys for the compaction methods a start frame can name. */
 const COMPACTION_ACTION_KEYS = {
   remote: "ctx.compactActionRemote",
@@ -1366,6 +1448,9 @@ function handleCompactionStart(event = null) {
   // pending window (a dispatched command nobody acknowledged) is over, and a
   // skip must not follow the pass it was watching for.
   if (!pending) pendingCompaction.settle();
+  if (!compactionSessionFile) {
+    compactionSessionFile = mirrorActiveSessionFile || sidebar.activeSessionFile || null;
+  }
   // Authoritative write — a compaction pauses the run, and this state must
   // outlast any transient status (it is the only feedback while it runs).
   clearTransientStatusRevert();
@@ -1391,6 +1476,7 @@ function handleCompactionEnd(event = null) {
   // usage overwrites it below.
   const tokensBefore = lastInputTokens;
   compactionActive = null;
+  compactionSessionFile = null;
   pendingCompaction.settle();
   stopCompactionTicker();
   restoreStatusAfterCompaction();
@@ -1422,6 +1508,28 @@ function handleCompactionEnd(event = null) {
     // The ticking label is replaced by the outcome, in place.
     setCompactionLabel(indicator, line);
     indicator.classList.add(unchanged ? "compaction-skipped" : "compaction-done");
+  }
+  // The committed item, drawn in place. The end frame carries the entry so the
+  // GUI never reloads the branch it is showing: a session's entries survive
+  // their own compaction (the summarized stretch stays in the file and on
+  // screen — measured on a real pass: N entries in, N+1 out), so the only
+  // difference a commit makes is this one item. Repainting instead cost seconds
+  // on a large transcript and left the reader at a different scroll position.
+  if (!unchanged && !transcriptView.active) {
+    const entry = event?.compactionEntry;
+    if (entry && typeof entry === "object") {
+      const drawn = messageRenderer.renderCompaction({
+        id: typeof entry.id === "string" ? entry.id : undefined,
+        summary: typeof entry.summary === "string" ? entry.summary : undefined,
+      });
+      const indicatorEl = document.getElementById("compaction-indicator");
+      // The item is the newest entry in the session, so it belongs above the
+      // pass's own outcome line.
+      if (drawn && indicatorEl && drawn.parentElement === messagesContainer) {
+        messagesContainer.insertBefore(drawn, indicatorEl);
+      }
+      messageRenderer.scrollToBottom?.();
+    }
   }
   if (unchanged) {
     // The context did not move: keep the numbers on screen rather than blanking
@@ -3040,12 +3148,16 @@ async function rpcCommand(cmd, statusMsg) {
 }
 
 async function rpcExportHtml() {
-  const data = await rpcCommand({ type: "export_html" }, t("status.exporting"));
+  // `open: true` — the exported HTML is the point of the action, and the
+  // extension is what can hand it to the OS (a WebView cannot open a file).
+  const data = await rpcCommand({ type: "export_html", open: true }, t("status.exporting"));
   if (data?.success && data.data?.path) {
     setStatusText(t("status.exported", { path: data.data.path }));
     setTimeout(() => {
       setStatusText(authoritativeStatusText());
     }, 4000);
+  } else if (data && !data.success) {
+    setStatusText(t("status.exportFailed", { error: data.error || "unknown" }));
   }
 }
 
@@ -3734,6 +3846,40 @@ async function handleNewProjectChat(project) {
 // public/session-switch.js for the race this closes.
 const sessionSwitchGate = new SessionSwitchGate();
 
+/** Bumped by every session selection; a compaction wait compares it. */
+let compactionSelectToken = 0;
+/** Ceiling on how long a selection waits for another process's compaction. */
+const COMPACTION_WAIT_MAX_MS = 20 * 60 * 1000;
+
+/**
+ * Wait until the process on `port` is done compacting.
+ *
+ * A compaction rewrites the session's branch, so a transcript loaded mid-pass
+ * is either stale on arrival or races the commit (and the runtime can refuse a
+ * switch while a pass is in flight). Returns false when a newer selection
+ * superseded this one — the caller must then leave the screen alone — and true
+ * when the pass ended *or* the ceiling was reached, so a stuck pass degrades
+ * into the old behaviour instead of wedging the sidebar.
+ */
+async function waitForCompactionEnd(port, token) {
+  const deadline = Date.now() + COMPACTION_WAIT_MAX_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    if (token !== compactionSelectToken) return false;
+    try {
+      const res = await fetch("/api/instances");
+      const data = await res.json();
+      liveInstances = data.instances || [];
+      reconcileSidebarStreaming();
+      const instance = liveInstances.find((entry) => entry.port === port);
+      if (!instance?.isCompacting) return true;
+    } catch {
+      /* a failed poll is not an answer; keep waiting */
+    }
+  }
+  return true;
+}
+
 /**
  * Ask the running omp for a state snapshot and wait until it reports the
  * session we just switched to. `switch_session` is fire-and-forget (the broker
@@ -3744,12 +3890,18 @@ const sessionSwitchGate = new SessionSwitchGate();
  */
 async function confirmMirrorSwitch(sessionFile) {
   sessionSwitchGate.expect(sessionFile);
+  // A long wait is a *loading* state, not a silent one: the window may be
+  // loading a huge session or waiting out a compaction (both legitimate here),
+  // so the status line says so until the snapshot lands.
+  setStatusText(t("session.loadingSession"));
   const confirmed = await sessionSwitchGate.waitForConfirmation(sessionFile, {
     sendRequest: () => wsClient.send({ type: "mirror_sync_request" }),
   });
   if (!confirmed) {
     logSessionRoute("switch:unconfirmed", { selectedSession: sessionFile });
     messageRenderer.renderError(t("session.switchUnconfirmed"));
+  } else if (!compactionHoldActive()) {
+    setStatusText(authoritativeStatusText());
   }
   return confirmed;
 }
@@ -3757,6 +3909,10 @@ async function confirmMirrorSwitch(sessionFile) {
 // Public entry point: serializes selections so overlapping clicks don't
 // interleave their awaits and corrupt shared routing state.
 function handleSessionSelect(session, project) {
+  // Every selection supersedes a wait on another process's compaction: the
+  // waiting selection must not wake up later and yank the window to its own
+  // target (see `waitForCompactionEnd`).
+  compactionSelectToken += 1;
   const run = sessionSelectChain.then(() => handleSessionSelectImpl(session, project));
   // Keep the chain alive even if this selection rejects.
   sessionSelectChain = run.catch(() => {});
@@ -3770,6 +3926,45 @@ async function handleSessionSelectImpl(session, project) {
     projectDir: project?.dirName,
     liveInstances,
   });
+  // The instance poll is up to 5 s stale and a compaction can start and end
+  // inside that window, so the decision below is made against a *fresh* read
+  // (a loopback call, milliseconds) instead of the cached list. The cache is
+  // updated in place, so the sidebar's marks stay in step either way.
+  try {
+    const res = await fetch("/api/instances");
+    const data = await res.json();
+    liveInstances = data.instances || [];
+    reconcileSidebarStreaming();
+  } catch {
+    /* keep the cached list */
+  }
+  // Selecting a session whose process is mid-compaction must not load it: the
+  // pass is rewriting that session's branch, so the transcript would be stale
+  // on arrival or race the commit, and the runtime can refuse a switch while a
+  // pass is in flight. Show the wait, then continue exactly as if the user had
+  // just clicked — the header says so, and a newer click supersedes it.
+  const compactingInstance = liveInstances.find(
+    (instance) => instance.sessionFile === session?.filePath && instance.isCompacting,
+  );
+  if (compactingInstance) {
+    const waitToken = compactionSelectToken;
+    logSessionRoute("select:waiting-compaction", {
+      selectedSession: session.filePath,
+      port: compactingInstance.port,
+    });
+    // A wait that lasts minutes cannot be a transient status (those revert
+    // after a few seconds), and it must outrank whatever the poll wrote last.
+    clearTransientStatusRevert();
+    setStatusText(t("session.compactingWait"));
+    const ended = await waitForCompactionEnd(compactingInstance.port, waitToken);
+    if (!ended) {
+      logSessionRoute("select:compaction-wait-superseded", {
+        selectedSession: session.filePath,
+      });
+      return;
+    }
+    logSessionRoute("select:compaction-wait-done", { selectedSession: session.filePath });
+  }
   // Selecting a session hands the transcript back to the live view — a
   // read-only agent transcript from the Agent Hub must not survive it. The
   // claim also invalidates a history fetch or peek still in flight, so the
@@ -3967,7 +4162,11 @@ async function renderSelectedSessionHistory(session, project, viewToken = null) 
       selectedSession: session.filePath,
       entries: data.entries?.length || 0,
     });
-    renderSessionHistory(data.entries || [], { searchQuery: sidebar.searchQuery });
+    await renderSessionHistory(data.entries || [], {
+      searchQuery: sidebar.searchQuery,
+      viewToken,
+      sessionFile: session.filePath,
+    });
   } catch (e) {
     console.error("[Session route] history:fetch-error", {
       selectedSession: session?.filePath,
@@ -4002,7 +4201,11 @@ async function switchSession(sessionFile, session = null, project = null) {
           // flight (a subagent transcript, another selection).
           if (!transcriptView.isCurrent(viewToken)) return;
           messageRenderer.clear();
-          renderSessionHistory(data.entries || [], { searchQuery: sidebar.searchQuery });
+          await renderSessionHistory(data.entries || [], {
+            searchQuery: sidebar.searchQuery,
+            viewToken,
+            sessionFile,
+          });
         } catch (e) {
           console.error("[App] History fetch error:", e);
         }
@@ -4061,7 +4264,11 @@ async function switchSession(sessionFile, session = null, project = null) {
 // Mirror mode sync
 // ═══════════════════════════════════════
 
-function handleMirrorSync(data) {
+async function handleMirrorSync(data) {
+  // The abort check for the time-sliced paint below: a claim that lands while
+  // this snapshot is being drawn (another selection, a subagent peek) must stop
+  // the rest of it from landing on the new view.
+  const viewToken = transcriptView.token;
   logSessionRoute("mirrorSync:received", {
     sessionFile: data.sessionFile,
     sessionId: data.sessionId,
@@ -4191,6 +4398,23 @@ function handleMirrorSync(data) {
     setSupportedThinkingLevels(data.thinkingLevels);
   }
 
+  // A compaction is rewriting this session's branch right now (any origin: this
+  // window's command, omp's own `/compact`, the automatic path, another
+  // window). Hold the transcript where it is and leave the header's
+  // "Compacting…" line (plus its ticking seconds) as the feedback: repainting
+  // mid-pass shows a branch that is still changing, and on a huge session the
+  // repaint alone blocks the page for seconds. The end frame brings the
+  // committed item and the outcome, and the next snapshot converges.
+  if (isSessionCompacting(snapshotSessionFile)) {
+    logSessionRoute("mirrorSync:held-compaction", {
+      sessionFile: snapshotSessionFile,
+      entries: data.entries?.length || 0,
+    });
+    updateCostDisplay();
+    updateTokenUsage();
+    return;
+  }
+
   // A read-only agent transcript is on screen: this snapshot describes the
   // foreground session, and repainting the transcript with it is exactly the
   // "view transcript switched me to the wrong session" the Agent Hub used to
@@ -4201,6 +4425,29 @@ function handleMirrorSync(data) {
       peeked: transcriptView.file,
       snapshot: data.sessionFile || null,
     });
+    updateCostDisplay();
+    updateTokenUsage();
+    return;
+  }
+
+  // A *truncated* snapshot is the live tail of a session, not its transcript
+  // (see the extension's `SNAPSHOT_ENTRY_LIMIT`). Replacing what is on screen
+  // with the last few hundred entries would throw away the conversation, so it
+  // only ever fills a screen that holds no transcript for this session yet —
+  // through the same time-sliced history path a selection uses.
+  if (data.truncated) {
+    logSessionRoute("mirrorSync:truncated", {
+      sessionFile: snapshotSessionFile,
+      entries: data.entries?.length || 0,
+      totalEntries: data.totalEntries ?? null,
+      rendered: renderedTranscriptFile,
+      peeking: transcriptView.active,
+    });
+    if (!sidebar.activeSessionFile && hasAnySessionsLoaded()) {
+      renderWorkspaceWelcome();
+    } else if (!transcriptView.active && renderedTranscriptFile !== snapshotSessionFile) {
+      await hydrateTranscriptFromRuntime(snapshotSessionFile);
+    }
     updateCostDisplay();
     updateTokenUsage();
     return;
@@ -4220,7 +4467,11 @@ function handleMirrorSync(data) {
   }
 
   if (data.entries && data.entries.length > 0) {
-    renderSessionHistory(data.entries, { searchQuery: sidebar.searchQuery });
+    await renderSessionHistory(data.entries, {
+      searchQuery: sidebar.searchQuery,
+      viewToken,
+      sessionFile: snapshotSessionFile,
+    });
   } else {
     renderWorkspaceWelcome();
   }
@@ -4348,7 +4599,10 @@ function entriesWithMessageIds(entries) {
   });
 }
 
-function renderSessionHistory(entries, { searchQuery = "" } = {}) {
+async function renderSessionHistory(
+  entries,
+  { searchQuery = "", viewToken = null, anchor = true, sessionFile = null } = {},
+) {
   console.log(`[History] Rendering ${entries.length} entries`);
   // The id/role sequence of a render is what tells a duplicated draw (one entry,
   // two elements) from a duplicated entry (two entries, two elements).
@@ -4363,26 +4617,48 @@ function renderSessionHistory(entries, { searchQuery = "" } = {}) {
     peeking: transcriptView.active ? transcriptView.file : null,
   });
   // Entry→renderer mapping lives in session-resync.js so the palette
-  // "Resync transcript" action re-renders exactly like history loads.
-  const counts = renderTranscriptFromEntries(entriesWithMessageIds(entries), {
-    messageRenderer,
-    toolCardRenderer,
-    searchQuery,
-    onAssistantUsage: (usage) => {
-      // Track cost and tokens from history
-      if (usage?.cost?.total) {
-        sessionTotalCost += usage.cost.total;
-      }
-      if (usage?.input) {
-        lastInputTokens = usage.input + (usage.cacheRead || 0);
-        lastUsage = usage;
-      }
+  // "Resync transcript" action re-renders exactly like history loads. The
+  // render is time-sliced: a huge session (measured: 4826 entries / 16.5 MB)
+  // blocked the main thread for ~5 s in one pass, which is the "page freezes
+  // while a session loads" report — and the token abort keeps a newer view
+  // (another selection, a subagent peek) from being painted over by the rest
+  // of a render that started before it.
+  // The DOM this draws belongs to this session — set before the first slice, so
+  // an aborted or partial paint is never mistaken for "nothing rendered here"
+  // by the truncated-snapshot rule in `handleMirrorSync`.
+  if (sessionFile) renderedTranscriptFile = sessionFile;
+  const counts = await renderTranscriptFromEntriesChunked(
+    entriesWithMessageIds(entries),
+    {
+      messageRenderer,
+      toolCardRenderer,
+      searchQuery,
+      onAssistantUsage: (usage) => {
+        // Track cost and tokens from history
+        if (usage?.cost?.total) {
+          sessionTotalCost += usage.cost.total;
+        }
+        if (usage?.input) {
+          lastInputTokens = usage.input + (usage.cacheRead || 0);
+          lastUsage = usage;
+        }
+      },
     },
-  });
+    {
+      onProgress: (done, total) => {
+        setStatusText(t("status.renderingTranscript", { done, total }));
+      },
+      shouldContinue: () =>
+        !(viewToken !== null && !transcriptView.isCurrent(viewToken)) && !compactionHoldActive(),
+    },
+  );
 
   console.log(
     `[History] Done: ${counts.user} users, ${counts.assistant} assistants, ${counts.toolCards} tools, ${counts.toolResults} results`,
   );
+  // The progress line ("Rendering N/M…") loses to whatever is true now: a
+  // running compaction, a live run, a transient status.
+  if (!compactionHoldActive()) setStatusText(authoritativeStatusText());
   console.log(`[History] DOM tool-card count:`, document.querySelectorAll(".tool-card").length);
   console.log(
     `[History] DOM thinking-block count:`,
@@ -4393,9 +4669,12 @@ function renderSessionHistory(entries, { searchQuery = "" } = {}) {
   updateTokenUsage();
   fetchContextWindow();
 
-  anchorHistoryToBottom(document.getElementById("messages"), {
-    preserveScrollTarget: Boolean(searchQuery),
-  });
+  if (anchor) {
+    anchorHistoryToBottom(document.getElementById("messages"), {
+      preserveScrollTarget: Boolean(searchQuery),
+    });
+  }
+  return counts;
 }
 
 // ═══════════════════════════════════════

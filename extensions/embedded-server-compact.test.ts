@@ -5,6 +5,7 @@ import {
   type GuiCompactOptions,
   nextCompactionLifecycle,
   startGuiCompaction,
+  summarizeCompactionEntry,
 } from "./embedded-server.ts";
 
 function flush(): Promise<void> {
@@ -187,5 +188,50 @@ describe("nextCompactionLifecycle", () => {
     );
     expect(ended.state).toBeNull();
     expect(ended.emit).toBe("snapshot+end");
+  });
+});
+
+describe("summarizeCompactionEntry", () => {
+  it("keeps the fields the GUI draws the item from", () => {
+    const entry = summarizeCompactionEntry({
+      id: "5a3ae3d4",
+      summary: "## Goal\n- earlier work",
+      shortSummary: "Archived 83,055 chars",
+      firstKeptEntryId: "771c869b",
+      method: "snapcompact",
+      timestamp: "2026-09-28T02:14:08.588Z",
+      tokensBefore: 851008,
+      tokensAfter: 45263,
+      details: { readFiles: ["a", "b"] },
+    });
+
+    expect(entry).toEqual({
+      id: "5a3ae3d4",
+      summary: "## Goal\n- earlier work",
+      shortSummary: "Archived 83,055 chars",
+      firstKeptEntryId: "771c869b",
+      method: "snapcompact",
+      timestamp: "2026-09-28T02:14:08.588Z",
+      tokensBefore: 851008,
+      tokensAfter: 45263,
+    });
+  });
+
+  it("drops the bulky fields the item never renders", () => {
+    const entry = summarizeCompactionEntry({
+      id: "x",
+      summary: "s",
+      details: { readFiles: Array.from({ length: 500 }, (_, i) => `file-${i}`) },
+    });
+
+    expect(entry).not.toBeNull();
+    expect("details" in entry).toBe(false);
+  });
+
+  it("returns null for a payload without identity or summary", () => {
+    // Unknown shapes must not put an undefined item on screen.
+    expect(summarizeCompactionEntry(null)).toBeNull();
+    expect(summarizeCompactionEntry("nope")).toBeNull();
+    expect(summarizeCompactionEntry({ tokensBefore: 5 })).toBeNull();
   });
 });

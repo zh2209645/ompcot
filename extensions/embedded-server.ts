@@ -386,7 +386,49 @@ function findPublicDir(): string {
 }
 const SESSIONS_DIR = path.join(OMP_AGENT_ROOT, "sessions");
 // TODO(rename->ompcot): directory `ompcot-instances` kept for backward compat — migrate to `ompcot-instances` once existing users are handled.
+/**
+ * Open a path with the OS default application. Best effort, never throws.
+ *
+ * `open` alone is macOS-only — on Windows the call always failed, so every
+ * "open the exported transcript" attempt from the GUI was a silent no-op. The
+ * Windows form quotes the path because `cmd /c` re-parses its own command line.
+ */
+function openPathWithOs(filePath: string, onDone?: (err: Error | null) => void): void {
+  const [cmd, args] =
+    process.platform === "win32"
+      ? ["cmd", ["/c", "start", "", `"${filePath}"`]]
+      : process.platform === "darwin"
+        ? ["open", [filePath]]
+        : ["xdg-open", [filePath]];
+  try {
+    execFile(cmd, args, (err) => onDone?.(err ?? null));
+  } catch (err: unknown) {
+    onDone?.(err instanceof Error ? err : new Error(String(err)));
+  }
+}
+
 const INSTANCES_DIR = path.join(path.dirname(OMP_AGENT_ROOT), "ompcot-instances");
+
+/**
+ * Entries a `mirror_sync` snapshot carries at most.
+ *
+ * The snapshot is the live tail, not the transcript: it is re-sent on every
+ * connect / request / compaction commit, and a huge session made each frame tens
+ * of megabytes and each repaint seconds long. 400 entries cover any plausible
+ * stretch of live work; the GUI pairs a truncated snapshot with the full
+ * history it already fetched for the session, and reports how many entries it
+ * is not drawing (see `buildStateSnapshot`).
+ */
+const SNAPSHOT_ENTRY_LIMIT = 400;
+
+/**
+ * How long `omp --export` may take before the GUI's export request fails.
+ *
+ * Measured at ~1 s for a 17 MB session on this machine, so the ceiling is not
+ * a budget — it is the point past which a hung child process should be killed
+ * rather than left holding the request open.
+ */
+const EXPORT_TIMEOUT_MS = 10 * 60 * 1000;
 
 // Minimal single-process instance registry. We keep this so the frontend's
 // `/api/instances` response reflects the running workspace without needing
@@ -400,6 +442,13 @@ export type InstanceEntry = {
   sessionFile: string;
   cwd: string;
   isStreaming?: boolean;
+  /**
+   * A compaction pass is running in this process right now — any origin: the
+   * GUI command, omp's own `/compact` builtin, or the automatic path. Other
+   * windows read it to hold a session switch or a repaint instead of loading a
+   * transcript the pass is about to rewrite (see the frontend's select flow).
+   */
+  isCompacting?: boolean;
   startedAt: string;
 };
 
@@ -443,6 +492,9 @@ export function mergeInstanceEntry(
     sessionFile: next.sessionFile,
     cwd: next.cwd,
     isStreaming: previous?.isStreaming === true,
+    // Same reasoning as `isStreaming`: a pass that was running before this
+    // registration is still running after it.
+    isCompacting: previous?.isCompacting === true,
     startedAt:
       typeof previous?.startedAt === "string" && previous.startedAt
         ? previous.startedAt
@@ -702,6 +754,35 @@ export function nextCompactionLifecycle(
   }
 }
 
+/**
+ * The fields of a committed compaction entry the GUI needs to draw the item
+ * (and the pill) without a full transcript repaint.
+ *
+ * External input (`session_compact`'s payload is untyped at this boundary), so
+ * every field is narrowed rather than asserted. Exported for tests.
+ */
+export function summarizeCompactionEntry(entry: unknown): Record<string, unknown> | null {
+  if (!entry || typeof entry !== "object") return null;
+  const source = entry as Record<string, unknown>;
+  const text = (key: string): string | undefined =>
+    typeof source[key] === "string" ? (source[key] as string) : undefined;
+  const num = (key: string): number | undefined =>
+    typeof source[key] === "number" ? (source[key] as number) : undefined;
+  const summary = text("summary");
+  const id = text("id");
+  if (!id && !summary) return null;
+  return {
+    id,
+    summary,
+    shortSummary: text("shortSummary"),
+    firstKeptEntryId: text("firstKeptEntryId"),
+    method: text("method"),
+    timestamp: text("timestamp"),
+    tokensBefore: num("tokensBefore"),
+    tokensAfter: num("tokensAfter"),
+  };
+}
+
 /** Terminal outcome of a GUI-initiated manual compaction. */
 export interface GuiCompactOutcome {
   summary?: string;
@@ -760,12 +841,13 @@ export function startGuiCompaction(
 /** Apply one patch to the published entry (a missing flag keeps its last value). */
 export function applyInstancePatch(
   entry: InstanceEntry,
-  patch: { sessionFile?: string; isStreaming?: boolean },
+  patch: { sessionFile?: string; isStreaming?: boolean; isCompacting?: boolean },
 ): InstanceEntry {
   const next = { ...entry };
   if (typeof patch.sessionFile === "string" && patch.sessionFile)
     next.sessionFile = patch.sessionFile;
   if (typeof patch.isStreaming === "boolean") next.isStreaming = patch.isStreaming;
+  if (typeof patch.isCompacting === "boolean") next.isCompacting = patch.isCompacting;
   return next;
 }
 
@@ -782,7 +864,11 @@ function registerInstance(port: number, sessionFile: string, cwd: string) {
   instanceActivityPair = "";
 }
 
-function patchInstanceEntry(patch: { sessionFile?: string; isStreaming?: boolean }) {
+function patchInstanceEntry(patch: {
+  sessionFile?: string;
+  isStreaming?: boolean;
+  isCompacting?: boolean;
+}) {
   if (!instanceEntry) return;
   instanceEntry = applyInstancePatch(instanceEntry, patch);
   writeInstanceEntry(instanceEntry);
@@ -823,6 +909,14 @@ export function parseInstanceEntry(raw: string): InstanceEntry | null {
     "isStreaming" in value && typeof value.isStreaming === "boolean"
       ? value.isStreaming
       : undefined;
+  // The compaction flag every other window reads to hold a switch or a repaint.
+  // Dropping it here left the field invisible through `/api/instances` even
+  // though the writing process published it — the frontend could never see a
+  // pass it had not witnessed itself.
+  const isCompacting =
+    "isCompacting" in value && typeof value.isCompacting === "boolean"
+      ? value.isCompacting
+      : undefined;
   const startedAt =
     "startedAt" in value && typeof value.startedAt === "string" ? value.startedAt : "";
   return {
@@ -831,6 +925,7 @@ export function parseInstanceEntry(raw: string): InstanceEntry | null {
     sessionFile: value.sessionFile,
     cwd: value.cwd,
     ...(isStreaming === undefined ? {} : { isStreaming }),
+    ...(isCompacting === undefined ? {} : { isCompacting }),
     startedAt,
   };
 }
@@ -2373,6 +2468,35 @@ export default function (omp: ExtensionAPI) {
   // path, so the manual ones are tracked from `session.compacting` /
   // `session_compact` / this server's own `compact` command.
   let activeCompaction: CompactionState | null = null;
+  /**
+   * Assign the compaction state and mirror it into the registry.
+   *
+   * The frames are the live signal, but only for windows already connected to
+   * this process: a window that opens mid-pass, or one looking at another
+   * workspace's session, learns from `/api/instances` — and a switch or a
+   * repaint into a session whose branch is being rewritten has to wait for the
+   * pass to end (see the frontend's select flow and `handleMirrorSync`).
+   */
+  function setActiveCompaction(next: CompactionState | null): void {
+    activeCompaction = next;
+    patchInstanceEntry({ isCompacting: next !== null });
+  }
+  // The entry `session_compact` reported most recently, held until the pass's
+  // single end frame goes out (see `takePendingCompactionEntry`).
+  let pendingCompactionEntry: Record<string, unknown> | null = null;
+  /**
+   * Consume the pending committed entry for this pass's end frame.
+   *
+   * The entry rides exactly one frame: the manual builtin's end (built by the
+   * `session_compact` handler), the automatic path's own forwarded end, or the
+   * GUI command's outcome. A later frame must not repeat it — the GUI's item is
+   * id-keyed, so a repeat is dropped, but the frame should stay honest.
+   */
+  function takePendingCompactionEntry(): Record<string, unknown> | undefined {
+    const entry = pendingCompactionEntry ?? undefined;
+    pendingCompactionEntry = null;
+    return entry;
+  }
   // True once this instance's session_start revealed we are bound to a
   // subagent/advisor child session (see isChildAgentSession). Child
   // instances must not touch any process-scoped surface.
@@ -3270,7 +3394,7 @@ export default function (omp: ExtensionAPI) {
               ? { kind: "auto-start", action }
               : { kind: "auto-end", action },
           );
-          activeCompaction = next.state;
+          setActiveCompaction(next.state);
           if (next.emit === "snapshot" || next.emit === "snapshot+end") {
             await broadcastSnapshot(ctx);
           }
@@ -3289,6 +3413,10 @@ export default function (omp: ExtensionAPI) {
         // `resolveMessageEntryIdDeferred`); streaming frames stay immediate.
         const rawEvent = event as Record<string, unknown>;
         const rawMessage = rawEvent.message;
+        // The automatic path's end is the host's own forwarded frame: it is
+        // where the committed entry rides for a pass that ended automatically.
+        const forwardedCompactionEntry =
+          eventType === "auto_compaction_end" ? takePendingCompactionEntry() : undefined;
         const role =
           rawMessage && typeof rawMessage === "object" && "role" in rawMessage
             ? rawMessage.role
@@ -3306,7 +3434,14 @@ export default function (omp: ExtensionAPI) {
             // after a commit it is the *post*-compaction size, while the
             // repaint that precedes the frame derives its number from the kept
             // tail's last assistant message (still the pre-compaction one).
-            ...(eventType === "auto_compaction_end" ? { contextUsage: ctx.getContextUsage() } : {}),
+            ...(eventType === "auto_compaction_end"
+              ? {
+                  contextUsage: ctx.getContextUsage(),
+                  ...(forwardedCompactionEntry
+                    ? { compactionEntry: forwardedCompactionEntry }
+                    : {}),
+                }
+              : {}),
             ...(entryId ? { entryId } : {}),
           },
         });
@@ -3328,7 +3463,7 @@ export default function (omp: ExtensionAPI) {
       rememberCtx(ctx);
       if (childAgentInstance) return undefined;
       const next = nextCompactionLifecycle(activeCompaction, { kind: "summarize" });
-      activeCompaction = next.state;
+      setActiveCompaction(next.state);
       if (next.emit === "start") {
         broadcast({ type: "event", event: { type: "auto_compaction_start" } });
       }
@@ -3342,19 +3477,32 @@ export default function (omp: ExtensionAPI) {
   // path, automatic and manual. It is the builtin `/compact`'s only end
   // signal, and the repaint every path needs (the summarized stretch collapses
   // into the item, so the transcript on screen no longer matches the branch).
-  omp.on("session_compact", async (_event, ctx) => {
+  omp.on("session_compact", async (event, ctx) => {
     try {
       rememberCtx(ctx);
       if (childAgentInstance) return;
       const next = nextCompactionLifecycle(activeCompaction, { kind: "commit" });
-      activeCompaction = next.state;
+      setActiveCompaction(next.state);
+      // The committed entry is what lets the GUI add the compaction item to the
+      // transcript it is already showing — id-keyed, so the history path's own
+      // copy of the same entry can never double it — instead of repainting a
+      // branch that (measured on a 4826-entry session) barely changed: the
+      // summarized stretch stays in the file and in the transcript, and the
+      // pass adds exactly one compaction entry.
+      // `event` here is the host's `session_compact` payload; read the entry off
+      // a named record for the same reason the other handlers do.
+      const commitEvent = event as Record<string, unknown>;
+      const committedEntry = summarizeCompactionEntry(commitEvent.compactionEntry);
+      if (committedEntry) pendingCompactionEntry = committedEntry;
       await broadcastSnapshot(ctx);
       if (next.emit === "snapshot+end") {
+        const entry = takePendingCompactionEntry();
         broadcast({
           type: "event",
           event: {
             type: "auto_compaction_end",
             contextUsage: ctx.getContextUsage(),
+            ...(entry ? { compactionEntry: entry } : {}),
           },
         });
       }
@@ -3497,8 +3645,16 @@ export default function (omp: ExtensionAPI) {
   // Build state snapshot for new connections
   // ═══════════════════════════════════════
   async function buildStateSnapshot(ctx: ExtensionContext) {
-    // Get session entries for message history
-    const entries = ctx.sessionManager.getEntries();
+    // A full session re-sent as one WS frame costs the browser a parse plus a
+    // full transcript repaint per snapshot — measured at 18.5 MB and ~6 s of
+    // blocked main thread for a 4800-entry session — and a snapshot goes out on
+    // every connect, every `mirror_sync_request` and every compaction commit.
+    // A snapshot carries the live *tail*; the full history has its own path (the
+    // per-session HTTP fetch the GUI runs when a session is selected). The
+    // `truncated`/`totalEntries` pair tells the GUI which one it holds.
+    const allEntries = ctx.sessionManager.getEntries();
+    const truncated = allEntries.length > SNAPSHOT_ENTRY_LIMIT;
+    const entries = truncated ? allEntries.slice(-SNAPSHOT_ENTRY_LIMIT) : allEntries;
 
     // Get model info
     const model = ctx.model;
@@ -3518,6 +3674,8 @@ export default function (omp: ExtensionAPI) {
     return {
       type: "mirror_sync",
       entries,
+      totalEntries: allEntries.length,
+      truncated,
       model,
       thinkingLevel,
       thinkingLevels,
@@ -4316,7 +4474,9 @@ export default function (omp: ExtensionAPI) {
           // app's event switch, so a bare `auto_compaction_start` fell into its
           // "Unknown message type" branch and the GUI showed nothing at all for
           // a manual compaction.
-          activeCompaction = nextCompactionLifecycle(activeCompaction, { kind: "gui-start" }).state;
+          setActiveCompaction(
+            nextCompactionLifecycle(activeCompaction, { kind: "gui-start" }).state,
+          );
           broadcast({ type: "event", event: { type: "auto_compaction_start" } });
           startGuiCompaction(
             (instructionsOrOptions) => ctx.compact(instructionsOrOptions),
@@ -4326,15 +4486,19 @@ export default function (omp: ExtensionAPI) {
               // into the transcript item, so only the outcome is left to send.
               const committed =
                 activeCompaction?.source === "gui" && activeCompaction.committed === true;
-              activeCompaction = nextCompactionLifecycle(activeCompaction, {
-                kind: "gui-end",
-              }).state;
+              const entry = takePendingCompactionEntry();
+              setActiveCompaction(
+                nextCompactionLifecycle(activeCompaction, { kind: "gui-end" }).state,
+              );
               const report = () => {
                 broadcast({
                   type: "event",
                   event: {
                     type: "auto_compaction_end",
                     ...outcome,
+                    // The committed item, so the GUI can draw it without
+                    // reloading the branch (see `summarizeCompactionEntry`).
+                    ...(entry ? { compactionEntry: entry } : {}),
                     // The runtime's live context usage: after a commit this is
                     // the *post*-compaction size, while the repaint below
                     // derives its number from the kept tail's last assistant
@@ -4381,18 +4545,44 @@ export default function (omp: ExtensionAPI) {
               typeof command.outputPath === "string" && command.outputPath
                 ? command.outputPath
                 : "";
-            const output = execFileSync(
-              cmd,
-              [...prefix, "--export", sessionFile, ...(outputPath ? [outputPath] : [])],
-              {
-                cwd: process.cwd(),
-                timeout: 30000,
-                encoding: "utf-8",
-              },
-            );
-            // omp prints the output path
-            const result =
-              output.trim().split("\n").pop() || sessionFile.replace(".jsonl", ".html");
+            // Default next to the session file, inside the sessions root. omp's
+            // own default is a *cwd-relative* `omp-session-<name>.html`, which
+            // scattered exports through the workspace and pointed the GUI at a
+            // path its session route could never serve.
+            const exportPath = outputPath || sessionFile.replace(/\.jsonl$/, ".html");
+            // `execFile`, not `execFileSync`: the export of a huge session
+            // parses tens of megabytes in a fresh omp process, and a blocking
+            // spawn freezes this server's event loop — every window on the port
+            // stops receiving frames and its own WS replies stall behind the
+            // export. The timeout is generous for the same reason.
+            const output = await new Promise<string>((resolve, reject) => {
+              execFile(
+                cmd,
+                [...prefix, "--export", sessionFile, exportPath],
+                {
+                  cwd: process.cwd(),
+                  timeout: EXPORT_TIMEOUT_MS,
+                  maxBuffer: 8 * 1024 * 1024,
+                  encoding: "utf-8",
+                },
+                (err, stdout) => (err ? reject(err) : resolve(String(stdout ?? ""))),
+              );
+            });
+            // omp prints `Exported to: <path>` — the prefix is not part of the
+            // path, and a relative answer belongs to the cwd the export ran in.
+            const reported = (output.trim().split("\n").pop() || "")
+              .replace(/^Exported to:\s*/i, "")
+              .trim();
+            const result = reported
+              ? path.isAbsolute(reported)
+                ? reported
+                : path.resolve(process.cwd(), reported)
+              : exportPath;
+            // `open` asks the OS to show the exported transcript. The GUI's
+            // export actions pass it: a WebView cannot open a local file itself
+            // (`window.open` on a file path is a no-op there), and the HTML is
+            // the whole point of the action.
+            if (command.open === true && result) openPathWithOs(result);
             sendTo(ws, success("export_html", { path: result }));
           } catch (e: unknown) {
             sendTo(ws, error("export_html", errMessage(e)));
@@ -6633,7 +6823,9 @@ export default function (omp: ExtensionAPI) {
             res.end(JSON.stringify({ error: "filePath required" }));
             return;
           }
-          execFile("open", [fp], (err) => {
+          // Platform-aware: the bare `open` command exists on macOS only, so
+          // this route was a silent failure on Windows.
+          openPathWithOs(fp, (err) => {
             if (err) {
               res.writeHead(500, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: errMessage(err) }));
@@ -7554,6 +7746,22 @@ export default function (omp: ExtensionAPI) {
     }
 
     if (!fs.existsSync(realFilePath)) {
+      notFound();
+      return;
+    }
+
+    // An exported transcript (`omp --export` writes `<session>.html` next to
+    // its session file) is streamed raw, so the GUI can open the export it just
+    // produced. Everything else on this route is parsed as session JSONL.
+    if (/\.html?$/i.test(realFilePath)) {
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      fs.createReadStream(realFilePath).pipe(res);
+      return;
+    }
+    if (!/\.jsonl$/i.test(realFilePath)) {
       notFound();
       return;
     }

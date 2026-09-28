@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { renderTranscriptFromEntries, resyncTranscript } from "./session-resync.js";
+import {
+  renderTranscriptFromEntries,
+  renderTranscriptFromEntriesChunked,
+  resyncTranscript,
+} from "./session-resync.js";
 
 function makeRenderers() {
   return {
@@ -426,5 +430,82 @@ describe("history renders carry each entry's identity", () => {
 
     const [assistantArg] = renderers.messageRenderer.renderAssistantMessage.mock.calls[0];
     expect(assistantArg.id).toBe("entry-assistant-2");
+  });
+});
+
+describe("renderTranscriptFromEntriesChunked", () => {
+  const users = (count) =>
+    Array.from({ length: count }, (_, i) => ({
+      type: "message",
+      id: `u${i}`,
+      message: { role: "user", content: `message ${i}` },
+    }));
+
+  test("renders every entry in order across chunks", async () => {
+    const renderers = makeRenderers();
+    const entries = users(5);
+
+    const counts = await renderTranscriptFromEntriesChunked(entries, renderers, {
+      chunkSize: 2,
+      yieldTo: async () => {},
+    });
+
+    expect(counts.user).toBe(5);
+    expect(
+      renderers.messageRenderer.renderUserMessage.mock.calls.map((call) => call[0].content),
+    ).toEqual(["message 0", "message 1", "message 2", "message 3", "message 4"]);
+  });
+
+  test("yields between chunks and reports progress", async () => {
+    const renderers = makeRenderers();
+    const yields = [];
+    const progress = [];
+
+    await renderTranscriptFromEntriesChunked(users(5), renderers, {
+      chunkSize: 2,
+      yieldTo: async () => yields.push(1),
+      onProgress: (done, total) => progress.push([done, total]),
+    });
+
+    // 3 chunks => 2 hand-backs, so the UI can paint and a newer view can abort.
+    expect(yields).toHaveLength(2);
+    expect(progress).toEqual([
+      [2, 5],
+      [4, 5],
+    ]);
+  });
+
+  test("stops when a newer view claims the surface", async () => {
+    const renderers = makeRenderers();
+    let allowed = true;
+
+    const counts = await renderTranscriptFromEntriesChunked(users(6), renderers, {
+      chunkSize: 2,
+      yieldTo: async () => {
+        // A newer claim (another selection, a subagent peek) lands while this
+        // render is yielded.
+        allowed = false;
+      },
+      shouldContinue: () => allowed,
+    });
+
+    // The first chunk (2 of 6) is drawn; the rest is abandoned to the new view
+    // instead of landing on top of it.
+    expect(counts.user).toBe(2);
+    expect(renderers.messageRenderer.renderUserMessage).toHaveBeenCalledTimes(2);
+  });
+
+  test("treats a missing list as an empty transcript", async () => {
+    const renderers = makeRenderers();
+    await expect(
+      renderTranscriptFromEntriesChunked(undefined, renderers, { yieldTo: async () => {} }),
+    ).resolves.toEqual({
+      user: 0,
+      assistant: 0,
+      toolCards: 0,
+      toolResults: 0,
+      notices: 0,
+      compactions: 0,
+    });
   });
 });

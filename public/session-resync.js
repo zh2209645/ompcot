@@ -157,6 +157,58 @@ export function renderTranscriptFromEntries(
 }
 
 /**
+ * Render entries the same way `renderTranscriptFromEntries` does, but in
+ * time-sliced chunks.
+ *
+ * A huge session (measured: 4826 entries / 16.5 MB) blocks the main thread for
+ * ~5 s in one pass, so the whole window freezes and the transcript appears to
+ * flicker as it is cleared and refilled. Yielding between slices keeps the UI
+ * (and the scroll-follow policy) responsive and lets the caller report progress;
+ * the elements still land in `#messages` in order, because each chunk appends
+ * through the same renderers.
+ *
+ * @param {Array} entries - raw session entries (already id-stamped by the caller)
+ * @param {object} options - identical to `renderTranscriptFromEntries`
+ * @param {object} [chunk] - `chunkSize` entries per slice, `yieldTo` scheduler,
+ *   `onProgress(done, total)` reporter, `shouldContinue()` abort check (evaluated
+ *   after every yield so a newer view can stop a render mid-flight)
+ * @returns {Promise<object>} merged per-kind counts
+ */
+export async function renderTranscriptFromEntriesChunked(
+  entries,
+  options = {},
+  { chunkSize = 80, yieldTo = null, onProgress = null, shouldContinue = null } = {},
+) {
+  const counts = {
+    user: 0,
+    assistant: 0,
+    toolCards: 0,
+    toolResults: 0,
+    notices: 0,
+    compactions: 0,
+  };
+  const list = Array.isArray(entries) ? entries : [];
+  const pause = yieldTo || (() => new Promise((resolve) => setTimeout(resolve, 0)));
+  for (let start = 0; start < list.length; start += chunkSize) {
+    if (start > 0 && shouldContinue && !shouldContinue()) return counts;
+    const slice = list.slice(start, start + chunkSize);
+    // The search highlight runs once for the whole transcript, after the last
+    // slice: highlighting per slice would walk the same growing DOM N times.
+    const sliceOptions =
+      options.searchQuery && start + chunkSize < list.length
+        ? { ...options, searchQuery: "" }
+        : options;
+    const partial = renderTranscriptFromEntries(slice, sliceOptions);
+    for (const kind of Object.keys(counts)) counts[kind] += partial[kind] || 0;
+    if (start + chunkSize < list.length) {
+      onProgress?.(Math.min(start + chunkSize, list.length), list.length);
+      await pause();
+    }
+  }
+  return counts;
+}
+
+/**
  * Send the `get_messages` RPC over the WebSocket and wait for the matching
  * command response. The broker tags replies with the originating requestId
  * (mirrored by the embedded server in `id`), so responses are correlated via

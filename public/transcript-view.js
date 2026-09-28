@@ -89,6 +89,17 @@ export function createTranscriptView() {
     get file() {
       return owner?.kind === "agent" ? owner.file : null;
     },
+    /**
+     * The newest claim's token.
+     *
+     * Read it before a long render to hand the renderer an abort check: a
+     * time-sliced paint must stop when a newer claim replaces the view it was
+     * drawing for (`isCurrent`), or the rest of it would land on top of the
+     * new view.
+     */
+    get token() {
+      return token;
+    },
     /** True when `requestToken` is still the newest claim. */
     isCurrent(requestToken) {
       return requestToken === token;

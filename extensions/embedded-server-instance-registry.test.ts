@@ -19,6 +19,42 @@ const base: InstanceEntry = {
   startedAt: "2026-09-27T21:13:18.663Z",
 };
 
+describe("compaction flag", () => {
+  it("patches the flag the other windows read", () => {
+    const compacting = applyInstancePatch(base, { isCompacting: true });
+    expect(compacting.isCompacting).toBe(true);
+    // An unrelated patch must not clear it: every other window's switch/repaint
+    // decision depends on the flag staying true for the whole pass.
+    const renamed = applyInstancePatch(compacting, { sessionFile: "/sessions/p/b.jsonl" });
+    expect(renamed.isCompacting).toBe(true);
+    expect(applyInstancePatch(renamed, { isCompacting: false }).isCompacting).toBe(false);
+  });
+
+  it("keeps a pass that was running across a re-registration (extension reload mid-pass)", () => {
+    const midPass = applyInstancePatch(base, { isCompacting: true });
+
+    const next = mergeInstanceEntry(midPass, {
+      port: 47822,
+      pid: 28340,
+      sessionFile: "/sessions/p/a.jsonl",
+      cwd: "/repo",
+    });
+
+    expect(next.isCompacting).toBe(true);
+    expect(next.isStreaming).toBe(true);
+  });
+
+  it("publishes a new process as not compacting", () => {
+    const next = mergeInstanceEntry(null, {
+      port: 1,
+      pid: 2,
+      sessionFile: "/sessions/p/a.jsonl",
+      cwd: "/repo",
+    });
+    expect(next.isCompacting).toBe(false);
+  });
+});
+
 describe("mergeInstanceEntry", () => {
   it("keeps a live run flag across a re-registration (extension reload mid-run)", () => {
     const next = mergeInstanceEntry(base, {
@@ -70,6 +106,17 @@ describe("applyInstancePatch", () => {
 });
 
 describe("parseInstanceEntry", () => {
+  it("keeps the compaction flag the readers depend on", () => {
+    // The writer published it; dropping it here made the flag invisible through
+    // `/api/instances`, so a window could never see a pass it did not witness.
+    const parsed = parseInstanceEntry(
+      JSON.stringify({ ...base, isCompacting: true, isStreaming: false }),
+    );
+
+    expect(parsed?.isCompacting).toBe(true);
+    expect(parsed?.isStreaming).toBe(false);
+  });
+
   it("accepts a well-formed entry", () => {
     expect(parseInstanceEntry(JSON.stringify(base))).toMatchObject({
       port: 47822,

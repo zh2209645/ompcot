@@ -687,18 +687,24 @@ export class SessionSidebar {
 
   async exportSession(_session) {
     try {
+      // `open: true` has the extension hand the finished HTML to the OS: this
+      // WebView cannot open a local file, and the previous `window.open` on
+      // `/api/sessions/<absolute path>` addressed the two-segment session route
+      // with one segment, so it 404'd and the action looked dead. The request
+      // is a plain fetch (no 8 s WS timeout) because exporting a large session
+      // spawns omp and parses it.
       const data = await (
         await fetch("/api/rpc", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "export_html" }),
+          body: JSON.stringify({ type: "export_html", open: true }),
         })
       ).json();
-      if (data?.success && data.data?.path) {
-        window.open(`/api/sessions/${encodeURIComponent(data.data.path)}`);
+      if (!data?.success) {
+        console.error("[Sidebar] export failed:", data?.error || "unknown error");
       }
-    } catch {
-      /* silent */
+    } catch (err) {
+      console.error("[Sidebar] export failed:", err);
     }
   }
 

@@ -17,8 +17,20 @@
  * report it honestly instead of pretending the switch happened.
  */
 
-const DEFAULT_ATTEMPTS = 20;
-const DEFAULT_INTERVAL_MS = 250;
+/**
+ * The confirmation window.
+ *
+ * `switch_session` is fire-and-forget over the broker (the broker drops omp's
+ * RPC replies), so the only confirmation is the session's own snapshot coming
+ * back — and a long session, or a process still finishing a compaction, can
+ * take far longer to answer than the 5 s this used to allow. That is exactly
+ * the "运行中的 OMP 未确认会话切换" report on a huge session: the switch had
+ * happened (or was still happening) while the window had already given up.
+ * These are a ceiling, not a delay: the gate returns the moment the matching
+ * snapshot lands, and a newer selection supersedes the wait.
+ */
+const DEFAULT_ATTEMPTS = 240;
+const DEFAULT_INTERVAL_MS = 500;
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
