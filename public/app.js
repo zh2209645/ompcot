@@ -1423,6 +1423,13 @@ function settleFinishedRun({ liveFile = null, source = "agent_end" } = {}) {
   // and cards deferred behind a message that never finalized would never be
   // drawn at all.
   settleOpenToolCalls();
+  // Same argument for the messages themselves: a `message_end` suppressed while
+  // a deferred session switch was pending (that run's `agent_end` never came;
+  // the settle above is the registry's) left elements stuck mid-stream — a
+  // frozen caret, no copy button, and an unfinalized flag every later lookup
+  // keys on.
+  messageRenderer.settleAllStreaming();
+  currentStreamingThinking = [];
   // The run is over: whatever this window marked as streaming for the
   // foreground process must stop reporting "running", including a file whose
   // path drifted from the one we marked at agent_start.
@@ -1563,12 +1570,45 @@ function getAssistantThinkingSegments(message) {
     .filter((text) => text.length > 0);
 }
 
+/**
+ * Whether a live element already belongs to this message.
+ *
+ * Identity is the runtime message timestamp (every assistant element carries
+ * it) plus the entry id when the frame knows one. An element that cannot be
+ * identified at all (no ts on either side — a replayed frame without a
+ * timestamp) keeps the old behaviour and is treated as a match, because there
+ * is nothing to contradict.
+ */
+function assistantElementMatchesMessage(element, message) {
+  if (!element) return false;
+  const ts = typeof message?.timestamp === "number" ? String(message.timestamp) : null;
+  const id = typeof message?.id === "string" && message.id ? message.id : null;
+  if (!ts && !id) return true;
+  const elementTs = element.dataset.messageTs || "";
+  const elementId = element.dataset.messageId || "";
+  if (id && elementId === id) return true;
+  if (ts && elementTs === ts) return true;
+  return false;
+}
+
 function ensureStreamingAssistantElement(message = null) {
   // A snapshot/history re-render replaces the transcript wholesale, leaving the
   // live element detached: continuing to stream into it would lose the rest of
   // the turn off-screen. Drop it instead, so the renderer re-adopts the element
   // that is actually on screen (or creates one).
   if (currentStreamingElement && !currentStreamingElement.isConnected) {
+    currentStreamingElement = null;
+  }
+  // The live element is only "the" element for *this* message when its own
+  // identity says so. Handing it back blind is how a late `message_end` (an
+  // identified frame arriving after the next message started) ended up
+  // finalizing the *next* message's element: that element kept streaming with
+  // the older message's content — or stayed unfinished, caret and all, while
+  // its own frame had already been consumed by the wrong one.
+  if (
+    currentStreamingElement &&
+    !assistantElementMatchesMessage(currentStreamingElement, message)
+  ) {
     currentStreamingElement = null;
   }
   if (currentStreamingElement) return currentStreamingElement;

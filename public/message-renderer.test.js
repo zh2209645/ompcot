@@ -498,6 +498,31 @@ describe("rendering is keyed on message identity (no duplicate elements)", () =>
     });
   });
 
+  it("finishes every element the stream left behind", () => {
+    // A `message_end` suppressed while a deferred session switch was pending —
+    // or lost with a dead process — leaves elements mid-stream: a frozen caret,
+    // no copy button, and an unfinalized flag every lookup keys on. The end of
+    // the run settles them, exactly like `settleOpenToolCalls` does for cards.
+    const first = renderer.renderAssistantMessage({ content: "", timestamp: 1000 }, true);
+    renderer.updateStreamingMessage(first, "the first reply");
+    const second = renderer.renderAssistantMessage({ content: "", timestamp: 2000 }, true);
+    renderer.updateStreamingMessage(second, "the second reply");
+
+    expect(renderer.settleAllStreaming()).toBe(2);
+
+    for (const [element, text] of [
+      [first, "the first reply"],
+      [second, "the second reply"],
+    ]) {
+      expect(element.dataset.finalized).toBe("true");
+      expect(element.querySelector(".message-copy-btn")).not.toBeNull();
+      expect(element.textContent).toContain(text);
+      expect(element.querySelector(".message-content").classList.contains("streaming")).toBe(false);
+    }
+    // Idempotent: a second pass finds nothing to settle.
+    expect(renderer.settleAllStreaming()).toBe(0);
+  });
+
   it("a live render adopts the element a snapshot already rendered for its entry id", () => {
     // A re-render mid-run (snapshot from the session file) holds the message
     // under its real entry id while the live path only knows the placeholder.

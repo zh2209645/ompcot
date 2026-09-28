@@ -460,6 +460,39 @@ export class MessageRenderer {
   }
 
   /**
+   * Finish every assistant element the live stream left behind.
+   *
+   * A `message_end` can be dropped rather than replayed — while a deferred
+   * session switch is pending every frame except `agent_end` is suppressed, and
+   * that run's `agent_end` may never come at all (the settle then arrives from
+   * the runtime-idle registry path). The element keeps its last cumulative text
+   * and looks settled: no streaming caret, a copy button, and the finalized flag
+   * that every adoption/lookup rule keys on. The end of the run is the last
+   * moment any of it can still be true, exactly like `settleOpenToolCalls`.
+   *
+   * @returns {number} how many elements were settled
+   */
+  settleAllStreaming() {
+    let settled = 0;
+    for (const element of this.container.querySelectorAll(".message.assistant")) {
+      if (element.dataset.finalized === "true") continue;
+      const contentDiv = element.querySelector(".message-content");
+      const rawText =
+        typeof element._streamingRawText === "string"
+          ? element._streamingRawText
+          : (contentDiv?.querySelector(".streaming-text")?.textContent ?? "");
+      this.finalizeStreamingMessage(element, null, null, element.dataset.messageId || null);
+      if (rawText && contentDiv && !contentDiv.querySelector(".streaming-text")) {
+        // finalizeStreamingMessage rebuilt from `_streamingRawText`; make sure a
+        // freshly emptied element still shows the text it had.
+        contentDiv.innerHTML = renderMarkdown(rawText);
+      }
+      settled += 1;
+    }
+    return settled;
+  }
+
+  /**
    * Release the live-streaming affordances without finalizing the content.
    *
    * Called when a run stops without its message_end (user abort, dropped
