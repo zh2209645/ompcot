@@ -14,25 +14,27 @@ import { ScrollFollow } from "./scroll-follow.js";
 export const TEXT_DUPLICATE_SCAN_MS = 2000;
 
 /**
- * Session-notice types written for the *agent*, not for the person watching.
+ * Session-notice types the transcript shows.
  *
  * omp persists the notices its TUI shows as `custom_message` entries with
- * `display: true`, and the GUI rendered every one of them. Some are nudges the
- * runtime hands the model mid-run, and the model is the only intended reader:
- * `lsp-late-diagnostic` is the LSP tooling telling the agent that diagnostics
- * arrived after its edit returned — the reported flood rendered 22 of them in
- * one turn, each a paragraph of `[biome]` output addressed at the model — and
- * `mid-run-todo-nudge` is the todo reminder (already `display: false` in this
- * build; listed so a future build that flips the flag cannot leak it).
+ * `display: true`, and the GUI rendered every one of them. Most are written for
+ * the *agent*: `lsp-late-diagnostic` ("Late LSP diagnostics arrived after the
+ * edit returned: …", one paragraph of tool output per edit), `mid-run-todo-nudge`
+ * (the todo reminder), `async-result` ("Background job X has completed. Resume
+ * your work using the result below." followed by the job's raw result — CI
+ * logs, patch lists, diffs) and `launch-completion` ("Supervised process …").
+ * The reported bundles showed them as the transcript's dominant content:
+ * 22 `lsp-late-diagnostic` blocks in one turn, then 15 `async-result` payloads
+ * plus 2 `launch-completion` lines.
  *
- * Notices the person cares about keep rendering: `async-result` (a background
- * job's result was delivered) and `launch-completion` (a supervised process
- * ended). The list lives here rather than in the extension because every paint
- * path — history, snapshot, resync, and the live `session_notice` frame — goes
- * through `renderNotice`; the entries stay in the session file and in the debug
- * bundle's frame log, so hiding is purely a display decision.
+ * So the list is what the person is shown, not what is hidden: a notice renders
+ * only when it is *for the reader*, and an unrecognized type stays out until
+ * somebody decides otherwise. `compaction` is the one in that category today
+ * (a committed compaction is the transcript's only record of the stretch it
+ * summarized). The entry itself is untouched — it stays in the session file and
+ * in the debug bundle's frame log, so hiding is purely a display decision.
  */
-export const AGENT_ONLY_NOTICE_TYPES = new Set(["lsp-late-diagnostic", "mid-run-todo-nudge"]);
+export const USER_FACING_NOTICE_TYPES = new Set(["compaction"]);
 
 /** Increment/decrement a duplicate counter, dropping it at zero. */
 function bumpCount(map, key, delta) {
@@ -873,17 +875,19 @@ export class MessageRenderer {
    * Append a displayable session notice.
    *
    * omp persists notices the TUI renders as `custom_message` entries with
-   * `display: true` (background-job delivery `async-result`, `launch-completion`,
-   * late diagnostics). They are ordinary transcript items — the same reply can
+   * `display: true` (background-job delivery, launch completion, late
+   * diagnostics, todo nudges). They are ordinary transcript items — the same reply can
    * be re-read from the session file — so the element is keyed on the entry id
    * and an entry that is already on screen (a snapshot repaint drew it, then
    * the extension forwarded it, or a resync replayed it) is not drawn twice.
+   * Only the types in `USER_FACING_NOTICE_TYPES` reach the screen: the rest are
+   * addressed at the agent and stay in the session file (and the debug log).
    *
    * @param {{id?: string|null, customType?: string, content?: unknown, label?: string|null}} notice
    * @returns {HTMLElement|null} the appended element, or null when skipped
    */
   renderNotice({ id = null, customType = "", content = null, label = null } = {}) {
-    if (AGENT_ONLY_NOTICE_TYPES.has(String(customType || ""))) return null;
+    if (!USER_FACING_NOTICE_TYPES.has(String(customType || ""))) return null;
     const text = noticeText(content);
     if (!text) return null;
     if (typeof id === "string" && id && this.findNoticeElement(id)) return null;

@@ -725,23 +725,23 @@ describe("MessageRenderer session notices", () => {
   it("renders the notice type and unwraps the system-notice envelope", () => {
     const el = renderer.renderNotice({
       id: "entry_n1",
-      customType: "async-result",
-      content: "<system-notice>\nBackground job ScoutX has completed.\n</system-notice>",
+      customType: "compaction",
+      content: "<system-notice>\nSummarized 12k tokens of tool output.\n</system-notice>",
     });
 
     expect(el).not.toBeNull();
     expect(el.dataset.noticeId).toBe("entry_n1");
-    expect(el.querySelector(".notice-type").textContent).toBe("async-result");
+    expect(el.querySelector(".notice-type").textContent).toBe("compaction");
     // The envelope is markup for the model; the block itself says "Notice".
     expect(el.querySelector(".notice-body").textContent).toBe(
-      "Background job ScoutX has completed.",
+      "Summarized 12k tokens of tool output.",
     );
   });
 
   it("accepts content blocks and renders them as text, never as markup", () => {
     const el = renderer.renderNotice({
       id: "entry_n2",
-      customType: "launch-completion",
+      customType: "compaction",
       content: [{ type: "text", text: "<img src=x onerror=alert(1)> done" }],
     });
     const body = el.querySelector(".notice-body");
@@ -750,41 +750,65 @@ describe("MessageRenderer session notices", () => {
   });
 
   it("draws an entry once, so a snapshot plus a live frame cannot double it", () => {
-    const first = renderer.renderNotice({ id: "entry_n3", content: "one" });
-    const second = renderer.renderNotice({ id: "entry_n3", content: "one" });
+    const first = renderer.renderNotice({
+      id: "entry_n3",
+      customType: "compaction",
+      content: "one",
+    });
+    const second = renderer.renderNotice({
+      id: "entry_n3",
+      customType: "compaction",
+      content: "one",
+    });
 
     expect(first).not.toBeNull();
     expect(second).toBeNull();
     expect(container.querySelectorAll("[data-notice-id]")).toHaveLength(1);
   });
 
-  it("hides the notices the runtime wrote for the agent, not for the reader", () => {
-    // `lsp-late-diagnostic` is the LSP tooling telling the model that
-    // diagnostics landed after its edit returned; one reported turn rendered
-    // 22 of them, each a paragraph of biome output. The entry stays in the
-    // session file and in the debug log — only the transcript hides it.
-    const hidden = renderer.renderNotice({
-      id: "entry_lsp",
-      customType: "lsp-late-diagnostic",
-      content:
-        "<system-notice>\nLate LSP diagnostics arrived after the edit returned: a.js — 1 error(s)\n</system-notice>",
-    });
-    expect(hidden).toBeNull();
+  it("shows only the notices written for the reader", () => {
+    // The reported bundles, in order: 22 `lsp-late-diagnostic` blocks in one
+    // turn (each a paragraph of biome output), then 15 `async-result` payloads
+    // — "Background job X has completed. Resume your work using the result
+    // below." followed by CI logs and diffs — plus `launch-completion` lines.
+    // All of them are addressed at the agent, and all of them stay in the
+    // session file and the debug log; the transcript shows them no longer.
+    const agentOnly = [
+      [
+        "lsp-late-diagnostic",
+        "<system-notice>\nLate LSP diagnostics arrived after the edit.\n</system-notice>",
+      ],
+      [
+        "async-result",
+        "<system-notice>\nBackground job bg_2 has completed. Resume your work using the result below.\n</system-notice>",
+      ],
+      ["launch-completion", "Supervised process ompprobe failed with exit code 1."],
+      ["mid-run-todo-nudge", "12 todo items still open."],
+      ["something-new", "a notice type nobody has classified yet"],
+    ];
+    for (const [type, content] of agentOnly) {
+      expect(renderer.renderNotice({ id: `entry_${type}`, customType: type, content })).toBeNull();
+    }
     expect(container.querySelectorAll("[data-notice-id]")).toHaveLength(0);
 
-    // …while the notices a person acts on keep rendering.
-    for (const type of ["async-result", "launch-completion"]) {
-      const el = renderer.renderNotice({ id: `entry_${type}`, customType: type, content: "done" });
-      expect(el).not.toBeNull();
-      expect(el.querySelector(".notice-type").textContent).toBe(type);
-    }
+    // …while a committed compaction — the transcript's own record of the
+    // history it replaced — keeps rendering.
+    const shown = renderer.renderNotice({
+      id: "entry_compact",
+      customType: "compaction",
+      content: "Summarized 12k tokens.",
+    });
+    expect(shown).not.toBeNull();
+    expect(shown.querySelector(".notice-type").textContent).toBe("compaction");
   });
 
   it("skips entries with no text and keeps notice ordering stable", () => {
-    expect(renderer.renderNotice({ id: "entry_n4", content: "   " })).toBeNull();
+    expect(
+      renderer.renderNotice({ id: "entry_n4", customType: "compaction", content: "   " }),
+    ).toBeNull();
 
-    renderer.renderNotice({ id: "entry_n5", content: "first" });
-    renderer.renderNotice({ id: "entry_n6", content: "second" });
+    renderer.renderNotice({ id: "entry_n5", customType: "compaction", content: "first" });
+    renderer.renderNotice({ id: "entry_n6", customType: "compaction", content: "second" });
     const bodies = Array.from(container.querySelectorAll(".notice-body")).map(
       (el) => el.textContent,
     );
