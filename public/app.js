@@ -2023,6 +2023,27 @@ composerCard.addEventListener("drop", (e) => {
   e.preventDefault();
 });
 
+// Attach files (native host only): the OS picker returns real paths, which go
+// into the composer as `@`-mentions for omp to auto-read — an image picked here
+// is what the runtime turns into image content. Browser/mobile clients have no
+// file paths to offer; they use the `@` popup or drag rows out of the file
+// browser instead.
+const attachFileBtn = document.getElementById("attach-file-btn");
+attachFileBtn.addEventListener("click", async () => {
+  try {
+    const picked = await transport.pickFiles();
+    await composerMentions.insertPaths(picked);
+  } catch (err) {
+    console.error("[Ompcot] File picker failed:", err);
+  }
+});
+
+/** Reveal native-only toolbar affordances once the broker handshake lands. */
+function refreshAttachFileButton() {
+  attachFileBtn.classList.toggle("hidden", !nativeAvailable());
+}
+refreshAttachFileButton();
+
 // ═══════════════════════════════════════
 // Send message
 // ═══════════════════════════════════════
@@ -5159,8 +5180,6 @@ async function openSettings() {
         btnThinkingLevel.textContent = formatThinkingLevelLabel(s.thinkingLevel);
         currentThinkingLevel = s.thinkingLevel || "off";
         updateThinkingBtn();
-        // Session name
-        inputSessionName.value = s.sessionName || "";
       }
     } catch (_e) {
       // Silent

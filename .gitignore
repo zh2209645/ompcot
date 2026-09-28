@@ -13,6 +13,9 @@ extensions/dist/
 src-tauri/resources/pi/
 .cache/pi-binaries/
 
+# Debug bundles exported from Settings → Debug / window.ompcotDebug
+ompcot-debug-*.json
+
 # Session exports (omp names them omp-session-*; pi-session-* is the old prefix)
 pi-session-*.html
 omp-session-*.html

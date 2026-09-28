@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setupContextViz } from "./app-context-viz.js";
 
@@ -161,5 +162,21 @@ describe("context popover", () => {
     ctx.press(ctx.pill);
     ctx.pill.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(ctx.isOpen()).toBe(true);
+  });
+});
+
+describe("the popover's anchor (CSS contract)", () => {
+  it("keeps the header and the composer positioned, so their popovers anchor to them", () => {
+    // A `position: absolute` popover resolves against its nearest *positioned*
+    // ancestor. The header (this panel, the open-app menu) and the composer
+    // (the slash-command menu) are in flow now; without `position: relative` on
+    // them those panels resolved against `.main` and opened a full column below
+    // their trigger — which read as "the button does nothing".
+    const css = readFileSync("public/style.css", "utf8");
+    for (const selector of [".header", ".input-area"]) {
+      const rule = css.match(new RegExp(`${selector.replace(".", "\\.")} \\{([\\s\\S]*?)\\n\\}`));
+      expect(rule, `${selector} rule`).not.toBeNull();
+      expect(rule[1]).toContain("position: relative");
+    }
   });
 });

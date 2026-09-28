@@ -32,7 +32,8 @@
         "noImportantStyles": "off"
       },
       "correctness": {
-        "recommended": true
+        "recommended": true,
+        "noUndeclaredVariables": "error"
       },
       "nursery": {
         "recommended": true

@@ -1023,7 +1023,11 @@ body {
   -webkit-app-region: drag;
   /* In flow: the transcript scrolls in its own box between this bar and the
      composer, so nothing has to be measured, compensated, or repainted to keep
-     content out from under either of them. */
+     content out from under either of them. `relative` (not `absolute`) keeps it
+     the containing block for the popovers it owns — the context-window panel
+     and the open-app menu anchor to it, and without a positioned ancestor they
+     resolved against `.main` and opened below the whole column. */
+  position: relative;
   flex: 0 0 auto;
 }
 
@@ -4427,7 +4431,10 @@ body.hide-thinking .thinking-block {
   background: var(--bg-solid);
   border-top: none;
   /* In flow (see .messages-wrap): the composer takes its own height out of the
-     column, so it cannot cover the transcript and needs no inset maths. */
+     column, so it cannot cover the transcript and needs no inset maths.
+     `relative` for the same reason as the header: the slash-command menu is
+     anchored to this box. */
+  position: relative;
   flex: 0 0 auto;
 }
 
