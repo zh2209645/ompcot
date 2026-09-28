@@ -647,13 +647,21 @@
                 <div class="config-editor-error settings-save-status hidden" id="debug-status"></div>
                 <div class="settings-config-button-group">
                   <button class="btn-secondary" id="debug-refresh" data-i18n="debug.refresh">Refresh</button>
+                  <button class="btn-secondary" id="debug-export-render" data-i18n="debug.exportRender">Export rendered page</button>
                   <button class="btn-primary" id="debug-export" data-i18n="debug.export">Export bundle</button>
                 </div>
               </div>
               <p class="settings-help hidden" id="debug-dump-path"></p>
+              <p class="settings-help hidden" id="debug-render-path"></p>
               <p class="settings-help" data-i18n="debug.note">
                 The bundle lands in the system temp directory (ompcot-debug). It contains no
                 message text or tool output — ids, sizes and routing metadata only.
+              </p>
+              <p class="settings-help" data-i18n="debug.renderNote">
+                "Export rendered page" writes the window's live DOM — stylesheets inlined,
+                scripts removed, transcript scroll position restored on open — so the exact
+                rendering can be reopened in any browser. Unlike the session export, it shows
+                what the window actually drew.
               </p>
             </div>
           </section>

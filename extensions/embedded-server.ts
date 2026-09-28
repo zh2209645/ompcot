@@ -6125,6 +6125,30 @@ export default function (omp: ExtensionAPI) {
       return;
     }
 
+    // The window's live rendered page, for rendering bugs the session file
+    // cannot show (one entry, two elements; a pill stuck on some state). The
+    // body is the HTML the frontend built (stylesheets inlined, scripts
+    // stripped), written verbatim next to the debug bundles.
+    if (urlPath === "/api/render-dump" && req.method === "POST") {
+      readCappedBody(req, res, async (body) => {
+        const capturedAt = new Date().toISOString();
+        const safeStamp = capturedAt.replace(/[:.]/g, "-");
+        try {
+          const filePath = path.join(DEBUG_DUMP_DIR, `ompcot-render-${safeStamp}.html`);
+          await fs.promises.mkdir(DEBUG_DUMP_DIR, { recursive: true });
+          await fs.promises.writeFile(filePath, body ?? "", "utf8");
+          const bytes = (body ?? "").length;
+          recordDebug("render-dump", { path: filePath, bytes });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ path: filePath, bytes }));
+        } catch (err: unknown) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        }
+      });
+      return;
+    }
+
     if (urlPath === "/api/debug-dump" && req.method === "POST") {
       readCappedBody(req, res, async (body) => {
         let payload: { frontend?: unknown; meta?: unknown } = {};

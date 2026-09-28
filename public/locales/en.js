@@ -230,6 +230,11 @@ export const en = {
   "debug.unavailable": "Unavailable",
   "debug.refresh": "Refresh",
   "debug.export": "Export bundle",
+  "debug.exportRender": "Export rendered page",
+  "debug.renderExported": "Exported the rendered page ({messages} messages, {bytes} KB)",
+  "debug.renderFailed": "Rendered-page export failed: {error}",
+  "debug.renderNote":
+    '"Export rendered page" writes the window\'s live DOM — stylesheets inlined, scripts removed, the transcript scroll position restored on open — so the exact rendering can be reopened in any browser. Unlike the session export, it shows what the window actually drew.',
   "debug.exporting": "Exporting…",
   "debug.exported": "Exported {frontend} window and {extension} process entries",
   "debug.exportFailed": "Export failed: {error}",

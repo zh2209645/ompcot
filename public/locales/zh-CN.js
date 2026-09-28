@@ -223,6 +223,11 @@ export const zhCN = {
   "debug.unavailable": "不可用",
   "debug.refresh": "刷新",
   "debug.export": "导出诊断包",
+  "debug.exportRender": "导出渲染页面",
+  "debug.renderExported": "已导出渲染页面（{messages} 条消息，{bytes} KB）",
+  "debug.renderFailed": "渲染页面导出失败：{error}",
+  "debug.renderNote":
+    "「导出渲染页面」会把窗口当前的实时 DOM 写成一个文件（内联样式表、移除脚本、打开时恢复转录滚动位置），可在任意浏览器中重放当时的真实渲染结果 —— 与会话导出不同，它展示的是窗口实际画出来的内容。",
   "debug.exporting": "正在导出…",
   "debug.exported": "已导出 {frontend} 条窗口记录与 {extension} 条进程记录",
   "debug.exportFailed": "导出失败：{error}",

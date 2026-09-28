@@ -5335,6 +5335,9 @@ window.ompcotDebug = {
   enable: () => debugLog.setEnabled(true),
   disable: () => debugLog.setEnabled(false),
   export: () => debugPanel.export(),
+  // The live page, for when the window itself is what misbehaves: a rendering
+  // bug can leave the settings UI unreachable, and this needs no UI.
+  exportRender: () => debugPanel.exportRender(),
 };
 
 configSubnav = createConfigSubnav({

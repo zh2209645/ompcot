@@ -19,6 +19,7 @@
 
 import { buildDebugBundle, debugLog } from "./debug-log.js";
 import { onLanguageChanged, t } from "./i18n.js";
+import { buildRenderDump } from "./render-export.js";
 
 export function createDebugPanel({ root, fetchImpl = fetch, meta = () => ({}) } = {}) {
   const toggleEl = root?.querySelector("#debug-capture-toggle") ?? null;
@@ -28,6 +29,8 @@ export function createDebugPanel({ root, fetchImpl = fetch, meta = () => ({}) } 
   const pathEl = root?.querySelector("#debug-dump-path") ?? null;
   const refreshEl = root?.querySelector("#debug-refresh") ?? null;
   const exportEl = root?.querySelector("#debug-export") ?? null;
+  const exportRenderEl = root?.querySelector("#debug-export-render") ?? null;
+  const renderPathEl = root?.querySelector("#debug-render-path") ?? null;
 
   let busy = false;
 
@@ -113,6 +116,49 @@ export function createDebugPanel({ root, fetchImpl = fetch, meta = () => ({}) } 
     void exportBundle();
   });
 
+  /**
+   * The live page itself, not the session: this is what a rendering bug looks
+   * like from the outside — the DOM the renderers built, its classes, the
+   * transcript's scroll position — written next to the bundle so it can be
+   * opened in any browser.
+   */
+  async function exportRender() {
+    if (busy) return;
+    busy = true;
+    setStatus(t("debug.exporting"));
+    try {
+      const dump = await buildRenderDump(document, { meta: meta() });
+      const res = await fetchImpl("/api/render-dump", {
+        method: "POST",
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+        body: dump.html,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.path) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      if (renderPathEl) {
+        renderPathEl.textContent = data.path;
+        renderPathEl.classList.remove("hidden");
+      }
+      console.log(`[Ompcot] Rendered page exported to ${data.path}`);
+      setStatus(
+        t("debug.renderExported", {
+          messages: dump.census.messages,
+          bytes: Math.round(dump.bytes / 1024),
+        }),
+      );
+    } catch (err) {
+      setStatus(t("debug.renderFailed", { error: err?.message ?? String(err) }), "error");
+    } finally {
+      busy = false;
+    }
+  }
+
+  exportRenderEl?.addEventListener("click", () => {
+    void exportRender();
+  });
+
   // The pill labels are JS-built elsewhere; here only the live counts need a
   // repaint on language change (labels come from data-i18n attributes).
   const unsubscribeLanguage = onLanguageChanged(() => {
@@ -123,6 +169,7 @@ export function createDebugPanel({ root, fetchImpl = fetch, meta = () => ({}) } 
   return {
     refresh,
     export: exportBundle,
+    exportRender,
     destroy: () => unsubscribeLanguage(),
   };
 }
