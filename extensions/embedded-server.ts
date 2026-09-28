@@ -2167,6 +2167,24 @@ export function matchMessageEntryId(entries: readonly unknown[], message: unknow
   return null;
 }
 
+/**
+ * True when `filePath` stays inside the static root.
+ *
+ * Containment is decided on resolved paths, never on a raw string prefix.
+ * Producers hand `STATIC_DIR` in more than one spelling — the Rust host passes
+ * native separators while a hand-set `OMCOT_STATIC_DIR` may use `/` — and
+ * Windows paths compare both ways. `filePath.startsWith(STATIC_DIR)` compared
+ * `D:\...\public\index.html` against `D:/.../public`, so every request for an
+ * existing file answered 403 and the whole UI refused to load.
+ *
+ * `path.relative` also handles the case-insensitive Windows drive/filesystem
+ * comparison, and keeps symlinked spellings of the same root inside.
+ */
+export function isInsideStaticDir(staticDir: string, filePath: string): boolean {
+  const relative = path.relative(path.resolve(staticDir), path.resolve(filePath));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 export default function (omp: ExtensionAPI) {
   const globalState = getOrCreateGlobalState();
 
@@ -4490,8 +4508,9 @@ export default function (omp: ExtensionAPI) {
 
     const filePath = path.join(STATIC_DIR, urlPath);
 
-    // Security: prevent directory traversal
-    if (!filePath.startsWith(STATIC_DIR)) {
+    // Security: prevent directory traversal (and, on Windows, a STATIC_DIR
+    // spelled with `/` — see isInsideStaticDir).
+    if (!isInsideStaticDir(STATIC_DIR, filePath)) {
       res.writeHead(403);
       res.end("Forbidden");
       return;
@@ -7836,8 +7855,9 @@ export default function (omp: ExtensionAPI) {
         const filePath = path.join(STATIC_DIR, urlPath);
         // Guard against directory-traversal. We do this with the resolved
         // filesystem path rather than the URL path so symlink shenanigans
-        // can't escape STATIC_DIR either.
-        if (!filePath.startsWith(STATIC_DIR)) {
+        // can't escape STATIC_DIR either (and a `/`-spelled STATIC_DIR on
+        // Windows still serves — see isInsideStaticDir).
+        if (!isInsideStaticDir(STATIC_DIR, filePath)) {
           return new Response("Forbidden", { status: 403 });
         }
 
