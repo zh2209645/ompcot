@@ -452,10 +452,17 @@ export class MessageRenderer {
    * Show or hide the live caret on a streaming message. The caller decides from
    * the frame it just handled (`isTypingUserText`, public/state.js); thinking and
    * tool frames clear it so the caret never means "busy".
+   *
+   * A settled element (its content div lost `streaming` — the run ended, the
+   * element was finalized, or a history render drew it) is no longer a live
+   * target: an update that arrives after the fact must not bring the caret
+   * back, or the transcript shows a caret blinking on text that stopped
+   * arriving.
    */
   setStreamingTyping(messageElement, typing) {
     const textDiv = messageElement?.querySelector?.(".streaming-text");
     if (!textDiv) return;
+    if (typing && !messageElement.querySelector(".message-content.streaming")) return;
     textDiv.classList.toggle("typing", Boolean(typing));
   }
 
@@ -481,7 +488,18 @@ export class MessageRenderer {
         typeof element._streamingRawText === "string"
           ? element._streamingRawText
           : (contentDiv?.querySelector(".streaming-text")?.textContent ?? "");
-      this.finalizeStreamingMessage(element, null, null, element.dataset.messageId || null);
+      // One element that fails to finalize (an unexpected shape from a replayed
+      // frame, a renderer throw) must not abort the sweep for every element
+      // after it: a half-swept transcript is exactly the frozen caret this
+      // exists to prevent, and the next run end may be minutes away.
+      try {
+        this.finalizeStreamingMessage(element, null, null, element.dataset.messageId || null);
+      } catch (err) {
+        this.stopStreaming(element);
+        console.error("[Transcript] Failed to settle a streaming element:", err);
+        settled += 1;
+        continue;
+      }
       if (rawText && contentDiv && !contentDiv.querySelector(".streaming-text")) {
         // finalizeStreamingMessage rebuilt from `_streamingRawText`; make sure a
         // freshly emptied element still shows the text it had.
@@ -507,6 +525,13 @@ export class MessageRenderer {
     if (!contentDiv?.classList.contains("streaming")) return;
     this.transcriptState("stop", { messageId: messageElement.dataset.messageId || null });
     contentDiv.classList.remove("streaming");
+    // The caret is hidden by the `.message-content.streaming` ancestor rule, but
+    // the class itself must go: an element adopted again as live (a replayed
+    // frame, a late partial flush) would otherwise resume blinking on text that
+    // stopped arriving.
+    for (const textDiv of contentDiv.querySelectorAll(".streaming-text.typing")) {
+      textDiv.classList.remove("typing");
+    }
     for (const thinkingDiv of contentDiv.querySelectorAll(".streaming-thinking")) {
       thinkingDiv.classList.remove("streaming-thinking");
       thinkingDiv.querySelector(".thinking-toggle")?.classList.remove("expanded");
@@ -514,6 +539,24 @@ export class MessageRenderer {
     }
     this._ensureCopyButton(messageElement);
     this.scrollToBottom();
+  }
+
+  /**
+   * Any assistant element carrying this runtime message identity.
+   *
+   * The identity finders above answer "is this *the* element to adopt/finish?";
+   * this one answers the plain existence question a late frame asks ("is this
+   * message already on screen?"), across every element shape — live, settled,
+   * or rendered from history with a real entry id.
+   */
+  findAssistantElementByTs(messageTs) {
+    const wanted =
+      typeof messageTs === "number" && Number.isFinite(messageTs) ? String(messageTs) : null;
+    if (!wanted) return null;
+    for (const element of this.container.querySelectorAll(".message.assistant")) {
+      if (element.dataset.messageTs === wanted) return element;
+    }
+    return null;
   }
 
   /**

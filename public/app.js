@@ -1536,6 +1536,19 @@ function handleMessageStart(message, entryId = null) {
       });
       return;
     }
+    // Same policy as `handleMessageUpdate`: with no run active, a start for a
+    // message that is already on screen is a replay of a finished turn — and
+    // one for a message that is not is drawn settled, never as a live element
+    // no `message_end` will come to finalize.
+    const isLive = state.isStreaming;
+    if (!isLive && messageRenderer.findAssistantElementByTs(message.timestamp)) {
+      debugLog.log("stream.late-start", {
+        entryId: entryId || message.id || null,
+        ts: typeof message.timestamp === "number" ? message.timestamp : null,
+        action: "dropped-settled",
+      });
+      return;
+    }
     currentStreamingText = "";
     currentStreamingThinking = [];
     currentStreamingMessage = null;
@@ -1549,8 +1562,13 @@ function handleMessageStart(message, entryId = null) {
     // still be adopted by its own late frame (see
     // `findSettledAssistantElement`).
     currentStreamingElement = messageRenderer.renderAssistantMessage(
-      { content: "", id: entryId || message.id, timestamp: message.timestamp },
-      true,
+      {
+        content: isLive ? "" : Array.isArray(message.content) ? message.content : "",
+        id: entryId || message.id,
+        timestamp: message.timestamp,
+        usage: message.usage,
+      },
+      isLive,
     );
   } else if (message.role === "user") {
     // In mirror mode, user messages from TUI appear via events
@@ -1617,7 +1635,7 @@ function assistantElementMatchesMessage(element, message) {
   return false;
 }
 
-function ensureStreamingAssistantElement(message = null) {
+function ensureStreamingAssistantElement(message = null, isLive = true) {
   // A snapshot/history re-render replaces the transcript wholesale, leaving the
   // live element detached: continuing to stream into it would lose the rest of
   // the turn off-screen. Drop it instead, so the renderer re-adopts the element
@@ -1640,15 +1658,30 @@ function ensureStreamingAssistantElement(message = null) {
   if (currentStreamingElement) return currentStreamingElement;
   currentStreamingText = getAssistantText(message);
   currentStreamingThinking = getAssistantThinkingSegments(message);
+  // `isLive` is false when the run this frame belongs to is already over (see
+  // `handleMessageUpdate`): the element is drawn as a finished message — real
+  // content, finalized flag, no caret — instead of a live one nothing will ever
+  // settle.
   currentStreamingElement = messageRenderer.renderAssistantMessage(
-    { content: "", id: message?.id, timestamp: message?.timestamp },
-    true,
+    {
+      content: isLive
+        ? ""
+        : Array.isArray(message?.content)
+          ? message.content
+          : currentStreamingText,
+      id: message?.id,
+      timestamp: message?.timestamp,
+      usage: message?.usage,
+    },
+    isLive,
   );
-  if (currentStreamingThinking.length > 0) {
-    messageRenderer.updateStreamingThinking(currentStreamingElement, currentStreamingThinking);
-  }
-  if (currentStreamingText) {
-    messageRenderer.updateStreamingMessage(currentStreamingElement, currentStreamingText);
+  if (isLive) {
+    if (currentStreamingThinking.length > 0) {
+      messageRenderer.updateStreamingThinking(currentStreamingElement, currentStreamingThinking);
+    }
+    if (currentStreamingText) {
+      messageRenderer.updateStreamingMessage(currentStreamingElement, currentStreamingText);
+    }
   }
   return currentStreamingElement;
 }
@@ -1718,9 +1751,28 @@ function handleMessageUpdate(event) {
       });
       return;
     }
+    // No run is active and this message is already on screen. Whatever the
+    // frame carries, the turn it belongs to is over: re-opening the element as
+    // live would leave it streaming with nothing left to finalize it — the
+    // caret blinking on a finished message until the *next* run end sweeps it
+    // (and forever when no later run comes). Frames for a message that is *not*
+    // on screen fall through and are rendered settled instead (`isLive`).
+    const isLive = state.isStreaming;
+    const alreadyOnScreen =
+      typeof message.timestamp === "number"
+        ? messageRenderer.findAssistantElementByTs(message.timestamp)
+        : null;
+    if (!isLive && alreadyOnScreen) {
+      debugLog.log("stream.late-update", {
+        entryId: entryId || null,
+        ts: typeof message.timestamp === "number" ? message.timestamp : null,
+        action: "dropped-settled",
+      });
+      return;
+    }
     currentStreamingMessage = message;
     if (typeof entryId === "string" && entryId) currentStreamingEntryId = entryId;
-    ensureStreamingAssistantElement(message);
+    ensureStreamingAssistantElement(message, isLive);
     // Stamp the entry id the moment the runtime reports it: a re-render that
     // lands mid-run (snapshot, replayed frame) then finds this element by id
     // instead of starting a second copy of the same message.
@@ -2099,13 +2151,26 @@ attachFileBtn.addEventListener("click", async () => {
     const picked = await transport.pickFiles();
     await composerMentions.insertPaths(picked);
   } catch (err) {
+    // A picker that fails has to say so. The handler used to swallow the error
+    // into the console, so the button read as "cannot attach files at all"
+    // while the reason (a broker control the host could not run, a dialog that
+    // never opened) was invisible.
     console.error("[Ompcot] File picker failed:", err);
+    showTransientStatus(t("composer.attachFailed", { error: String(err?.message || err) }));
   }
 });
 
 /** Reveal native-only toolbar affordances once the broker handshake lands. */
 function refreshAttachFileButton() {
-  attachFileBtn.classList.toggle("hidden", !nativeAvailable());
+  const native = nativeAvailable();
+  // The composer is inert while a history session is on screen or a deferred
+  // switch is waiting for the run to finish (`updateMirrorInputState` /
+  // `updateUI` disable the textarea, and `.mirror-readonly` is
+  // `pointer-events: none`). Reaching into it from here would insert text the
+  // user cannot see or send — so the button goes with the input: hidden without
+  // the native broker, disabled with it whenever the composer cannot be used.
+  attachFileBtn.classList.toggle("hidden", !native);
+  attachFileBtn.disabled = !native || messageInput.disabled;
 }
 refreshAttachFileButton();
 
@@ -4094,6 +4159,7 @@ function updateMirrorInputState() {
     messageInput.placeholder = t("composer.readonlyHistory");
     inputArea?.classList.add("mirror-readonly");
   }
+  refreshAttachFileButton();
 }
 
 // ═══════════════════════════════════════
@@ -4468,6 +4534,9 @@ function updateUI() {
   // The mention popup is derived from the composer text + caret: a programmatic
   // write (send clears it, a restored draft fills it) must re-derive it too.
   composerMentions.refresh();
+  // The native picker writes into this textarea: it follows the input's
+  // enabled/disabled state, never ahead of it.
+  refreshAttachFileButton();
 
   // Viewing a history session while original is still streaming —
   // block input until agent_end triggers the deferred switch_session.

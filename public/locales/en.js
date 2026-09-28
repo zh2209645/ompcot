@@ -88,6 +88,7 @@ export const en = {
   "composer.waitingFinish": "Waiting for current session to finish…",
   "composer.readonlyHistory": "Viewing historical session (read-only)",
   "composer.attachFile": "Attach file or image (mention in the prompt)",
+  "composer.attachFailed": "Could not attach files — {error}",
   "composer.commandsTitle": "Commands",
   "composer.openCommandsAria": "Open commands",
   "composer.voiceInput": "Voice input",

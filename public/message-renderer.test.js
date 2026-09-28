@@ -498,6 +498,53 @@ describe("rendering is keyed on message identity (no duplicate elements)", () =>
     });
   });
 
+  it("stops the caret when an element is settled, not just the streaming class", () => {
+    // The caret is only *shown* under `.message-content.streaming`, but the
+    // `typing` class outlived every settle path — so an element adopted again
+    // as live (a replayed frame, a late partial flush) resumed blinking on text
+    // that stopped arriving.
+    const el = renderer.renderAssistantMessage({ content: "", timestamp: 1000 }, true);
+    renderer.updateStreamingMessage(el, "writing something", { typing: true });
+    expect(el.querySelector(".streaming-text").classList.contains("typing")).toBe(true);
+
+    renderer.stopStreaming(el);
+    expect(el.querySelector(".streaming-text").classList.contains("typing")).toBe(false);
+    expect(el.querySelector(".message-content").classList.contains("streaming")).toBe(false);
+  });
+
+  it("refuses to start a caret on an element the run already settled", () => {
+    // A late delta (the runtime flushes the turn's last partial on its way out)
+    // must not bring the caret back to a message that is already finished. The
+    // text div survives a settle when the element was not rebuilt from its
+    // blocks — exactly the shape a replayed frame finds.
+    const el = renderer.renderAssistantMessage({ content: "", timestamp: 1000 }, true);
+    renderer.updateStreamingMessage(el, "writing something");
+    el.querySelector(".message-content").classList.remove("streaming");
+
+    renderer.setStreamingTyping(el, true);
+    expect(el.querySelector(".streaming-text").classList.contains("typing")).toBe(false);
+
+    // Clearing is always allowed, so a stale class can never survive.
+    el.querySelector(".streaming-text").classList.add("typing");
+    renderer.setStreamingTyping(el, false);
+    expect(el.querySelector(".streaming-text").classList.contains("typing")).toBe(false);
+  });
+
+  it("finds an element by its runtime identity whatever shape it has", () => {
+    const live = renderer.renderAssistantMessage({ content: "", timestamp: 111 }, true);
+    const settled = renderer.renderAssistantMessage({ content: "hi", timestamp: 222 }, false);
+    const finalized = renderer.renderAssistantMessage(
+      { content: "old", id: "abc12345", timestamp: 333 },
+      false,
+    );
+
+    expect(renderer.findAssistantElementByTs(111)).toBe(live);
+    expect(renderer.findAssistantElementByTs(222)).toBe(settled);
+    expect(renderer.findAssistantElementByTs(333)).toBe(finalized);
+    expect(renderer.findAssistantElementByTs(999)).toBeNull();
+    expect(renderer.findAssistantElementByTs(null)).toBeNull();
+  });
+
   it("finishes every element the stream left behind", () => {
     // A `message_end` suppressed while a deferred session switch was pending —
     // or lost with a dead process — leaves elements mid-stream: a frozen caret,

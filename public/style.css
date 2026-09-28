@@ -4786,6 +4786,20 @@ body.hide-thinking .thinking-block {
   opacity: 0.7;
 }
 
+/* A tool the composer cannot honour right now (the native picker without the
+   broker, the file picker while the input is inert) must not look clickable:
+   the click handler would otherwise run against a disabled textarea and the
+   user sees an attachment that never arrives. */
+.input-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+
+.input-icon-btn:disabled:hover {
+  background: transparent;
+}
+
 #message-input {
   padding: 12px 14px 4px;
   background: transparent;

@@ -83,6 +83,7 @@ export const zhCN = {
   "composer.waitingFinish": "正在等待当前会话结束…",
   "composer.readonlyHistory": "正在查看历史会话（只读）",
   "composer.attachFile": "附加文件或图片（以提及方式插入提示）",
+  "composer.attachFailed": "无法附加文件 — {error}",
   "composer.commandsTitle": "命令",
   "composer.openCommandsAria": "打开命令",
   "composer.voiceInput": "语音输入",
