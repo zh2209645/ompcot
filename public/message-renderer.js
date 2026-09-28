@@ -2,10 +2,23 @@
  * Message Renderer - Renders chat messages with markdown support
  */
 
-import { logDebug } from "./debug-log.js";
+import { debugLog, logDebug } from "./debug-log.js";
 import { t } from "./i18n.js";
 import { renderMarkdown, renderStreamingMarkdown, renderUserMarkdown } from "./markdown.js";
 import { ScrollFollow } from "./scroll-follow.js";
+
+/**
+ * How often the census may compare message text (the one duplicate key that
+ * cannot be counted incrementally). See `reportDuplicateMessages`.
+ */
+export const TEXT_DUPLICATE_SCAN_MS = 2000;
+
+/** Increment/decrement a duplicate counter, dropping it at zero. */
+function bumpCount(map, key, delta) {
+  const next = (map.get(key) || 0) + delta;
+  if (next <= 0) map.delete(key);
+  else map.set(key, next);
+}
 
 export class MessageRenderer {
   constructor(container, { follow = null } = {}) {
@@ -17,6 +30,66 @@ export class MessageRenderer {
     // replaced a long transcript with a short one. The app passes the same
     // instance to the tool-card renderer — both draw into one scroller.
     this.follow = follow ?? new ScrollFollow(container);
+    // Identity index for the assistant elements this renderer created — the
+    // finders below, and the census, key on entry id / runtime timestamp and
+    // used to walk `container.querySelectorAll(".message.assistant")` per
+    // lookup. That is O(n) per rendered entry and per streamed frame: hydrating
+    // a 3775-item transcript measured 5470 scans / 1.06 s, with the per-entry
+    // census adding a full-text pass over every message on top. The maps are
+    // authoritative (every `.message.assistant` element is created here) and
+    // are reset by `clear()`.
+    this.assistantOrder = [];
+    this.assistantsById = new Map();
+    this.assistantsByTs = new Map();
+    // Duplicate bookkeeping for the census: how many *elements* claim each
+    // entry id / timestamp. Maintained incrementally (ids are written once at
+    // render and once when a late id finalizes), so the census never has to
+    // scan or read message text to answer "is anything drawn twice".
+    this.assistantIdCounts = new Map();
+    this.assistantTsCounts = new Map();
+    this.userCount = 0;
+    this.lastTextDuplicateScan = 0;
+    this.followFrame = null;
+  }
+
+  /**
+   * Register (or re-register) an assistant element in the identity index.
+   *
+   * Called for every render; `order` only takes elements this renderer created
+   * (an adopted element is already in it — the hydration moves nodes, and the
+   * index follows the element, not its position).
+   */
+  indexAssistant(element, { created = false } = {}) {
+    if (created) this.assistantOrder.push(element);
+    const id = element.dataset.messageId || "";
+    const ts = element.dataset.messageTs || "";
+    if (element._indexedId !== id) {
+      if (element._indexedId) bumpCount(this.assistantIdCounts, element._indexedId, -1);
+      element._indexedId = id;
+      if (id) bumpCount(this.assistantIdCounts, id, 1);
+    }
+    if (id) this.assistantsById.set(id, element);
+    if (element._indexedTs !== ts) {
+      if (element._indexedTs) bumpCount(this.assistantTsCounts, element._indexedTs, -1);
+      element._indexedTs = ts;
+      if (ts) bumpCount(this.assistantTsCounts, ts, 1);
+    }
+    if (ts) this.assistantsByTs.set(ts, element);
+    return element;
+  }
+
+  /** Assistant elements in render order, ones no longer in the transcript skipped. */
+  liveAssistants() {
+    const out = [];
+    for (const element of this.assistantOrder) {
+      if (this.container?.contains(element)) out.push(element);
+    }
+    return out;
+  }
+
+  /** True when the element is still part of the transcript. */
+  isLiveAssistant(element) {
+    return Boolean(element) && Boolean(this.container?.contains(element));
   }
 
   /** Whether the feed is following the newest content (see ScrollFollow). */
@@ -28,19 +101,35 @@ export class MessageRenderer {
     this.follow.isPinned = value;
   }
 
-  /** Element census recorded with every transcript operation (see debug-log.js). */
+  /**
+   * Element census recorded with every transcript operation (see debug-log.js).
+   *
+   * This runs on every rendered entry and every streamed frame, so it must cost
+   * nothing when capture is off — the arguments used to be built eagerly
+   * (a `querySelectorAll` per call plus a full-text pass over every message in
+   * `reportDuplicateMessages`), which made rendering quadratic in the
+   * transcript size whether or not anybody was debugging.
+   */
   transcriptState(op, extra = {}) {
-    const assistants = Array.from(this.container.querySelectorAll(".message.assistant"));
+    if (!debugLog.isEnabled()) return;
+    const assistants = this.liveAssistants();
+    // The last few identities, not every element's: this line is written on
+    // every rendered entry and every streamed frame, and the full arrays cost
+    // more to build than the information they added (the duplicate detector
+    // below is what actually answers "is something drawn twice").
+    const tail = assistants.slice(-12);
     logDebug("transcript", {
       op,
       assistants: assistants.length,
-      users: this.container.querySelectorAll(".message.user").length,
-      ids: assistants.map((el) => el.dataset.messageId || null),
-      ts: assistants.map((el) => el.dataset.messageTs || null),
-      streaming: assistants.map((el) => el.dataset.finalized !== "true"),
+      users: this.userCount,
+      ids: tail.map((el) => el.dataset.messageId || null),
+      ts: tail.map((el) => el.dataset.messageTs || null),
+      streaming: tail.filter((el) => el.dataset.finalized !== "true").length,
+      // The automatic path throttles the one check that reads message text; an
+      // explicit call (a debug dump, a test) always gets a full answer.
+      duplicates: this.reportDuplicateMessages(assistants, { throttleText: true }),
       ...extra,
     });
-    this.reportDuplicateMessages(assistants);
   }
 
   /**
@@ -54,41 +143,45 @@ export class MessageRenderer {
    *
    * @returns {Array<{id: string|null, count: number, reason: string}>} findings
    */
-  reportDuplicateMessages(assistants = null) {
-    const elements =
-      assistants ?? Array.from(this.container.querySelectorAll(".message.assistant"));
-    const byId = new Map();
-    const byTs = new Map();
-    const byText = new Map();
-    for (const el of elements) {
-      const id = el.dataset.messageId || null;
-      if (id && id !== "streaming") byId.set(id, (byId.get(id) || 0) + 1);
-      // Runtime identity: the one key both copies of a message always share —
-      // the finalize path stamps it, the streaming path stamps it, and it is
-      // what every adoption rule matches on. The other two keys miss the pair a
-      // late frame actually produces: one element carries the real entry id and
-      // the placeholder carries nothing (`same-entry-id` skips "streaming"), and
-      // the finalized copy's rendered text differs from the live copy's raw
-      // markdown within the compared prefix (`same-content` finds nothing).
-      const ts = el.dataset.messageTs || null;
-      if (ts) byTs.set(ts, (byTs.get(ts) || 0) + 1);
-      const text = (el.querySelector(".message-content")?.textContent || "").trim().slice(0, 120);
-      if (text.length < 40) continue;
-      byText.set(text, (byText.get(text) || 0) + 1);
+  reportDuplicateMessages(assistants = null, { throttleText = false } = {}) {
+    if (!debugLog.isEnabled()) return [];
+    // Runtime identity and entry id come from the counters the index maintains:
+    // the timestamp is the one key both copies of a message always share (the
+    // finalize path stamps it, the streaming path stamps it, every adoption
+    // rule matches on it), and the id check skips the live placeholder — so
+    // these two answer the question with no walk at all.
+    const findings = [];
+    for (const [ts, count] of this.assistantTsCounts) {
+      if (count > 1) findings.push({ id: null, ts, count, reason: "same-message-ts" });
     }
-    const findings = [
-      ...Array.from(byTs.entries())
-        .filter(([, count]) => count > 1)
-        .map(([ts, count]) => ({ id: null, ts, count, reason: "same-message-ts" })),
-      ...Array.from(byId.entries())
-        .filter(([, count]) => count > 1)
-        .map(([id, count]) => ({ id, count, reason: "same-entry-id" })),
-      ...Array.from(byText.entries())
-        .filter(([, count]) => count > 1)
-        .map(([text, count]) => ({ id: null, count, reason: "same-content", text })),
-    ];
+    for (const [id, count] of this.assistantIdCounts) {
+      if (id !== "streaming" && count > 1) findings.push({ id, count, reason: "same-entry-id" });
+    }
+    // The content-prefix key catches the pair the other two cannot (a history
+    // copy and a live copy whose ids differ *and* whose runtime identity never
+    // made it onto one of them). It is the only part that reads message text,
+    // so it runs at most once every `TEXT_DUPLICATE_SCAN_MS`: a duplicate stays
+    // on screen and in the counters, so a bundle exported a second later still
+    // proves it.
+    const now = Date.now();
+    if (!throttleText || now - this.lastTextDuplicateScan >= TEXT_DUPLICATE_SCAN_MS) {
+      this.lastTextDuplicateScan = now;
+      const elements = assistants ?? this.liveAssistants();
+      const byText = new Map();
+      for (const el of elements) {
+        const text = (el.querySelector(".message-content")?.textContent || "").trim().slice(0, 120);
+        if (text.length < 40) continue;
+        byText.set(text, (byText.get(text) || 0) + 1);
+      }
+      for (const [text, count] of byText) {
+        if (count > 1) findings.push({ id: null, count, reason: "same-content", text });
+      }
+    }
     if (findings.length > 0) {
-      logDebug("transcript.duplicate", { assistants: elements.length, findings });
+      logDebug("transcript.duplicate", {
+        assistants: (assistants ?? this.liveAssistants()).length,
+        findings,
+      });
     }
     return findings;
   }
@@ -97,15 +190,26 @@ export class MessageRenderer {
     logDebug("transcript", {
       op: "clear",
       removed: this.container.querySelectorAll(".message").length,
-      ids: Array.from(this.container.querySelectorAll(".message.assistant")).map(
-        (el) => el.dataset.messageId || null,
-      ),
+      ids: this.liveAssistants().map((el) => el.dataset.messageId || null),
     });
+    if (this.followFrame !== null) {
+      cancelAnimationFrame(this.followFrame);
+      this.followFrame = null;
+    }
     this.container.innerHTML = "";
+    // The index is the elements that just went away.
+    this.assistantOrder = [];
+    this.assistantsById.clear();
+    this.assistantsByTs.clear();
+    this.assistantIdCounts.clear();
+    this.assistantTsCounts.clear();
+    this.userCount = 0;
     // Session switches reuse the same renderer instance. If the previous session
     // left the viewport away from bottom, keep new renders from inheriting that
-    // stale anchor state (which can suppress auto-scroll until the user scrolls).
-    this.isNearBottom = true;
+    // stale anchor state (which can suppress auto-scroll until the user scrolls)
+    // — this is also where the follow policy learns the transcript was replaced,
+    // instead of asking the layout on every frame (see ScrollFollow.isPinned).
+    this.follow.reset();
   }
 
   clearSearchHighlights() {
@@ -208,6 +312,7 @@ export class MessageRenderer {
     `;
     this._setupCopyBtn(div);
     this.container.appendChild(div);
+    this.userCount += 1;
     if (!isHistory) this.scrollToBottom({ force: forceScroll, immediate: forceScroll });
   }
 
@@ -263,10 +368,8 @@ export class MessageRenderer {
   findAssistantElement(messageId) {
     const wanted = typeof messageId === "string" && messageId ? messageId : null;
     if (!wanted) return null;
-    for (const el of this.container.querySelectorAll(".message.assistant")) {
-      if (el.dataset.messageId === wanted) return el;
-    }
-    return null;
+    const element = this.assistantsById.get(wanted);
+    return this.isLiveAssistant(element) ? element : null;
   }
 
   renderAssistantMessage(message, isStreaming = false, isHistory = false) {
@@ -352,6 +455,7 @@ export class MessageRenderer {
     // An adopted element already sits in the right place: only a fresh one is
     // appended, so a repeated frame can never add a second copy.
     if (!adopted) this.container.appendChild(div);
+    this.indexAssistant(div, { created: !adopted });
     this.transcriptState("assistant", {
       adopted: Boolean(adopted),
       streaming: isStreaming,
@@ -481,7 +585,7 @@ export class MessageRenderer {
    */
   settleAllStreaming() {
     let settled = 0;
-    for (const element of this.container.querySelectorAll(".message.assistant")) {
+    for (const element of this.liveAssistants()) {
       if (element.dataset.finalized === "true") continue;
       const contentDiv = element.querySelector(".message-content");
       const rawText =
@@ -553,10 +657,8 @@ export class MessageRenderer {
     const wanted =
       typeof messageTs === "number" && Number.isFinite(messageTs) ? String(messageTs) : null;
     if (!wanted) return null;
-    for (const element of this.container.querySelectorAll(".message.assistant")) {
-      if (element.dataset.messageTs === wanted) return element;
-    }
-    return null;
+    const element = this.assistantsByTs.get(wanted);
+    return this.isLiveAssistant(element) ? element : null;
   }
 
   /**
@@ -574,7 +676,7 @@ export class MessageRenderer {
     const wanted = typeof messageId === "string" && messageId ? messageId : null;
     const wantedTs =
       typeof messageTs === "number" && Number.isFinite(messageTs) ? String(messageTs) : null;
-    const candidates = Array.from(this.container.querySelectorAll(".message.assistant"));
+    const candidates = this.liveAssistants();
     for (let i = candidates.length - 1; i >= 0; i--) {
       const element = candidates[i];
       if (wanted && element.dataset.messageId !== wanted) continue;
@@ -620,13 +722,8 @@ export class MessageRenderer {
     const wanted =
       typeof messageTs === "number" && Number.isFinite(messageTs) ? String(messageTs) : null;
     if (!wanted) return null;
-    const candidates = Array.from(this.container.querySelectorAll(".message.assistant"));
-    for (let i = candidates.length - 1; i >= 0; i--) {
-      const element = candidates[i];
-      if (element.dataset.finalized === "true" && element.dataset.messageTs === wanted) {
-        return element;
-      }
-    }
+    const element = this.assistantsByTs.get(wanted);
+    if (this.isLiveAssistant(element) && element.dataset.finalized === "true") return element;
     return null;
   }
 
@@ -652,7 +749,7 @@ export class MessageRenderer {
     const wanted =
       typeof messageTs === "number" && Number.isFinite(messageTs) ? String(messageTs) : null;
     if (!wanted) return null;
-    const candidates = Array.from(this.container.querySelectorAll(".message.assistant"));
+    const candidates = this.liveAssistants();
     for (let i = candidates.length - 1; i >= 0; i--) {
       const element = candidates[i];
       if (element.dataset.finalized !== "true") continue;
@@ -680,6 +777,10 @@ export class MessageRenderer {
     // to resolve this message (F2).
     if (typeof id === "string" && id) {
       messageElement.dataset.messageId = id;
+      // The id arrived after the render: the identity index (and the duplicate
+      // counters) have to see it, or the element is invisible to every lookup
+      // keyed on the real entry id.
+      this.indexAssistant(messageElement);
     }
     // Lifecycle flag: this element is done, so `findUnfinishedAssistantElement`
     // stops matching it and a replayed/duplicate frame can never append a
@@ -920,7 +1021,13 @@ export class MessageRenderer {
   scrollToBottom({ force = false, immediate = false } = {}) {
     if (!force && !this.follow.isPinned) return;
     if (immediate) this.jumpToBottom();
-    requestAnimationFrame(() => {
+    // One follow per frame however many frames arrived: every jump clamps
+    // against the content end, and that read forces a layout of the whole
+    // transcript (measured ~28 ms on an 80k-node / 3775-item session), so a
+    // burst of deltas must not queue one jump each.
+    if (this.followFrame !== null) return;
+    this.followFrame = requestAnimationFrame(() => {
+      this.followFrame = null;
       this.jumpToBottom();
     });
   }

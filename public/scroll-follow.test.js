@@ -65,20 +65,24 @@ describe("ScrollFollow", () => {
     expect(follow.isPinned).toBe(false);
     expect(follow.follow()).toBe(false);
     expect(el.scrollTop).toBe(100);
-    // …and once the layout is short again, the stale unpinned state heals.
-    setGeometry(el, { scrollHeight: 400, clientHeight: 400 });
-    el.scrollTop = 0;
+    // …and when the transcript is replaced (a repaint, a clear), the policy
+    // starts following again — the renderers call `reset()` for that, instead
+    // of the getter re-reading the layout on every streamed frame.
+    follow.reset();
     expect(follow.isPinned).toBe(true);
   });
 
-  test("heals a stale unpinned state that no scroll event can correct", () => {
-    // A re-render can replace a long transcript with a short one: the flag is
-    // still false but there is no scroll position left to protect, and the
-    // clamp that follows fires no event.
+  test("heals a stale unpinned state when the transcript is replaced", () => {
+    // A re-render replaces a long transcript with a short one: the flag is
+    // still false but there is no scroll position left to protect, and no
+    // scroll event corrects it. `reset()` is the renderers' "the transcript is
+    // new" signal — deliberately not a geometry read inside `isPinned`, which
+    // is asked on every delta frame and would force a layout each time.
     const el = makeContainer({ scrollHeight: 2000, clientHeight: 400, scrollTop: 100 });
     const follow = new ScrollFollow(el);
     setGeometry(el, { scrollHeight: 400 });
     el.scrollTop = 0;
+    follow.reset();
     expect(follow.follow()).toBe(true);
     expect(el.scrollTop).toBe(400);
   });

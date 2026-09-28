@@ -30,6 +30,9 @@ export class ToolCardRenderer {
     // the newest slice first, so a result can precede the message that made the
     // call). Drained by `createHistoryCard`.
     this.pendingHistoryResults = new Map();
+    // A scheduled follow (see `scrollToBottom`): one per frame, not one per
+    // streamed output chunk — each jump forces a layout of the transcript.
+    this.followFrame = null;
     // Follow policy shared with the message renderer when the app passes one
     // (both render into the same scroller); a private instance keeps the
     // renderer usable on its own. See scroll-follow.js for why the decision is
@@ -467,7 +470,13 @@ export class ToolCardRenderer {
     // lags a fast-growing card, and the lagging geometry is what used to stop
     // the auto-follow for good (see ScrollFollow).
     if (!this.follow.isPinned) return;
-    requestAnimationFrame(() => {
+    // One follow per frame: a running command delivers an output chunk per
+    // event, and every jump clamps against the content end — a read that forces
+    // a layout of the whole transcript (measured ~28 ms on an 80k-node
+    // session), so the chunks must not queue one jump each.
+    if (this.followFrame !== null) return;
+    this.followFrame = requestAnimationFrame(() => {
+      this.followFrame = null;
       this.follow.jump();
     });
   }
@@ -487,10 +496,17 @@ export class ToolCardRenderer {
   }
 
   clear() {
+    if (this.followFrame !== null) {
+      cancelAnimationFrame(this.followFrame);
+      this.followFrame = null;
+    }
     this.toolCards.forEach((card) => {
       card.remove();
     });
     this.toolCards.clear();
     this.pendingHistoryResults?.clear();
+    // The transcript was replaced: the follow policy starts from "nothing to
+    // scroll, follow the end" again (see ScrollFollow.reset / isPinned).
+    this.follow.reset();
   }
 }

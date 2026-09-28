@@ -28,7 +28,9 @@
  *   bottom);
  * - a container with nothing to scroll is always pinned — there is no scroll
  *   position to preserve, so a stale unpinned flag must not suppress the next
- *   follow (that is the self-heal for the second failure above);
+ *   follow (that is the self-heal for the second failure above, and it lives in
+ *   `reset()`, which every renderer calls when it replaces the transcript,
+ *   rather than in a per-frame geometry read — see `isPinned`);
  * - the viewport changing under the content is a follow, not a scroll: the
  *   composer growing (a queued-message chip, the streaming toolbar, a wrapped
  *   draft) shortens the transcript's box, the browser keeps `scrollTop` where
@@ -117,18 +119,34 @@ export class ScrollFollow {
     this.pinned = bottomGap(this.container) < this.threshold;
   }
 
-  /** Whether the feed is following the newest content. */
+  /**
+   * Whether the feed is following the newest content.
+   *
+   * State, never a measurement: the renderers ask this on every streamed
+   * update and every rendered entry, and a geometry read here forces a
+   * synchronous layout of the whole transcript — measured 28 ms on an
+   * 80k-node / 3775-item session, paid per delta frame. Only a real scroll
+   * (`noteScroll`) or a replaced transcript (`reset`) changes it.
+   */
   get isPinned() {
-    // Nothing to scroll: whatever unpinned us earlier is stale, because the
-    // user has no scroll position left to protect.
-    if (this.container && this.container.scrollHeight <= this.container.clientHeight) {
-      this.pinned = true;
-    }
     return this.pinned;
   }
 
   set isPinned(value) {
     this.pinned = Boolean(value);
+  }
+
+  /**
+   * The transcript was replaced: a history repaint, a snapshot, a clear.
+   *
+   * The new content starts at its end with nothing scrolled, so the feed
+   * follows it again. This is where the old getter's self-heal ("nothing to
+   * scroll is pinned") belongs: the renderers tell the policy when they throw
+   * the transcript away, instead of the policy asking the layout on every
+   * frame whether that happened.
+   */
+  reset() {
+    this.pinned = true;
   }
 
   /** Instant jump, bypassing `scroll-behavior: smooth`. */
