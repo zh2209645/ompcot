@@ -1725,34 +1725,29 @@ function handleMessageEnd(message, entryId = null) {
       : "Model request failed";
     messageRenderer.renderError(`[${provider}/${model}] ${errorMessage}`);
   }
-  if (!currentStreamingElement) {
-    // The live element may already have been released for this message (abort,
-    // reconnect, out-of-order frames). Finish THAT element when it is still in
-    // the transcript — creating a new one would append a second copy of the
-    // same assistant turn.
-    currentStreamingElement = messageRenderer.findUnfinishedAssistantElement(entry);
-    if (currentStreamingElement) {
-      currentStreamingThinking = getAssistantThinkingSegments(message);
-    } else if (rendered) {
-      // A re-render (snapshot mid-run) already holds this message: finish it
-      // in place instead of streaming a second copy of it.
-      currentStreamingElement = rendered;
-    } else {
-      // The run end may have finished this very element before this frame's
-      // entry id arrived (`handleAgentEnd` finalizes the live element, then the
-      // extension's deferred `message_end` lands): the element is finalized but
-      // still carries the "streaming" placeholder, so only the runtime identity
-      // can pair them. Without this the identified frame appended a second copy
-      // of the reply — the duplicate the debug bundle recorded.
-      currentStreamingElement = messageRenderer.findSettledAssistantElement(messageTs);
-      if (currentStreamingElement) {
-        currentStreamingThinking = getAssistantThinkingSegments(message);
-      } else {
-        ensureStreamingAssistantElement(message);
-      }
-    }
-  }
-  if (currentStreamingElement) {
+  // Pick the element this message owns. The live one qualifies only when its
+  // identity matches: an identified `message_end` is held for the extension's
+  // entry-id retry, so it can arrive after the *next* message's frames, and
+  // finalizing the live element then wrote this message's content (and entry
+  // id) into the next message's element. Everything below is a lookup by this
+  // message's own identity — entry id first, then its `data-message-ts`.
+  const live = currentStreamingElement;
+  const liveMatches =
+    live &&
+    ((typeof entry === "string" && entry && live.dataset.messageId === entry) ||
+      (messageTs !== null && (live.dataset.messageTs || "") === String(messageTs)));
+  const target =
+    (liveMatches ? live : null) ??
+    messageRenderer.findAssistantElement(entry) ??
+    messageRenderer.findUnfinishedAssistantElement(entry) ??
+    messageRenderer.findUnfinishedAssistantElement(null, messageTs) ??
+    rendered ??
+    messageRenderer.findSettledAssistantElement(messageTs);
+  const element = target ?? ensureStreamingAssistantElement(message);
+  // Segments for the finalize's fallback (used only when the frame carried no
+  // content blocks); the live path re-derives its own from every update.
+  currentStreamingThinking = getAssistantThinkingSegments(message);
+  if (element) {
     // Pass usage info for cost display
     const usage = message?.usage || null;
     // Hand the message's own content blocks to finalize whenever the runtime
@@ -1760,15 +1755,19 @@ function handleMessageEnd(message, entryId = null) {
     // a streamed message byte-identical to the same message rendered from the
     // session file. The real entry id lets fork resolve this message (F2).
     messageRenderer.finalizeStreamingMessage(
-      currentStreamingElement,
+      element,
       usage,
       Array.isArray(message?.content) ? message.content : currentStreamingThinking.join("\n"),
       entry,
     );
-    currentStreamingElement = null;
-    currentStreamingThinking = [];
-    currentStreamingMessage = null;
-    currentStreamingEntryId = null;
+    // Only the live element's state is cleared: a late frame finished an older
+    // element, and the next message is still streaming into the live one.
+    if (element === live) {
+      currentStreamingElement = null;
+      currentStreamingThinking = [];
+      currentStreamingMessage = null;
+      currentStreamingEntryId = null;
+    }
     flushDeferredToolCards();
 
     // Track session cost and tokens

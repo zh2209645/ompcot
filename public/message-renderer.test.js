@@ -375,6 +375,44 @@ describe("rendering is keyed on message identity (no duplicate elements)", () =>
     expect(container.querySelectorAll(".message.assistant")).toHaveLength(2);
   });
 
+  it("a new message never adopts an earlier message's unfinished element", () => {
+    // The runtime holds an identified `message_end` for its entry-id retry, so
+    // the next message's start/updates can arrive while the previous element is
+    // still unfinished. Adopting it there replaced the earlier reply on screen
+    // (the census recorded one element changing its `data-message-ts`).
+    const first = renderer.renderAssistantMessage({ content: "", timestamp: 1000 }, true);
+    renderer.updateStreamingMessage(first, "the first reply");
+
+    const second = renderer.renderAssistantMessage({ content: "", timestamp: 2000 }, true);
+
+    expect(second).not.toBe(first);
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(2);
+    expect(first.dataset.messageTs).toBe("1000");
+    expect(first.querySelector(".message-content").textContent).toContain("the first reply");
+    expect(second.dataset.messageTs).toBe("2000");
+  });
+
+  it("an id-less replay still adopts the element for its own timestamp", () => {
+    const first = renderer.renderAssistantMessage({ content: "", timestamp: 1000 }, true);
+
+    const replay = renderer.renderAssistantMessage({ content: "", timestamp: 1000 }, true);
+
+    expect(replay).toBe(first);
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+  });
+
+  it("a late message_end finds its own unfinished element by identity", () => {
+    // The held end arrives after the next message started: its element is still
+    // unfinished and must be found by timestamp, not by "the newest unfinished".
+    const first = renderer.renderAssistantMessage({ content: "", timestamp: 1000 }, true);
+    renderer.updateStreamingMessage(first, "first");
+    renderer.renderAssistantMessage({ content: "", timestamp: 2000 }, true);
+
+    expect(renderer.findUnfinishedAssistantElement(null, 1000)).toBe(first);
+    expect(renderer.findUnfinishedAssistantElement(null, 2000)).not.toBe(first);
+    expect(renderer.findUnfinishedAssistantElement(null, 9999)).toBeNull();
+  });
+
   it("re-rendering the same finalized message replaces it in place", () => {
     const first = renderer.renderAssistantMessage({ content: "hello", id: "msg_7" }, false, true);
     const again = renderer.renderAssistantMessage({ content: "hello", id: "msg_7" }, false, true);

@@ -284,7 +284,7 @@ export class MessageRenderer {
     //   message, matched by runtime identity (see `findSettledAssistantElement`).
     const adopted = isStreaming
       ? (this.findAssistantElement(message.id) ??
-        this.findUnfinishedAssistantElement(null) ??
+        this.findUnfinishedAssistantElement(null, message.timestamp) ??
         this.findSettledAssistantElement(message.timestamp))
       : this.findAssistantElement(message.id);
     const div = adopted ?? document.createElement("div");
@@ -494,13 +494,28 @@ export class MessageRenderer {
    * settled element created a second copy of the same message. `messageId`
    * narrows the match when the runtime provides the entry id.
    */
-  findUnfinishedAssistantElement(messageId = null) {
+  findUnfinishedAssistantElement(messageId = null, messageTs = null) {
     const wanted = typeof messageId === "string" && messageId ? messageId : null;
+    const wantedTs =
+      typeof messageTs === "number" && Number.isFinite(messageTs) ? String(messageTs) : null;
     const candidates = Array.from(this.container.querySelectorAll(".message.assistant"));
     for (let i = candidates.length - 1; i >= 0; i--) {
       const element = candidates[i];
       if (wanted && element.dataset.messageId !== wanted) continue;
-      if (element.dataset.finalized !== "true") return element;
+      if (element.dataset.finalized === "true") continue;
+      // Asked without an id (the live-streaming adoption), the element must
+      // still belong to *this* message: an entry id is only stamped on frames
+      // that already resolved one, while the runtime holds an identified
+      // `message_end` for its entry-id retry (~60ms) — long enough for the next
+      // message's `message_start` and updates to arrive first. Without this the
+      // new message adopted the previous message's unfinished element, and the
+      // earlier reply disappeared from the transcript (the census recorded the
+      // same element changing its `data-message-ts` four times in one run).
+      if (!wanted) {
+        const elementTs = element.dataset.messageTs || "";
+        if (elementTs && elementTs !== wantedTs) continue;
+      }
+      return element;
     }
     return null;
   }
