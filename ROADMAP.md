@@ -1,6 +1,6 @@
 # Ompcot Roadmap
 
-> **As of 2026-09-26 / v0.8.3.** Ideas and planned features. Nothing unfinished here is committed — just captured so it doesn't get lost. omp feature-gap work is tracked in detail in [`docs/omp-feature-gaps.md`](docs/omp-feature-gaps.md).
+> **As of 2026-09-28 / v0.8.27.** Ideas and planned features. Nothing unfinished here is committed — just captured so it doesn't get lost. omp feature-gap work is tracked in detail in [`docs/omp-feature-gaps.md`](docs/omp-feature-gaps.md).
 
 ---
 
@@ -41,6 +41,27 @@ Closes the A/B items from the [feature-gap audit](docs/omp-feature-gaps.md), plu
 - ✅ **Theme imports** — 9 VS Code schemes + Windows Terminal theme JSON
 - ✅ **Auto-updater** and **LAN QR** access
 - ✅ **README refresh** — feature overview in English and Chinese; screenshots still pending
+
+### Reliability & performance wave (v0.8.4 – v0.8.27)
+
+Reported-bug driven; each item was reproduced, measured, and verified against a live run:
+
+- ✅ **Huge sessions** — snapshots capped to the live tail, tail-first transcript hydration with on-demand history
+  (6000-entry session: newest entries in ~0.4 s, whole-session hydration 11.5 s → 2.8 s), exact scroll anchoring,
+  and compacting/frozen-page handling around them
+- ✅ **Streaming performance** — the streaming markdown repair was quadratic (50 KB 191 ms per delta); it now runs
+  over the tail window only (1.8 ms), the transcript render path is index-based instead of scanning the DOM per
+  entry, and live updates no longer force a layout per frame
+- ✅ **Manual compaction feedback** — the header shows the pass and its elapsed time, the outcome is explicit
+  (compacted / skipped / failed / cancelled), and the committed summary is a transcript item
+- ✅ **Export HTML** — written next to its session, parsed correctly, and opened with the OS on Windows/macOS/Linux
+- ✅ **Transcript noise** — the GUI shows only the session notices written for the reader (`compaction`); the
+  agent-directed ones (LSP diagnostics, todo nudges, background-job results, process supervision) stay in the
+  session file and in exported debug bundles
+- ✅ **Composer delivery** — Interrupt is selectable again, and a queued message sent with its send-now button is
+  no longer swallowed by the duplicate-echo guard
+- ✅ **Release pipeline** — the release is created before the build matrix (`prepare-release`), so
+  `tauri-action` can no longer re-create it mid-run and discard a job's uploaded assets
 
 ---
 

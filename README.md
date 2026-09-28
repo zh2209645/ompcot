@@ -50,12 +50,18 @@ Ompcot gives you a full visual interface for OMP. Open any project folder, start
 - **Tool-call cards** with inline diff viewer (red/green) and live **thinking blocks**
 - **Model dropdown** plus a per-model **thinking-depth menu** — depth options follow each model's capabilities and lock when unsupported
 - **Slash-command autocomplete** (`/` in the composer) reaching omp's full command set
-- **Message queuing** while the agent works — choose per message between **Queue** and **Steer-now** delivery
-- Image attachments (paste, drag & drop, or button), one-click copy, abort, unread indicator
+- **Message queuing** while the agent works — deliver each message as **Queue**, **Steer now**, or **Interrupt** (stop the
+  running turn and start fresh), and send any queued item right away from its own button
+- **Context compaction** — manual (the header button or `/compact`) with live progress, an explicit outcome, and a
+  permanent record of the summary in the transcript
+- Attach files or images as `@path` mentions (the runtime reads them itself): composer autocomplete, a native
+  multi-select picker, or drag from the file pane — plus one-click copy, abort, and an unread indicator
 
 ### 🗂️ Sessions & Agents
 
 - Session history with **full-text search**, favourites, archive, rename, batch delete, and **HTML export**
+- **Long sessions open instantly** — the newest messages render first and the viewport starts at the bottom; earlier
+  history hydrates as you scroll up, so a 6000-entry session never waits on a full rebuild
 - **Fork a conversation** from any message (wired up; activates automatically when your omp build supports it)
 - **Import** sessions from Claude Code / Codex — guided entry points
 - **Parallel sessions** — each new chat spawns its own headless agent process; previously-running sessions keep running, no new window
