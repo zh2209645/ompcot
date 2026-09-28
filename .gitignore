@@ -13,7 +13,8 @@ extensions/dist/
 src-tauri/resources/pi/
 .cache/pi-binaries/
 
-# Debug bundles + rendered-page dumps exported from Settings → Debug
+# Debug bundles + rendered-page dumps exported from Settings → Configuration → Debug
+# (they carry transcript ids and console output; never commit one)
 ompcot-debug-*.json
 ompcot-render-*.html
 
@@ -21,9 +22,9 @@ ompcot-render-*.html
 pi-session-*.html
 omp-session-*.html
 
-# Debug bundles exported from Settings → Configuration → Debug (they carry
-# transcript ids and console output; never commit one)
-ompcot-debug-*.json
-src-tauri/resources/omp/omp
-src-tauri/resources/omp/.version
+# Screenshots dropped into the workspace while testing (the OS's own names)
+屏幕截图*.png
+Screenshot*.png
+
+# Legacy bundled-omp layout (omp now comes from PATH)
 src-tauri/resources/omp/
