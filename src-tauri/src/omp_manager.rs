@@ -441,7 +441,7 @@ fn log_child_path_diagnostics(context: &str, path: &str) {
 /// `--extension` from — a `\\?\`-prefixed path. Passing the plain
 /// `C:\Users\...` form avoids the crash. This is a no-op on non-Windows
 /// platforms and for paths without the prefix.
-fn strip_verbatim_prefix(path: &str) -> String {
+pub(crate) fn strip_verbatim_prefix(path: &str) -> String {
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
         // `\\?\UNC\server\share` -> `\\server\share`
         format!(r"\\{}", rest)

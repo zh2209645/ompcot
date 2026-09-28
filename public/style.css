@@ -4704,6 +4704,33 @@ body.hide-thinking .thinking-block {
   padding: 1px 7px;
 }
 
+/* ── @-mention popup — the slash menu's chrome, path-styled rows ── */
+.mention-menu-header {
+  text-transform: none;
+  font-family: var(--font-mono);
+}
+
+.mention-menu-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-menu-item.directory .mention-menu-name {
+  color: var(--accent-text);
+}
+
+.mention-menu-empty {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.mention-menu-hint {
+  padding: 4px 10px 6px;
+  font-size: calc(10px * var(--font-scale));
+  color: var(--text-dim);
+}
+
 /* ── Delivery mode toggle — Queue vs Steer now, shown only while the agent
    streams with non-slash text in the composer ── */
 .delivery-toggle {

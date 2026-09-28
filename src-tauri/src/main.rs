@@ -209,6 +209,30 @@ async fn pick_folder_core(app: &AppHandle) -> Option<String> {
     rx.await.ok().flatten()
 }
 
+/// Native multi-file picker for composer `@`-mentions.
+///
+/// Returns the picked absolute paths with Windows `\\?\` verbatim prefixes
+/// stripped (the mention text goes straight into the prompt, where the runtime
+/// resolves it against the session cwd). An empty vector means the user
+/// cancelled — the frontend inserts nothing.
+async fn pick_files_core(app: &AppHandle) -> Vec<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_files(move |paths| {
+        let result = paths.map(|list| {
+            list.into_iter()
+                .map(|p| match p {
+                    tauri_plugin_fs::FilePath::Path(pb) => {
+                        omp_manager::strip_verbatim_prefix(&pb.to_string_lossy())
+                    }
+                    tauri_plugin_fs::FilePath::Url(url) => url.to_string(),
+                })
+                .collect::<Vec<String>>()
+        });
+        let _ = tx.send(result);
+    });
+    rx.await.ok().flatten().unwrap_or_default()
+}
+
 /// Native single-FILE picker for the omp binary override.
 ///
 /// Returns:
@@ -952,6 +976,11 @@ fn install_control_handler(broker: &Arc<BrokerWs>, manager: Arc<OmpManager>, app
                         Some(path) => Value::from(path),
                         None => Value::Null,
                     }),
+                    "pick_files" => {
+                        // Composer @-mentions: multi-select, paths straight into
+                        // the prompt. An empty array means cancelled.
+                        Ok(Value::from(pick_files_core(&app).await))
+                    }
                     "pick_omp_binary" => {
                         // Same core as the bootstrap-window IPC command:
                         // native file picker → validate `--version` → persist

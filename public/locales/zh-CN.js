@@ -82,6 +82,7 @@ export const zhCN = {
   "composer.waitingFinish": "正在等待当前会话结束…",
   "composer.readonlyHistory": "正在查看历史会话（只读）",
   "composer.attachImage": "附加图片",
+  "composer.attachFile": "附加文件（以提及方式插入提示）",
   "composer.commandsTitle": "命令",
   "composer.openCommandsAria": "打开命令",
   "composer.voiceInput": "语音输入",
@@ -248,6 +249,10 @@ export const zhCN = {
   "slash.deliveryLabel": "发送方式",
   "slash.toggleTitle": "智能体忙碌时选择消息的发送方式。Ctrl+Enter 始终立即插话。",
   "slash.queuedHint": "命令将在智能体空闲时执行",
+
+  // ── composer @-mentions (files/directories) ──
+  "mention.noMatches": "没有匹配的文件",
+  "mention.hint": "↑↓ 选择 · Enter 插入 · Esc 关闭",
 
   // ── agent hub (subagent roster panel) ──
   "agents.title": "子智能体",

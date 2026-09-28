@@ -87,6 +87,7 @@ export const en = {
   "composer.waitingFinish": "Waiting for current session to finish…",
   "composer.readonlyHistory": "Viewing historical session (read-only)",
   "composer.attachImage": "Attach image",
+  "composer.attachFile": "Attach file (mention in the prompt)",
   "composer.commandsTitle": "Commands",
   "composer.openCommandsAria": "Open commands",
   "composer.voiceInput": "Voice input",
@@ -255,6 +256,10 @@ export const en = {
   "slash.deliveryLabel": "Delivery",
   "slash.toggleTitle": "How to deliver while the agent is busy. Ctrl+Enter always steers.",
   "slash.queuedHint": "Command will run when the agent is idle",
+
+  // ── composer @-mentions (files/directories) ──
+  "mention.noMatches": "No matching files",
+  "mention.hint": "↑↓ select · Enter insert · Esc close",
 
   // ── agent hub (subagent roster panel) ──
   "agents.title": "Agents",

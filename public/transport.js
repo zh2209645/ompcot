@@ -138,6 +138,15 @@ export class WsTransport {
     return this._control("pick_folder", {}, { timeoutMs: NO_TIMEOUT });
   }
 
+  /**
+   * Native multi-file picker for composer `@`-mentions. Resolves with the
+   * picked absolute paths (an empty array when the dialog was cancelled); the
+   * frontend inserts them as mention text, so no content crosses the wire.
+   */
+  pickFiles() {
+    return this._control("pick_files", {}, { timeoutMs: NO_TIMEOUT });
+  }
+
   // OS file dialog + backend validation waits for the user: no timeout.
   pickOmpBinary() {
     return this._control("pick_omp_binary", {}, { timeoutMs: NO_TIMEOUT });

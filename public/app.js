@@ -18,6 +18,7 @@ import {
   isSlashStreamRejection,
 } from "./composer-commands.js";
 import { setComposerText, syncComposerHeight } from "./composer-input.js";
+import { createComposerMentions } from "./composer-mentions.js";
 import {
   debugLog,
   installConsoleCapture,
@@ -494,7 +495,9 @@ function persistFileSidebarState(value) {
   } catch {}
 }
 
-const fileBrowser = new FileBrowser(fileList, fileSidebarPath, messageInput);
+const fileBrowser = new FileBrowser(fileList, fileSidebarPath, messageInput, () =>
+  getCurrentWorkspacePath(),
+);
 fileSidebarToggle.addEventListener("click", () => {
   const isCollapsed = fileSidebar.classList.toggle("collapsed");
   if (!isCollapsed && !fileBrowser.currentPath) {
@@ -1814,6 +1817,11 @@ messageInput.addEventListener("keydown", (e) => {
   const isImeComposing = e.isComposing || e.keyCode === 229;
   if (isImeComposing) return;
 
+  // The mention popup owns ↑/↓/Enter/Tab/Esc while it is open (an `@`-token at
+  // the caret); the slash popup can never be open at the same time (it needs a
+  // leading `/` token).
+  if (composerMentions.handleKeydown(e)) return;
+
   // Slash popup consumes navigation keys first (arrows cycle, Tab/Enter
   // complete, Esc closes; exact-match Enter submits through the normal path).
   if (composerCommands.handleKeydown(e)) return;
@@ -1863,6 +1871,13 @@ const composerCommands = createComposerCommands({
     renderQueuedMessages();
   },
   toggleEl: document.getElementById("delivery-toggle"),
+});
+
+// Composer `@`-mentions: the popup lists the typed directory through
+// `/api/files` and inserts the real path — omp auto-reads `@path` mentions
+// itself (`utils/file-mentions.ts`), so the GUI never inlines file content.
+const composerMentions = createComposerMentions({
+  input: messageInput,
 });
 
 // Auto-resize textarea
@@ -1941,6 +1956,26 @@ async function addImageFiles(files) {
 }
 
 attachBtn.addEventListener("click", () => imageInput.click());
+
+// Attach files (native host only): the OS picker returns real paths, which go
+// into the composer as `@`-mentions for omp to auto-read. Browser/mobile
+// clients have no file paths to offer — they use the `@` popup or drag rows
+// out of the file browser instead.
+const attachFileBtn = document.getElementById("attach-file-btn");
+attachFileBtn.addEventListener("click", async () => {
+  try {
+    const picked = await transport.pickFiles();
+    await composerMentions.insertPaths(picked);
+  } catch (err) {
+    console.error("[Ompcot] File picker failed:", err);
+  }
+});
+
+/** Reveal native-only toolbar affordances once the broker handshake lands. */
+function refreshAttachFileButton() {
+  attachFileBtn.classList.toggle("hidden", !nativeAvailable());
+}
+refreshAttachFileButton();
 
 imageInput.addEventListener("change", () => {
   addImageFiles(imageInput.files);
@@ -2056,6 +2091,9 @@ function sendMessage() {
   const plan = composerCommands.beginSend();
   if (!plan) return;
   const { message, delivery } = plan;
+  // beginSend cleared the composer without an input event; drop the mention
+  // popup with it instead of leaving a stale listing over the empty box.
+  composerMentions.refresh();
 
   const cmd = {
     type: "prompt",
@@ -4154,6 +4192,9 @@ function updateUI() {
 
   // Show/hide the Queue / Steer-now delivery toggle with the streaming state.
   composerCommands.refresh();
+  // The mention popup is derived from the composer text + caret: a programmatic
+  // write (send clears it, a restored draft fills it) must re-derive it too.
+  composerMentions.refresh();
 
   // Viewing a history session while original is still streaming —
   // block input until agent_end triggers the deferred switch_session.
@@ -4795,6 +4836,7 @@ const ompBinarySettings = createOmpBinarySettings({
 // frame lands right after connect). Re-evaluate native-gated UI once it's known
 // so buttons that were hidden on first paint appear when attached to the host.
 wsClient.addEventListener("capabilities", () => {
+  refreshAttachFileButton();
   refreshHeaderOpenAppButton();
   void loadHeaderOpenApps();
   void updater.initUpdaterUI();

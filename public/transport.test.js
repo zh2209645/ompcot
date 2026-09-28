@@ -49,9 +49,11 @@ describe("WsTransport", () => {
     const transport = createTransport({ wsClient: ws, env: { location: { port: "47821" } } });
 
     await transport.pickFolder();
+    await transport.pickFiles();
     await transport.openExternal("https://example.com");
 
     expect(ws.sendControl).toHaveBeenCalledWith("pick_folder", {}, { timeoutMs: 0 });
+    expect(ws.sendControl).toHaveBeenCalledWith("pick_files", {}, { timeoutMs: 0 });
     expect(ws.sendControl).toHaveBeenCalledWith(
       "open_external",
       { url: "https://example.com" },

@@ -2,6 +2,7 @@
  * File Browser — right sidebar file tree with drag-and-drop
  */
 
+import { mentionTextForPath, relativeMentionPath } from "./composer-mentions.js";
 import { onLanguageChanged, t } from "./i18n.js";
 
 const FILE_ICONS = {
@@ -60,10 +61,11 @@ function formatSize(bytes) {
 }
 
 export class FileBrowser {
-  constructor(container, pathEl, messageInput) {
+  constructor(container, pathEl, messageInput, getWorkspaceRoot = () => "") {
     this.container = container;
     this.pathEl = pathEl;
     this.messageInput = messageInput;
+    this.getWorkspaceRoot = getWorkspaceRoot;
     this.currentPath = null;
     // Which placeholder label ("loading" | "error" | "empty") is on screen,
     // or null when a real listing (or a server-provided error) is shown.
@@ -211,20 +213,31 @@ export class FileBrowser {
       input.classList.remove("file-drop-hover");
 
       const filePath = e.dataTransfer.getData("text/plain");
-      if (filePath?.startsWith("/")) {
-        // Insert file path at cursor
-        const start = input.selectionStart;
-        const end = input.selectionEnd;
-        const before = input.value.substring(0, start);
-        const after = input.value.substring(end);
-        const insert = filePath;
-        input.value = before + insert + after;
-        input.selectionStart = input.selectionEnd = start + insert.length;
-        input.focus();
+      // Only a path this browser dragged out of the file pane can be resolved
+      // into a mention (DOM drops never carry OS paths) — anything else is left
+      // to the browser's own text handling.
+      if (!filePath?.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(filePath || "")) return;
+      // Insert the mention form the runtime auto-reads (`@path`); a bare path
+      // left it to the agent to notice the file itself. Quoting, the
+      // workspace-relative form and the trailing space all come from the
+      // mention module, so every entry point (drop, popup, native picker)
+      // writes identical text.
+      const mention = mentionTextForPath(
+        relativeMentionPath(filePath, this.getWorkspaceRoot?.() || ""),
+        { isDirectory: false },
+      );
+      const start = input.selectionStart;
+      const end = input.selectionEnd;
+      const before = input.value.substring(0, start);
+      const after = input.value.substring(end);
+      const spacer = before.length > 0 && !/\s$/.test(before) ? " " : "";
+      input.value = `${before}${spacer}${mention}${after}`;
+      input.selectionStart = input.selectionEnd = start + spacer.length + mention.length;
+      input.focus();
 
-        // Trigger input event for auto-resize
-        input.dispatchEvent(new Event("input"));
-      }
+      // Trigger input event for auto-resize (and the mention popup's own
+      // re-derivation).
+      input.dispatchEvent(new Event("input"));
     });
   }
 }
