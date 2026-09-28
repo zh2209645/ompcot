@@ -1001,8 +1001,6 @@ body {
    ═══════════════════════════════════════════════════════ */
 
 .main {
-  --messages-top-inset: 52px;
-  --messages-bottom-inset: 128px;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -1023,11 +1021,10 @@ body {
   border-bottom: 1px solid var(--border);
   min-height: 36px;
   -webkit-app-region: drag;
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 10;
+  /* In flow: the transcript scrolls in its own box between this bar and the
+     composer, so nothing has to be measured, compensated, or repainted to keep
+     content out from under either of them. */
+  flex: 0 0 auto;
 }
 
 .header::before {
@@ -3538,19 +3535,25 @@ body {
    Messages Area
    ═══════════════════════════════════════════════════════ */
 
+/* The transcript's own box: the scroll area *is* the space between the header
+   and the composer, so a message can never be drawn under either. The floating
+   affordances that must overlay the transcript (the scroll-to-bottom button,
+   the message hover actions) anchor to this wrapper, not to a measured inset. */
+.messages-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 #messages {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-top: var(--messages-top-inset);
-  /* The composer is an opaque overlay pinned to the bottom of this column, so
-     the scroller ends where the composer begins (margin, not padding — the
-     composer's own background covered the transcript either way). With the
-     padding form the scroll bar ran on behind the input box: its last stretch
-     looked cut off and could not be dragged (clicks there landed on the
-     composer). The inset already carries the layout's 12px gap, so the last
-     message sits exactly as high as it did. */
-  margin-bottom: var(--messages-bottom-inset);
+  padding-top: 12px;
+  padding-bottom: 12px;
   padding-left: max(24px, calc((100% - 960px) / 2));
   padding-right: max(24px, calc((100% - 960px) / 2));
   display: flex;
@@ -4423,11 +4426,9 @@ body.hide-thinking .thinking-block {
   padding-right: max(16px, calc((100% - 960px) / 2));
   background: var(--bg-solid);
   border-top: none;
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 10;
+  /* In flow (see .messages-wrap): the composer takes its own height out of the
+     column, so it cannot cover the transcript and needs no inset maths. */
+  flex: 0 0 auto;
 }
 
 #chat-form {
@@ -5180,7 +5181,7 @@ body.hide-thinking .thinking-block {
 
 .scroll-bottom-btn {
   position: absolute;
-  bottom: calc(var(--messages-bottom-inset) + 12px);
+  bottom: 12px;
   right: max(24px, calc((100% - 960px) / 2 + 8px));
   width: 36px;
   height: 36px;

@@ -109,3 +109,62 @@ describe("ScrollFollow", () => {
     expect(follow.isPinned).toBe(true);
   });
 });
+
+describe("the transcript's box changing under the content", () => {
+  /** A ResizeObserver double exposing the callback it was constructed with. */
+  function makeResizeObserverDouble() {
+    const callbacks = [];
+    class Fake {
+      constructor(callback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      disconnect() {}
+    }
+    return {
+      Fake,
+      fire: () => {
+        for (const cb of callbacks.splice(0)) cb([]);
+      },
+    };
+  }
+
+  test("re-pins a following reader when the composer takes height away", () => {
+    // The composer grew (a queued-message chip, the streaming toolbar): the
+    // transcript's box lost 150px, the browser kept `scrollTop`, and the
+    // content end is now below the fold.
+    const container = makeContainer({ scrollHeight: 2000, clientHeight: 400, scrollTop: 1600 });
+    const { Fake, fire } = makeResizeObserverDouble();
+    const follow = new ScrollFollow(container, { ResizeObserver: Fake });
+    expect(follow.isPinned).toBe(true);
+
+    setGeometry(container, { clientHeight: 250 });
+    fire();
+
+    expect(container.scrollTop).toBe(2000);
+  });
+
+  test("leaves a reader who scrolled away exactly where they were", () => {
+    const container = makeContainer({ scrollHeight: 2000, clientHeight: 400, scrollTop: 100 });
+    const { Fake, fire } = makeResizeObserverDouble();
+    const follow = new ScrollFollow(container, { ResizeObserver: Fake });
+    expect(follow.isPinned).toBe(false);
+
+    setGeometry(container, { clientHeight: 250 });
+    fire();
+
+    expect(container.scrollTop).toBe(100);
+  });
+
+  test("does not observe when the policy is created without listeners", () => {
+    const container = makeContainer({ scrollHeight: 2000, clientHeight: 400, scrollTop: 100 });
+    const { Fake, fire } = makeResizeObserverDouble();
+    const follow = new ScrollFollow(container, { listen: false, ResizeObserver: Fake });
+
+    setGeometry(container, { clientHeight: 250 });
+    fire();
+
+    expect(container.scrollTop).toBe(100);
+    expect(follow.resizeObserver).toBeUndefined();
+  });
+});

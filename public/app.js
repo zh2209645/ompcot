@@ -37,7 +37,6 @@ import {
   setLanguage,
   t,
 } from "./i18n.js";
-import { setupMessagesInsets } from "./layout-insets.js";
 import { createMcpManager } from "./mcp-manager.js";
 import { MessageRenderer } from "./message-renderer.js";
 import { createModelsReasoning } from "./models-reasoning.js";
@@ -285,21 +284,12 @@ const tokenUsageEl = document.getElementById("token-usage");
 const scrollBottomBtn = document.getElementById("scroll-bottom-btn");
 const scrollBottomBadge = document.getElementById("scroll-bottom-badge");
 const messagesContainer = document.getElementById("messages");
-const mainContainer = document.querySelector(".main");
 const headerEl = document.querySelector(".header");
-const inputAreaEl = document.querySelector(".input-area");
 
 headerEl?.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return;
   if (e.target.closest("button, a, input, select, textarea, [role=button]")) return;
   window.__TAURI__?.window?.getCurrentWindow().startDragging();
-});
-
-setupMessagesInsets({
-  main: mainContainer,
-  messages: messagesContainer,
-  header: headerEl,
-  inputArea: inputAreaEl,
 });
 
 // State tracking

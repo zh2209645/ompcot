@@ -1,10 +1,11 @@
 /**
  * Follow policy for the transcript viewport.
  *
- * The transcript scrolls in `#messages` while the composer sits on top of its
- * bottom edge (`position: absolute`), so "are we following the newest content"
- * decides both whether a new block may scroll the feed and whether the newest
- * content ends up hidden behind the input box.
+ * The transcript scrolls in `#messages`, which is a flow sibling of the header
+ * and the composer (nothing overlaps it), so "are we following the newest
+ * content" decides whether a new block may scroll the feed — and whether the
+ * newest content stays out of the fold when the composer's own box grows and
+ * takes height away from the transcript below it.
  *
  * Two things made the old per-call check wrong:
  *
@@ -27,7 +28,13 @@
  *   bottom);
  * - a container with nothing to scroll is always pinned — there is no scroll
  *   position to preserve, so a stale unpinned flag must not suppress the next
- *   follow (that is the self-heal for the second failure above).
+ *   follow (that is the self-heal for the second failure above);
+ * - the viewport changing under the content is a follow, not a scroll: the
+ *   composer growing (a queued-message chip, the streaming toolbar, a wrapped
+ *   draft) shortens the transcript's box, the browser keeps `scrollTop` where
+ *   it was, and a following reader is left 50–150px short of the content end
+ *   with the newest message below the fold. A `ResizeObserver` on the container
+ *   re-pins them; a reader parked mid-history keeps their position untouched.
  */
 /**
  * Move a scroller to its content end in this frame.
@@ -35,7 +42,8 @@
  * `#messages` sets `scroll-behavior: smooth`, so a plain `scrollTop` write
  * animates — and while it animates the geometry still reports "far from the
  * bottom", which is exactly what the follow policy must not read as a user
- * scroll. Instant is also what a *re-pin* needs (see `layout-insets.js`).
+ * scroll, and what keeps a programmatic follow from being misread as the user
+ * scrolling away mid-animation.
  */
 export function jumpToBottom(element) {
   if (!element) return;
@@ -61,7 +69,14 @@ export class ScrollFollow {
    * @param {number} [options.threshold] - px of slack that still counts as "at the bottom"
    * @param {boolean} [options.listen] - subscribe to the container's `scroll` events
    */
-  constructor(container, { threshold = NEAR_BOTTOM_THRESHOLD, listen = true } = {}) {
+  constructor(
+    container,
+    {
+      threshold = NEAR_BOTTOM_THRESHOLD,
+      listen = true,
+      ResizeObserver = globalThis.ResizeObserver,
+    } = {},
+  ) {
     this.container = container || null;
     this.threshold = threshold;
     // Start from what the container actually shows: a renderer constructed
@@ -70,6 +85,18 @@ export class ScrollFollow {
     this.pinned = bottomGap(this.container) < threshold;
     if (listen && this.container?.addEventListener) {
       this.container.addEventListener("scroll", () => this.noteScroll());
+    }
+    // The transcript's box changes without any scroll when the composer above
+    // it grows or shrinks (it is a flow sibling, so its height comes out of the
+    // transcript's). The browser leaves `scrollTop` alone, which strands a
+    // following reader short of the content end — re-pin them here. `isPinned`
+    // is state (only a real scroll clears it), so a reader who scrolled away is
+    // never moved by this.
+    if (listen && this.container && typeof ResizeObserver === "function") {
+      this.resizeObserver = new ResizeObserver(() => {
+        if (this.isPinned) this.jump();
+      });
+      this.resizeObserver.observe(this.container);
     }
   }
 

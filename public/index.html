@@ -193,7 +193,8 @@
       </div>
 
       <!-- Messages Container -->
-      <div class="messages" id="messages">
+      <div class="messages-wrap">
+        <div class="messages" id="messages">
         <div class="welcome">
           <div class="welcome-icon"><img src="icons/logo-dark.svg" alt="Ompcot logo" class="tau-icon-welcome"></div>
           <p data-i18n="welcome.title">Welcome to Ompcot</p>
@@ -205,11 +206,12 @@
         </div>
       </div>
 
-      <!-- Scroll to bottom + new message indicator -->
-      <button class="scroll-bottom-btn hidden" id="scroll-bottom-btn">
+        <!-- Scroll to bottom + new message indicator (floats over the transcript) -->
+        <button class="scroll-bottom-btn hidden" id="scroll-bottom-btn">
         <span class="scroll-bottom-badge hidden" id="scroll-bottom-badge"><span data-i18n="session.newBadge">New</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg></span>
-        <span class="scroll-bottom-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg></span>
-      </button>
+          <span class="scroll-bottom-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg></span>
+        </button>
+      </div>
 
       <!-- Typing indicator (hidden, kept for JS reference) -->
       <div class="typing-indicator hidden" id="typing-indicator"></div>
