@@ -88,10 +88,12 @@ export function setupContextViz({
     const totalUsed = freshInput + cacheRead;
     const free = Math.max(0, total - totalUsed);
 
+    // Colour classes are namespaced (`context-seg-*`) so they can never collide
+    // with another app class the way a bare `messages` did with the transcript.
     const segments = [
-      { key: "cache", label: t("ctx.cached"), tokens: cacheRead, color: "cache" },
-      { key: "messages", label: t("ctx.input"), tokens: freshInput, color: "messages" },
-      { key: "free", label: t("ctx.available"), tokens: free, color: "free" },
+      { key: "cache", label: t("ctx.cached"), tokens: cacheRead, color: "context-seg-cache" },
+      { key: "messages", label: t("ctx.input"), tokens: freshInput, color: "context-seg-messages" },
+      { key: "free", label: t("ctx.available"), tokens: free, color: "context-seg-free" },
     ];
 
     contextBar.innerHTML = "";

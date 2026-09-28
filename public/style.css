@@ -1348,20 +1348,25 @@ body {
   border-radius: 0 7px 7px 0;
 }
 
-.context-bar-segment.system {
+/* Segment colours live on their own namespaced classes, shared by the bar
+   segment and its legend dot. The bare names they used to carry (`messages`,
+   `cache`, `free`, …) collided with other app classes — `messages` is the
+   transcript container, whose `flex: 1` and inset padding ballooned the
+   matching dot into a padded block and skewed the bar segment's width. */
+.context-seg-system {
   background: var(--thinking-accent);
 }
-.context-bar-segment.messages {
+.context-seg-messages {
   background: var(--accent);
 }
-.context-bar-segment.tools {
+.context-seg-tools {
   background: var(--tool-accent);
 }
-.context-bar-segment.cache {
+.context-seg-cache {
   background: var(--success);
   opacity: 0.7;
 }
-.context-bar-segment.free {
+.context-seg-free {
   background: transparent;
 }
 
@@ -1392,20 +1397,9 @@ body {
   flex-shrink: 0;
 }
 
-.context-legend-dot.system {
-  background: var(--thinking-accent);
-}
-.context-legend-dot.messages {
-  background: var(--accent);
-}
-.context-legend-dot.tools {
-  background: var(--tool-accent);
-}
-.context-legend-dot.cache {
-  background: var(--success);
-  opacity: 0.7;
-}
-.context-legend-dot.free {
+/* The "free" slice reads as an empty track rather than a filled bar, so its
+   legend dot keeps a visible outline. */
+.context-legend-dot.context-seg-free {
   background: var(--bg-glass-strong);
   border: 1px solid var(--border);
 }
@@ -3566,7 +3560,7 @@ body {
    Messages Area
    ═══════════════════════════════════════════════════════ */
 
-.messages {
+#messages {
   flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -3587,17 +3581,17 @@ body {
   scroll-behavior: smooth;
 }
 
-.messages::-webkit-scrollbar {
+#messages::-webkit-scrollbar {
   width: 6px;
 }
-.messages::-webkit-scrollbar-track {
+#messages::-webkit-scrollbar-track {
   background: transparent;
 }
-.messages::-webkit-scrollbar-thumb {
+#messages::-webkit-scrollbar-thumb {
   background: var(--border-hover);
   border-radius: 3px;
 }
-.messages::-webkit-scrollbar-thumb:hover {
+#messages::-webkit-scrollbar-thumb:hover {
   background: var(--border-bright);
 }
 

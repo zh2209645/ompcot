@@ -86,6 +86,25 @@ describe("context popover", () => {
     expect(document.getElementById("context-viz-used").textContent).toMatch(/5%/);
   });
 
+  it("colours segments with namespaced classes only (no transcript class collision)", () => {
+    // A legend dot used to carry `class="context-legend-dot messages"`; the
+    // transcript's `.messages` rule (`flex: 1` plus the message insets) then
+    // matched it and inflated the dot into a padded block.
+    ctx.press(ctx.pill);
+
+    const nodes = Array.from(
+      document.querySelectorAll(".context-bar-segment, .context-legend-dot"),
+    );
+    expect(nodes.length).toBeGreaterThan(0);
+    for (const node of nodes) {
+      for (const clash of ["messages", "cache", "free", "system", "tools"]) {
+        expect(node.classList.contains(clash)).toBe(false);
+      }
+    }
+    expect(document.querySelector(".context-legend-dot.context-seg-messages")).not.toBeNull();
+    expect(document.querySelector(".context-bar-segment.context-seg-cache")).not.toBeNull();
+  });
+
   it("stays open while pressing inside it, and closes on a press elsewhere", () => {
     ctx.press(ctx.pill);
     ctx.press(document.querySelector("#context-bar"));
