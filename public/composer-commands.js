@@ -491,8 +491,21 @@ export function createComposerCommands(deps) {
     return { message, delivery };
   }
 
+  /**
+   * Select a delivery mode from the toggle.
+   *
+   * The accepted set is the toggle's own options — `queue`, `steer`,
+   * `interrupt`. Anything unrecognized falls back to `queue`, which is what
+   * made the Interrupt button dead: the rule was written when the toggle had
+   * two options (`mode === "steer" ? "steer" : "queue"`), so selecting
+   * `interrupt` silently stored `queue` and the UI flipped straight back —
+   * while `resolveDelivery` had handled `interrupt` all along.
+   */
   function setDeliveryMode(mode) {
-    deliveryMode = mode === "steer" ? "steer" : "queue";
+    const known = toggleEl
+      ? Array.from(toggleEl.querySelectorAll(".delivery-option")).map((btn) => btn.dataset.mode)
+      : ["queue", "steer", "interrupt"];
+    deliveryMode = known.includes(mode) ? mode : "queue";
     renderToggle();
   }
 

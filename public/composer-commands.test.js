@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import { describe, expect, test, vi } from "vitest";
 import {
@@ -49,6 +50,7 @@ function boot({ streaming = false } = {}) {
           <div class="delivery-toggle hidden" id="delivery-toggle">
             <button type="button" class="delivery-option" data-mode="queue">Queue</button>
             <button type="button" class="delivery-option" data-mode="steer">Steer now</button>
+            <button type="button" class="delivery-option" data-mode="interrupt">Interrupt</button>
           </div>
         </div>
       </div>
@@ -434,6 +436,52 @@ describe("delivery mode (queue vs steer)", () => {
     // Consumed: a repeated rejection cannot restore it twice.
     expect(ctx.api.takePendingSteer(requestId)).toBeNull();
     expect(ctx.api.takePendingSteer(null)).toBeNull();
+  });
+
+  test("every delivery mode the real composer offers is selectable", () => {
+    // The contract that the reported bug slipped through: the markup offered
+    // three modes while the setter only accepted two. Read the shipped markup,
+    // not the fixture, so a new option cannot arrive without the setter knowing.
+    // jsdom's `URL` is not Node's, so a file URL would be the wrong realm here.
+    const dom = new JSDOM(readFileSync("public/index.html", "utf8"));
+    const options = Array.from(
+      dom.window.document.querySelectorAll("#delivery-toggle .delivery-option"),
+    ).map((btn) => btn.dataset.mode);
+    expect(options).toEqual(["queue", "steer", "interrupt"]);
+
+    const ctx = boot({ streaming: true });
+    ctx.type("hi");
+    for (const mode of options) {
+      ctx.api.setDeliveryMode(mode);
+      expect(ctx.api.getDeliveryMode()).toBe(mode);
+    }
+  });
+
+  test("clicking Interrupt selects it, and the next send is an interrupt", () => {
+    // The reported bug: the setter only knew "steer", so selecting interrupt
+    // stored queue and the button flipped straight back to Queue on the next
+    // render — the mode could never be chosen.
+    const ctx = boot({ streaming: true });
+    ctx.type("stop everything");
+
+    ctx.toggleEl.querySelector('[data-mode="interrupt"]').click();
+
+    expect(ctx.api.getDeliveryMode()).toBe("interrupt");
+    const button = ctx.toggleEl.querySelector('[data-mode="interrupt"]');
+    expect(button.classList.contains("active")).toBe(true);
+    expect(button.getAttribute("aria-checked")).toBe("true");
+    expect(ctx.toggleEl.querySelector('[data-mode="queue"]').getAttribute("aria-checked")).toBe(
+      "false",
+    );
+
+    expect(ctx.api.beginSend()).toEqual({ message: "stop everything", delivery: "interrupt" });
+  });
+
+  test("clicking a mode the toggle does not offer falls back to Queue", () => {
+    const ctx = boot({ streaming: true });
+    ctx.type("hi");
+    ctx.api.setDeliveryMode("nonsense");
+    expect(ctx.api.getDeliveryMode()).toBe("queue");
   });
 
   test("F14: beginSend resolves Steer-now BEFORE the post-send refresh resets the toggle", () => {
