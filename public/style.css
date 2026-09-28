@@ -6218,6 +6218,17 @@ body.hide-thinking .thinking-block {
     animation-duration: 4.5s !important;
     animation-iteration-count: infinite !important;
   }
+
+  /* Second exception: the transcript's typing caret. With the global cap it
+     rested lit and frozen, which reads as a text cursor parked after text that
+     is no longer arriving — the settled state draws no caret at all, so a caret
+     always means "still being written", and a caret that cannot blink does not
+     say that. Slow enough (1.4s) that it cannot strobe. */
+  .message-content.streaming .streaming-text.typing:empty::after,
+  .message-content.streaming .streaming-text.typing > :last-child::after {
+    animation-duration: 1.4s !important;
+    animation-iteration-count: infinite !important;
+  }
 }
 
 @media (prefers-reduced-transparency: reduce) {

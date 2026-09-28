@@ -774,3 +774,21 @@ describe("the message entrance animation (CSS contract)", () => {
     expect(block[1]).not.toContain("transform");
   });
 });
+
+describe("the typing caret under reduced motion (CSS contract)", () => {
+  it("keeps blinking slowly instead of resting lit, like the status dot", () => {
+    // Windows' "Animation effects → off" maps to prefers-reduced-motion, whose
+    // global cap (0.01ms, one iteration) left the caret visible but frozen —
+    // indistinguishable from a text cursor parked after text that stopped
+    // arriving. Both exceptions must survive the cap.
+    const css = readFileSync("public/style.css", "utf8");
+    const block = css.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/);
+    expect(block).not.toBeNull();
+    const body = block[1];
+    expect(body).toContain(".status-indicator.streaming");
+    expect(body).toContain(".streaming-text.typing");
+    const caret = body.slice(body.indexOf(".streaming-text.typing"));
+    expect(caret).toContain("animation-iteration-count: infinite");
+    expect(caret).toContain("animation-duration: 1.4s");
+  });
+});
