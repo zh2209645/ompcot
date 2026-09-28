@@ -58,15 +58,28 @@ export class MessageRenderer {
     const elements =
       assistants ?? Array.from(this.container.querySelectorAll(".message.assistant"));
     const byId = new Map();
+    const byTs = new Map();
     const byText = new Map();
     for (const el of elements) {
       const id = el.dataset.messageId || null;
       if (id && id !== "streaming") byId.set(id, (byId.get(id) || 0) + 1);
+      // Runtime identity: the one key both copies of a message always share —
+      // the finalize path stamps it, the streaming path stamps it, and it is
+      // what every adoption rule matches on. The other two keys miss the pair a
+      // late frame actually produces: one element carries the real entry id and
+      // the placeholder carries nothing (`same-entry-id` skips "streaming"), and
+      // the finalized copy's rendered text differs from the live copy's raw
+      // markdown within the compared prefix (`same-content` finds nothing).
+      const ts = el.dataset.messageTs || null;
+      if (ts) byTs.set(ts, (byTs.get(ts) || 0) + 1);
       const text = (el.querySelector(".message-content")?.textContent || "").trim().slice(0, 120);
       if (text.length < 40) continue;
       byText.set(text, (byText.get(text) || 0) + 1);
     }
     const findings = [
+      ...Array.from(byTs.entries())
+        .filter(([, count]) => count > 1)
+        .map(([ts, count]) => ({ id: null, ts, count, reason: "same-message-ts" })),
       ...Array.from(byId.entries())
         .filter(([, count]) => count > 1)
         .map(([id, count]) => ({ id, count, reason: "same-entry-id" })),
@@ -291,7 +304,14 @@ export class MessageRenderer {
       : this.findAssistantElement(message.id);
     const div = adopted ?? document.createElement("div");
     div.className = `message assistant${isHistory ? " history" : ""}`;
-    div.dataset.messageId = message.id || "streaming";
+    // Never walk a known entry id back to the placeholder: a frame without one
+    // (a streaming replay whose id has not been resolved yet) handled at an
+    // element that already carries the real id must leave it in place — the id
+    // is what fork-from-message resolves and what the duplicate census matches
+    // on, and overwriting it with "streaming" blinds both.
+    if (message.id || !div.dataset.messageId) {
+      div.dataset.messageId = message.id || "streaming";
+    }
     // Runtime message identity (`timestamp`) — the same role+timestamp key the
     // extension resolves session-entry ids with. A live element finalized before
     // its id arrived (agent_end overtakes the entry-id retry) carries only the
@@ -496,6 +516,40 @@ export class MessageRenderer {
       const element = candidates[i];
       if (wanted && element.dataset.messageId !== wanted) continue;
       if (element.dataset.finalized !== "true") return element;
+    }
+    return null;
+  }
+
+  /**
+   * Assistant element that already holds this message *and is finished*.
+   *
+   * The streaming path asks this before drawing an update: the runtime flushes
+   * a turn's final partial on its way out, so a `message_update` can arrive
+   * *after* its `agent_end`, for a message the run end already finalized.
+   * Adopting it would un-finish the turn (`renderAssistantMessage(…, true)`
+   * clears the finalized flag by design) and appending drew the reply a second
+   * time — the debug bundle's pair of `1790562840193` elements, one with the
+   * entry id and one still `"streaming"`, seven seconds into a live run.
+   *
+   * Unknown identity returns null, so a frame for a genuinely new message (or
+   * one whose id is not known yet while its element is still live) keeps the
+   * normal path.
+   *
+   * @param {string|null} messageId session-entry id the frame carries, if any
+   * @param {number|null} messageTs the frame's runtime message timestamp
+   */
+  findFinalizedAssistantElement(messageId = null, messageTs = null) {
+    const byId = this.findAssistantElement(messageId);
+    if (byId) return byId.dataset.finalized === "true" ? byId : null;
+    const wanted =
+      typeof messageTs === "number" && Number.isFinite(messageTs) ? String(messageTs) : null;
+    if (!wanted) return null;
+    const candidates = Array.from(this.container.querySelectorAll(".message.assistant"));
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const element = candidates[i];
+      if (element.dataset.finalized === "true" && element.dataset.messageTs === wanted) {
+        return element;
+      }
     }
     return null;
   }

@@ -1498,6 +1498,21 @@ let currentStreamingEntryId = null;
 
 function handleMessageStart(message, entryId = null) {
   if (message.role === "assistant") {
+    // Same rule as `handleMessageUpdate`: a start for a message this window
+    // already rendered and finalized is a replay, not a new turn — opening an
+    // element for it would draw the reply twice.
+    const finished = messageRenderer.findFinalizedAssistantElement(
+      entryId || message.id || null,
+      message.timestamp,
+    );
+    if (finished) {
+      debugLog.log("stream.late-start", {
+        entryId: entryId || message.id || null,
+        ts: typeof message.timestamp === "number" ? message.timestamp : null,
+        action: "dropped",
+      });
+      return;
+    }
     currentStreamingText = "";
     currentStreamingThinking = [];
     currentStreamingMessage = null;
@@ -1625,6 +1640,28 @@ function handleMessageUpdate(event) {
   const { assistantMessageEvent, message } = event;
   const entryId = event.entryId || event.messageId;
   if (message?.role === "assistant") {
+    // A frame for a message this window has already rendered *and finalized*.
+    // The runtime flushes the turn's last partial on its way out, so this
+    // happens routinely: `agent_end` finalizes the live element, then a
+    // `message_update` arrives for the same message (same `timestamp`, and by
+    // then the entry id too). Drawing it opened a second element — one copy
+    // carrying the entry id, the other still "streaming" — which is the
+    // duplicate the transcript census recorded at ts 1790562840193. The frame
+    // has nothing to add: the run end finalized this element from the same
+    // cumulative message, and the identified `message_end` that follows
+    // re-renders it from the message's own content blocks.
+    const finished = messageRenderer.findFinalizedAssistantElement(
+      entryId || null,
+      message.timestamp,
+    );
+    if (finished) {
+      debugLog.log("stream.late-update", {
+        entryId: entryId || null,
+        ts: typeof message.timestamp === "number" ? message.timestamp : null,
+        action: "dropped",
+      });
+      return;
+    }
     currentStreamingMessage = message;
     if (typeof entryId === "string" && entryId) currentStreamingEntryId = entryId;
     ensureStreamingAssistantElement(message);

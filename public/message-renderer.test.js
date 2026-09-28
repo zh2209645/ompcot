@@ -405,6 +405,60 @@ describe("rendering is keyed on message identity (no duplicate elements)", () =>
     expect(renderer.findUnfinishedAssistantElement(el.dataset.messageId)).toBeNull();
   });
 
+  it("finds a finalized element by entry id, or by runtime identity alone", () => {
+    const el = renderer.renderAssistantMessage(
+      { content: "", id: "4d13d778", timestamp: 1790562840193 },
+      true,
+    );
+    renderer.updateStreamingMessage(el, "the answer");
+    renderer.finalizeStreamingMessage(el, null, "", "4d13d778");
+
+    expect(renderer.findFinalizedAssistantElement("4d13d778", 1790562840193)).toBe(el);
+    // The frame may arrive before its entry id is known: the timestamp is the
+    // identity every adoption rule shares.
+    expect(renderer.findFinalizedAssistantElement(null, 1790562840193)).toBe(el);
+    expect(renderer.findFinalizedAssistantElement(null, 1790562840194)).toBeNull();
+    expect(renderer.findFinalizedAssistantElement("other", null)).toBeNull();
+  });
+
+  it("does not treat a live element as a finished duplicate", () => {
+    const el = renderer.renderAssistantMessage({ content: "", id: "live_1", timestamp: 7 }, true);
+    renderer.updateStreamingMessage(el, "still going");
+
+    expect(renderer.findFinalizedAssistantElement("live_1", 7)).toBeNull();
+    expect(renderer.findFinalizedAssistantElement(null, 7)).toBeNull();
+  });
+
+  it("the census names a crossed pair by runtime identity, where id and text both differ", () => {
+    // The pair the bundle recorded: `agent_end` finalized the element (real
+    // entry id, rendered markdown), then a late streaming frame for the same
+    // message created a second one (placeholder id, raw markdown). The id check
+    // skips "streaming" and the text check compares different renderings — only
+    // the shared message timestamp names them.
+    const finalized = renderer.renderAssistantMessage(
+      { content: "", id: "4d13d778", timestamp: 1790562840193 },
+      true,
+    );
+    renderer.updateStreamingMessage(
+      finalized,
+      "one and the same answer text, long enough to compare",
+    );
+    renderer.finalizeStreamingMessage(finalized, null, "", "4d13d778");
+
+    const late = renderer.renderAssistantMessage({ content: "", timestamp: 1790562840193 }, true);
+    renderer.updateStreamingMessage(late, "one and the same answer text, long enough to compare");
+    expect(late).not.toBe(finalized);
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(2);
+
+    const findings = renderer.reportDuplicateMessages();
+    expect(findings).toContainEqual({
+      id: null,
+      ts: "1790562840193",
+      count: 2,
+      reason: "same-message-ts",
+    });
+  });
+
   it("a live render adopts the element a snapshot already rendered for its entry id", () => {
     // A re-render mid-run (snapshot from the session file) holds the message
     // under its real entry id while the live path only knows the placeholder.
