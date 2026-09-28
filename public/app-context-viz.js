@@ -1,3 +1,22 @@
+/**
+ * Context-window popover (the header's `NN%` pill).
+ *
+ * The pill toggles the popover on **pointerdown**, not on `click`. The header is
+ * an app drag region (`-webkit-app-region: drag`, with `.header-right` marked
+ * `no-drag`), and a press that drifts a pixel — or a WebView2 drag that eats the
+ * mouseup — never produces a `click` on the pill at all; a press that drifts
+ * *off* the pill dispatches `click` on the nearest common ancestor instead, so
+ * the button looked dead or needed a second press. `pointerdown` fires on press,
+ * before any of that, and the outside-close listens for it too so the two can
+ * never race on the same event.
+ *
+ * The popover also never shows a blank box: opening it without usage data (a
+ * fresh session, a re-render that reset the totals) draws an explicit
+ * "no usage yet" line, because an empty panel is indistinguishable from "the
+ * page did not open" — the failure this interaction was reported with.
+ */
+import { t } from "./i18n.js";
+
 export function setupContextViz({
   tokenUsageEl,
   contextViz,
@@ -14,10 +33,53 @@ export function setupContextViz({
     return String(n);
   }
 
+  function isOpen() {
+    return !contextViz.classList.contains("hidden");
+  }
+
+  function setExpanded(open) {
+    if (tokenUsageEl.setAttribute) tokenUsageEl.setAttribute("aria-expanded", String(open));
+  }
+
+  function open() {
+    updateContextViz();
+    contextViz.classList.remove("hidden");
+    setExpanded(true);
+  }
+
+  function close() {
+    contextViz.classList.add("hidden");
+    setExpanded(false);
+  }
+
+  function toggle() {
+    if (isOpen()) close();
+    else open();
+  }
+
+  /**
+   * The honest empty state: no usage data for what is on screen. Without it the
+   * popover opened as an empty box (no bar, no legend, no footer), which reads
+   * as a broken popover rather than "there is nothing to report yet".
+   */
+  function renderEmpty() {
+    contextBar.innerHTML = "";
+    contextLegend.innerHTML = "";
+    contextVizUsed.textContent = "";
+    contextVizTotal.textContent = "";
+    const empty = document.createElement("div");
+    empty.className = "context-viz-empty";
+    empty.textContent = t("ctx.empty");
+    contextLegend.appendChild(empty);
+  }
+
   function updateContextViz() {
     const lastUsage = getUsage();
     const contextWindowSize = getContextWindowSize();
-    if (!lastUsage || !contextWindowSize) return;
+    if (!lastUsage || !contextWindowSize) {
+      renderEmpty();
+      return;
+    }
 
     const input = lastUsage.input || 0;
     const cacheRead = lastUsage.cacheRead || 0;
@@ -27,9 +89,9 @@ export function setupContextViz({
     const free = Math.max(0, total - totalUsed);
 
     const segments = [
-      { key: "cache", label: "Cached", tokens: cacheRead, color: "cache" },
-      { key: "messages", label: "Input", tokens: freshInput, color: "messages" },
-      { key: "free", label: "Available", tokens: free, color: "free" },
+      { key: "cache", label: t("ctx.cached"), tokens: cacheRead, color: "cache" },
+      { key: "messages", label: t("ctx.input"), tokens: freshInput, color: "messages" },
+      { key: "free", label: t("ctx.available"), tokens: free, color: "free" },
     ];
 
     contextBar.innerHTML = "";
@@ -58,24 +120,40 @@ export function setupContextViz({
     }
 
     const pct = Math.round((totalUsed / total) * 100);
-    contextVizUsed.textContent = `${pct}% used`;
+    contextVizUsed.textContent = t("ctx.used", { pct });
     contextVizTotal.textContent = `${formatTokens(totalUsed)} / ${formatTokens(total)}`;
   }
 
-  tokenUsageEl.addEventListener("click", (e) => {
-    e.stopPropagation();
-    const isHidden = contextViz.classList.contains("hidden");
-    if (isHidden) {
-      updateContextViz();
-      contextViz.classList.remove("hidden");
-    } else {
-      contextViz.classList.add("hidden");
+  tokenUsageEl.addEventListener("pointerdown", (event) => {
+    // Press-time toggle (see the module header): stop the outside-close from
+    // also seeing this press, and keep the press from selecting text or
+    // starting a header drag.
+    event.stopPropagation();
+    event.preventDefault();
+    toggle();
+  });
+
+  // Visually a button (`role="button" tabindex="0"` in the markup), so it takes
+  // Enter/Space to toggle and Escape to dismiss.
+  tokenUsageEl.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggle();
+    } else if (event.key === "Escape" && isOpen()) {
+      event.preventDefault();
+      event.stopPropagation();
+      close();
     }
   });
 
-  document.addEventListener("click", (e) => {
-    if (!contextViz.contains(e.target) && e.target !== tokenUsageEl) {
-      contextViz.classList.add("hidden");
-    }
+  document.addEventListener("pointerdown", (event) => {
+    // Containment on both sides: the panel keeps clicks that land on its own
+    // padding or children, and the pill covers its children too (an exact
+    // `e.target === tokenUsageEl` comparison closed the popover for any nested
+    // element).
+    if (contextViz.contains(event.target) || tokenUsageEl.contains(event.target)) return;
+    close();
   });
+
+  setExpanded(false);
 }

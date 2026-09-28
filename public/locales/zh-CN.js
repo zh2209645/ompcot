@@ -432,6 +432,11 @@ export const zhCN = {
   "ctx.compact": "压缩",
   "ctx.compactTitle": "上下文已超过 80% — 压缩以节省 token",
   "ctx.usageTitle": "上下文：{used} / {total} token",
+  "ctx.cached": "已缓存",
+  "ctx.input": "输入",
+  "ctx.available": "可用",
+  "ctx.used": "已用 {pct}%",
+  "ctx.empty": "本会话暂无用量记录",
 
   // ── updater ──
   "update.available": "有可用更新",

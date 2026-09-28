@@ -441,6 +441,11 @@ export const en = {
   "ctx.compact": "Compact",
   "ctx.compactTitle": "Context is over 80% — compact to save tokens",
   "ctx.usageTitle": "Context: {used} / {total} tokens",
+  "ctx.cached": "Cached",
+  "ctx.input": "Input",
+  "ctx.available": "Available",
+  "ctx.used": "{pct}% used",
+  "ctx.empty": "No usage recorded for this session yet",
 
   // ── updater ──
   "update.available": "Update available",

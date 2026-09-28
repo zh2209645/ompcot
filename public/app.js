@@ -1227,6 +1227,7 @@ function handleCompactionEnd(event) {
   }
   // Reset token tracking — next message will update
   lastInputTokens = 0;
+  lastUsage = null;
   updateTokenUsage();
   hideCompactButton();
 }
@@ -2288,6 +2289,9 @@ async function resyncTranscriptFromAgent() {
 function resetTranscriptTotals() {
   sessionTotalCost = 0;
   lastInputTokens = 0;
+  // The usage object belongs to the same totals: the re-render that follows
+  // restores both from the transcript it paints (see `onAssistantUsage`).
+  lastUsage = null;
   updateCostDisplay();
   updateTokenUsage();
 }
@@ -3179,6 +3183,7 @@ async function newSession() {
   if (canUseSessionControl()) {
     sessionTotalCost = 0;
     lastInputTokens = 0;
+    lastUsage = null;
     updateCostDisplay();
     updateTokenUsage();
     try {
@@ -3199,6 +3204,7 @@ async function newSession() {
   // omp process (no Tauri windows available in this mode).
   sessionTotalCost = 0;
   lastInputTokens = 0;
+  lastUsage = null;
   updateCostDisplay();
   updateTokenUsage();
   const data = await rpcCommand({ type: "new_session" }, "Starting new session...");
@@ -3984,6 +3990,15 @@ function updateTokenUsage() {
     tokenUsageEl.textContent = `${(lastInputTokens / 1000).toFixed(1)}k`;
     tokenUsageEl.classList.add("visible");
     tokenUsageEl.classList.remove("warning", "critical");
+  } else {
+    // No usage for what is on screen — a fresh session, or a re-render reset the
+    // totals. Hiding the pill is the honest state: leaving the previous
+    // percentage up pointed the context popover at data it no longer had (it
+    // then opened on another session's numbers, or empty).
+    tokenUsageEl.classList.remove("visible", "warning", "critical");
+    tokenUsageEl.textContent = "";
+    tokenUsageEl.title = t("header.contextUsage");
+    hideCompactButton();
   }
 }
 

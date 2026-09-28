@@ -1266,6 +1266,19 @@ body {
   background: var(--bg-glass-hover);
 }
 
+.token-usage:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The popover says why it is empty rather than opening a blank box (see
+   app-context-viz.js). */
+.context-viz-empty {
+  font-size: calc(11px * var(--font-scale));
+  color: var(--text-dim);
+  padding: 4px 0;
+}
+
 .token-usage.visible {
   display: block;
 }
