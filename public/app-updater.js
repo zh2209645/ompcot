@@ -304,6 +304,13 @@ export function createAppUpdater({
   async function initUpdaterUI() {
     if (!updaterSection) return;
 
+    // The app version is not an updater feature: it renders on hosts that
+    // expose no updater at all (a browser/LAN client) and before the
+    // capability frame has arrived, so it is loaded before the gate below.
+    // Its row used to live inside the updater section, which the early
+    // "no updater yet" call hid — the version block disappeared from Settings.
+    const appVersion = await loadAppVersion();
+
     if (!transport?.hasUpdater) {
       updaterSection.hidden = true;
       syncSidebarUpdateButton();
@@ -312,8 +319,6 @@ export function createAppUpdater({
     // Capabilities can arrive asynchronously and may be re-emitted on reconnect.
     // Ensure the section becomes visible once native updater support is known.
     updaterSection.hidden = false;
-
-    const appVersion = await loadAppVersion();
 
     if (await isDevBuild()) {
       setUpdateStatus(t("update.devBuild"), "info");

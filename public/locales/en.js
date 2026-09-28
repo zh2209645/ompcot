@@ -158,6 +158,7 @@ export const en = {
   "settings.thinkingCycle": "Click to cycle: off, minimal, low, medium, high, xhigh, max",
   "settings.thinkingLevelOff": "Depth: off",
   "settings.showThinking": "Show thinking",
+  "settings.versionSection": "Version",
   "settings.updates": "Updates",
   "settings.ompVersion": "OMP version",
   "settings.appVersion": "Ompcot version",

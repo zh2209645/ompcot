@@ -5146,6 +5146,9 @@ async function openSettings() {
     setTimeout(() => {
       if (!settingsPanel.classList.contains("hidden")) {
         loadOMPVersion();
+        // The version rows are only filled by the capability handshake
+        // otherwise, so a missed frame left them on "Loading…" for good.
+        void updater.initUpdaterUI();
         void ompBinarySettings.refresh();
       }
     }, 300);

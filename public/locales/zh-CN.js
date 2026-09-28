@@ -152,6 +152,7 @@ export const zhCN = {
   "settings.thinkingCycle": "点击切换：off、minimal、low、medium、high、xhigh、max",
   "settings.thinkingLevelOff": "深度：off",
   "settings.showThinking": "显示思考",
+  "settings.versionSection": "版本",
   "settings.updates": "更新",
   "settings.ompVersion": "OMP 版本",
   "settings.appVersion": "Ompcot 版本",
