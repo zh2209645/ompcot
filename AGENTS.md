@@ -146,4 +146,4 @@ See **docs/AUTO_UPDATER.md** for the updater architecture, the release pipeline'
 
 ## Tests
 
-Vitest tests live in `public/` as `*.test.js` (jsdom) and `extensions/*.test.ts`. The full `bun run test` also runs `scripts/check-tauri-permissions.js`. As of this writing: ~438 tests across 43 files; **`cost-infobar.test.js` has 2 known pre-existing palette failures** (fail on clean HEAD — do not chase them). Locale en/zh parity is test-enforced (`i18n.test.js`).
+Vitest tests live in `public/` as `*.test.js` (jsdom) and `extensions/*.test.ts`. The full `bun run test` also runs `scripts/check-tauri-permissions.js`. The suite is green as of the composer-mention work (~660 tests; the former `cost-infobar.test.js` red is gone: the chart/legend palettes are single-sourced from `cost-infobar.js` and the token assertion accepts the locale's compact spelling — `Intl` renders 3550 as `3.6K` in en-US and `3550` in zh-CN, so never pin such a spelling). Locale en/zh parity is test-enforced (`i18n.test.js`).

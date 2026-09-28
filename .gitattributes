@@ -1,0 +1,7 @@
+# Shell scripts must keep LF line endings.
+#
+# Windows checkouts default to core.autocrlf=true, which turned every script
+# into CRLF — bash then dies on the shebang/`set` lines (`$'\r': command not
+# found`, `set: pipefail: invalid option name`), so `bun run check:rust` never
+# actually ran a check.
+*.sh text eol=lf

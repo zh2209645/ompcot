@@ -35,15 +35,7 @@ const OUT_DIR = path.join(SRC_DIR, "dist");
 
 const ENTRIES = ["embedded-server.ts"];
 
-const EXTERNAL = [
-  "@oh-my-pi/omp-coding-agent",
-  "@oh-my-pi/omp-ai",
-  "@oh-my-pi/omp-tui",
-  "@oh-my-pi/omp-coding-agent",
-  "@oh-my-pi/omp-ai",
-  "@oh-my-pi/omp-tui",
-  "typebox",
-];
+const EXTERNAL = ["@oh-my-pi/omp-coding-agent", "@oh-my-pi/omp-ai", "@oh-my-pi/omp-tui", "typebox"];
 
 async function buildOne(entry) {
   const inFile = path.join(SRC_DIR, entry);

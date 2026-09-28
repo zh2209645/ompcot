@@ -15,6 +15,10 @@ src-tauri/resources/pi/
 
 # Pi session exports
 pi-session-*.html
+
+# Debug bundles exported from Settings → Configuration → Debug (they carry
+# transcript ids and console output; never commit one)
+ompcot-debug-*.json
 src-tauri/resources/omp/omp
 src-tauri/resources/omp/.version
 src-tauri/resources/omp/
