@@ -36,6 +36,7 @@ export class MessageRenderer {
       assistants: assistants.length,
       users: this.container.querySelectorAll(".message.user").length,
       ids: assistants.map((el) => el.dataset.messageId || null),
+      ts: assistants.map((el) => el.dataset.messageTs || null),
       streaming: assistants.map((el) => el.dataset.finalized !== "true"),
       ...extra,
     });
@@ -266,13 +267,22 @@ export class MessageRenderer {
     //   updates its element (never a second copy, never a detached leftover),
     // - without an id (the live streaming placeholder) the newest unfinished
     //   element is adopted; `findUnfinishedAssistantElement` ignores finalized
-    //   turns, so distinct turns never merge into one element.
+    //   turns, so distinct turns never merge into one element,
+    // - an element settled before its id arrived is adopted only for its own
+    //   message, matched by runtime identity (see `findSettledAssistantElement`).
     const adopted = isStreaming
-      ? (this.findAssistantElement(message.id) ?? this.findUnfinishedAssistantElement(null))
+      ? (this.findAssistantElement(message.id) ??
+        this.findUnfinishedAssistantElement(null) ??
+        this.findSettledAssistantElement(message.timestamp))
       : this.findAssistantElement(message.id);
     const div = adopted ?? document.createElement("div");
     div.className = `message assistant${isHistory ? " history" : ""}`;
     div.dataset.messageId = message.id || "streaming";
+    // Runtime message identity (`timestamp`) — the same role+timestamp key the
+    // extension resolves session-entry ids with. A live element finalized before
+    // its id arrived (agent_end overtakes the entry-id retry) carries only the
+    // "streaming" placeholder; this is what lets its own late frame find it.
+    div.dataset.messageTs = typeof message.timestamp === "number" ? String(message.timestamp) : "";
 
     let rawStreamingText = "";
     if (typeof message.content === "string") {
@@ -457,6 +467,40 @@ export class MessageRenderer {
       const element = candidates[i];
       if (wanted && element.dataset.messageId !== wanted) continue;
       if (element.dataset.finalized !== "true") return element;
+    }
+    return null;
+  }
+
+  /**
+   * Assistant element a run-end finalize settled before its session-entry id
+   * arrived — still carrying the live placeholder id (or none) and already
+   * finalized.
+   *
+   * `agent_end` is broadcast immediately while the assistant `message_end` is
+   * held for the entry-id retry (omp persists the message a few ms after its
+   * `message_end` handler runs), so the run end can finalize the live element
+   * with no id to key on. The identified frame then found neither an element
+   * for its entry (`findAssistantElement`) nor an unfinished one
+   * (`findUnfinishedAssistantElement`, the finalize cleared that flag) and
+   * appended a second copy of the same reply — the duplicate the debug bundle
+   * caught as `transcript.duplicate` with one `null` id.
+   *
+   * Matched by the runtime message identity (`timestamp`), the same
+   * role+timestamp key the extension resolves entry ids with, so a frame for a
+   * different message can never adopt this element.
+   */
+  findSettledAssistantElement(messageTs = null) {
+    const wanted =
+      typeof messageTs === "number" && Number.isFinite(messageTs) ? String(messageTs) : null;
+    if (!wanted) return null;
+    const candidates = Array.from(this.container.querySelectorAll(".message.assistant"));
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const element = candidates[i];
+      if (element.dataset.finalized !== "true") continue;
+      const id = element.dataset.messageId || "";
+      if (id && id !== "streaming") continue;
+      if (element.dataset.messageTs !== wanted) continue;
+      return element;
     }
     return null;
   }

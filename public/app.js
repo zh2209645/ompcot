@@ -1426,9 +1426,12 @@ function handleMessageStart(message, entryId = null) {
     // falls back to the "streaming" placeholder until finalize (F2). The id
     // is what lets a re-render (snapshot mid-run, replayed frame) adopt the
     // element that already exists for this message instead of appending a
-    // second copy of it.
+    // second copy of it. The timestamp rides along as the element's runtime
+    // identity, so an element the run end settled before the id arrived can
+    // still be adopted by its own late frame (see
+    // `findSettledAssistantElement`).
     currentStreamingElement = messageRenderer.renderAssistantMessage(
-      { content: "", id: entryId || message.id },
+      { content: "", id: entryId || message.id, timestamp: message.timestamp },
       true,
     );
   } else if (message.role === "user") {
@@ -1487,7 +1490,7 @@ function ensureStreamingAssistantElement(message = null) {
   currentStreamingText = getAssistantText(message);
   currentStreamingThinking = getAssistantThinkingSegments(message);
   currentStreamingElement = messageRenderer.renderAssistantMessage(
-    { content: "", id: message?.id },
+    { content: "", id: message?.id, timestamp: message?.timestamp },
     true,
   );
   if (currentStreamingThinking.length > 0) {
@@ -1508,6 +1511,12 @@ function ensureStreamingAssistantElement(message = null) {
  * DOM happened to hold. Falls back to `stopStreaming` when there is nothing to
  * finalize from — the element then stays unfinished, so a late `message_end`
  * still completes it in place.
+ *
+ * When the entry id is not known yet (agent_end overtakes the identified
+ * `message_end`, which the extension holds for its entry-id retry) the element
+ * is settled still carrying the `"streaming"` placeholder; its own late frame
+ * adopts it by runtime identity instead of appending a second copy (see
+ * `messageRenderer.findSettledAssistantElement`).
  */
 function finishStreamingElement(element) {
   // Cards that waited for this message must appear even when the live element
@@ -1579,6 +1588,10 @@ function handleMessageUpdate(event) {
 function handleMessageEnd(message, entryId = null) {
   if (message?.role !== "assistant") return;
   const entry = entryId || message?.id || null;
+  // The runtime message identity — the same role+timestamp key the extension
+  // resolves entry ids with, and the only handle on an element that the run end
+  // settled before this frame's id was known.
+  const messageTs = typeof message?.timestamp === "number" ? message.timestamp : null;
   // Already rendered and finalized for this entry (a replayed/duplicate
   // message_end, or a snapshot that rendered it first): there is nothing left
   // to finish — creating anything here would append a second copy of the turn.
@@ -1605,7 +1618,18 @@ function handleMessageEnd(message, entryId = null) {
       // in place instead of streaming a second copy of it.
       currentStreamingElement = rendered;
     } else {
-      ensureStreamingAssistantElement(message);
+      // The run end may have finished this very element before this frame's
+      // entry id arrived (`handleAgentEnd` finalizes the live element, then the
+      // extension's deferred `message_end` lands): the element is finalized but
+      // still carries the "streaming" placeholder, so only the runtime identity
+      // can pair them. Without this the identified frame appended a second copy
+      // of the reply — the duplicate the debug bundle recorded.
+      currentStreamingElement = messageRenderer.findSettledAssistantElement(messageTs);
+      if (currentStreamingElement) {
+        currentStreamingThinking = getAssistantThinkingSegments(message);
+      } else {
+        ensureStreamingAssistantElement(message);
+      }
     }
   }
   if (currentStreamingElement) {

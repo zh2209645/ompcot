@@ -415,6 +415,68 @@ describe("rendering is keyed on message identity (no duplicate elements)", () =>
     expect(el.querySelector(".message-copy-btn")).toBeNull();
     expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
   });
+
+  it("adopts an element settled before its id arrived when its own frame lands late", () => {
+    // The wire order the debug bundle caught: the live element is finalized by
+    // agent_end while the identified message_end is still held for the
+    // extension's entry-id retry, so the element is settled on the "streaming"
+    // placeholder — and the late frame appended a second copy of the same
+    // reply (`transcript.duplicate`, one `null` id).
+    const ts = 1790553955657;
+    const content = [
+      { type: "thinking", thinking: "Everything is recorded and clean." },
+      { type: "text", text: "结论：不需要改代码。" },
+    ];
+    const live = renderer.renderAssistantMessage({ content: "", timestamp: ts }, true);
+    renderer.updateStreamingThinking(live, ["Everything is recorded and clean."]);
+    renderer.updateStreamingMessage(live, "结论：不需要改代码。");
+    // agent_end: finalize from the last cumulative frame, entry id not known.
+    renderer.finalizeStreamingMessage(live, null, content, null);
+    expect(live.dataset.messageId).toBe("streaming");
+
+    // The devtools-backed handle on that element is the runtime identity.
+    const adopted = renderer.findSettledAssistantElement(ts);
+    expect(adopted).toBe(live);
+    renderer.finalizeStreamingMessage(adopted, null, content, "e018fd1d");
+
+    expect(live.dataset.messageId).toBe("e018fd1d");
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+    expect(renderer.reportDuplicateMessages()).toEqual([]);
+  });
+
+  it("never adopts a settled element for a different message or a history copy", () => {
+    const live = renderer.renderAssistantMessage({ content: "", timestamp: 111 }, true);
+    renderer.updateStreamingMessage(live, "first reply of the run");
+    renderer.finalizeStreamingMessage(
+      live,
+      null,
+      [{ type: "text", text: "first reply of the run" }],
+      null,
+    );
+
+    // A later message of the same run has its own identity.
+    expect(renderer.findSettledAssistantElement(222)).toBeNull();
+    // A history copy carries a real entry id; only the settled live element is
+    // a candidate for adoption.
+    renderer.renderAssistantMessage(
+      { content: "history reply", id: "entry_h", timestamp: 111 },
+      false,
+      true,
+    );
+    expect(renderer.findSettledAssistantElement(111)).toBe(live);
+  });
+
+  it("a replayed live frame re-opens the element settled for its own message", () => {
+    const live = renderer.renderAssistantMessage({ content: "", timestamp: 333 }, true);
+    renderer.updateStreamingMessage(live, "partial");
+    renderer.finalizeStreamingMessage(live, null, [{ type: "text", text: "partial" }], null);
+
+    const again = renderer.renderAssistantMessage({ content: "", timestamp: 333 }, true);
+
+    expect(again).toBe(live);
+    expect(live.dataset.finalized).toBeUndefined();
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+  });
 });
 
 describe("duplicate transcript detection (debug capture)", () => {
