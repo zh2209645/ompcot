@@ -2148,7 +2148,8 @@ function sendMessage() {
 // rendered element attached to the in-flight entry so a server rejection can
 // clear it again (F16).
 function sendPromptNow(cmd, message) {
-  messageRenderer.renderUserMessage({ content: message });
+  // The user's own message: reveal it even if they had scrolled away.
+  messageRenderer.renderUserMessage({ content: message }, false, { forceScroll: true });
   const element = messagesContainer.querySelector(".message.user:last-of-type");
   const requestId = wsClient.send(cmd);
   trackPromptDelivery(requestId, message, element);
@@ -2227,7 +2228,8 @@ function flushQueue() {
     }
     // `kind` is UI-only routing metadata — strip it from the wire payload.
     const { kind: _kind, ...payload } = cmd;
-    messageRenderer.renderUserMessage({ content: cmd.message });
+    // Their own queued message being delivered: same rule.
+    messageRenderer.renderUserMessage({ content: cmd.message }, false, { forceScroll: true });
     trackPromptDelivery(
       wsClient.send(payload),
       cmd.message,

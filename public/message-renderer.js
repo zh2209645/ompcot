@@ -180,7 +180,7 @@ export class MessageRenderer {
     `;
   }
 
-  renderUserMessage(message, isHistory = false) {
+  renderUserMessage(message, isHistory = false, { forceScroll = false } = {}) {
     // Remove welcome message if present
     const welcome = this.container.querySelector(".welcome");
     if (welcome) welcome.remove();
@@ -208,7 +208,7 @@ export class MessageRenderer {
     `;
     this._setupCopyBtn(div);
     this.container.appendChild(div);
-    if (!isHistory) this.scrollToBottom();
+    if (!isHistory) this.scrollToBottom({ force: forceScroll, immediate: forceScroll });
   }
 
   /**
@@ -795,12 +795,23 @@ export class MessageRenderer {
     return div.innerHTML;
   }
 
-  scrollToBottom() {
-    if (this.follow.isPinned) {
-      requestAnimationFrame(() => {
-        this.jumpToBottom();
-      });
-    }
+  /**
+   * Reveal the newest content, if the viewer is following it.
+   *
+   * `force` is for the messages the *local* user just sent: scrolling is the
+   * follow policy's job (a reader who scrolled away stays where they are), but
+   * their own message is the one thing they must see — without it the capsule
+   * is appended below the viewport and sits behind the composer until they
+   * scroll manually. `immediate` jumps in the same task (the append already
+   * forced layout, so `scrollHeight` includes the new element) and then again on
+   * the next frame, the position a late composer-inset change leaves stale.
+   */
+  scrollToBottom({ force = false, immediate = false } = {}) {
+    if (!force && !this.follow.isPinned) return;
+    if (immediate) this.jumpToBottom();
+    requestAnimationFrame(() => {
+      this.jumpToBottom();
+    });
   }
 
   /**

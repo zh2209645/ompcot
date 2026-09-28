@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageRenderer } from "./message-renderer.js";
 
 describe("MessageRenderer streaming markdown preview", () => {
@@ -656,5 +657,82 @@ describe("MessageRenderer session notices", () => {
       (el) => el.textContent,
     );
     expect(bodies).toEqual(["first", "second"]);
+  });
+});
+
+describe("a locally sent message is always revealed", () => {
+  /** A scroller whose geometry the test controls (jsdom lays nothing out). */
+  function scroller({ scrollHeight, clientHeight, scrollTop }) {
+    const el = document.createElement("div");
+    const state = { scrollHeight, clientHeight, scrollTop };
+    for (const key of ["scrollHeight", "clientHeight", "scrollTop"]) {
+      Object.defineProperty(el, key, {
+        get: () => state[key],
+        set: (v) => {
+          state[key] = Math.max(0, Math.min(v, state.scrollHeight - state.clientHeight));
+        },
+      });
+    }
+    return el;
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("requestAnimationFrame", (cb) => {
+      cb(0);
+      return 1;
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("jumps to it even when the reader had scrolled away", () => {
+    // The capsule is appended below the viewport; the follow policy leaves a
+    // reader who scrolled away alone, but the message *they* just sent must not
+    // sit behind the composer until they scroll manually.
+    const container = scroller({ scrollHeight: 1000, clientHeight: 400, scrollTop: 100 });
+    const renderer = new MessageRenderer(container);
+    renderer.follow.isPinned = false;
+
+    renderer.renderUserMessage({ content: "my new message" }, false, { forceScroll: true });
+
+    expect(container.scrollTop).toBe(600);
+    expect(container.querySelectorAll(".message.user")).toHaveLength(1);
+  });
+
+  it("leaves the viewport alone for a message that is not the local user's", () => {
+    // A message echoed from another surface (mirror mode, a TUI client) follows
+    // the normal policy: a reader mid-history is not yanked by it.
+    const container = scroller({ scrollHeight: 1000, clientHeight: 400, scrollTop: 100 });
+    const renderer = new MessageRenderer(container);
+    renderer.follow.isPinned = false;
+
+    renderer.renderUserMessage({ content: "echoed elsewhere" });
+
+    expect(container.scrollTop).toBe(100);
+  });
+
+  it("still follows while the reader is at the bottom", () => {
+    const container = scroller({ scrollHeight: 1000, clientHeight: 400, scrollTop: 600 });
+    const renderer = new MessageRenderer(container);
+    renderer.follow.isPinned = true;
+
+    renderer.renderUserMessage({ content: "hello" });
+
+    expect(container.scrollTop).toBe(600);
+  });
+});
+
+describe("the message entrance animation (CSS contract)", () => {
+  it("fades in without moving or scaling the capsule", () => {
+    // `translateY(8px) scale(0.98)` drew a freshly sent capsule behind the
+    // composer for its first frames and rendered its rounded, backdrop-blurred
+    // edge scaled — the "irregular outline" a user reported.
+    const css = readFileSync("public/style.css", "utf8"); // vitest cwd = repo root
+    const block = css.match(/@keyframes msgIn \{([\s\S]*?)\n\}/);
+    expect(block).not.toBeNull();
+    expect(block[1]).toContain("opacity: 0");
+    expect(block[1]).not.toContain("transform");
   });
 });

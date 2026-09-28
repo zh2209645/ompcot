@@ -3669,14 +3669,19 @@ body {
   animation: none;
 }
 
+/* Opacity only, deliberately: the capsule used to start 8px lower and 2%
+   smaller, so a freshly sent message drew *behind* the composer for its first
+   frames (measured: bottom 671 vs composer top 629, 61px clipped by the
+   scroller) and its scaled edge — 24px radius over a `backdrop-filter: blur`
+   layer — read as an irregular outline before it settled. A fade gives the same
+   "this just arrived" cue without ever drawing the capsule somewhere it is
+   not. */
 @keyframes msgIn {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.98);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
   }
 }
 
