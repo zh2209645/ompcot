@@ -13,8 +13,9 @@ extensions/dist/
 src-tauri/resources/pi/
 .cache/pi-binaries/
 
-# Pi session exports
+# Session exports (omp names them omp-session-*; pi-session-* is the old prefix)
 pi-session-*.html
+omp-session-*.html
 
 # Debug bundles exported from Settings → Configuration → Debug (they carry
 # transcript ids and console output; never commit one)

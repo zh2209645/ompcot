@@ -3648,6 +3648,7 @@ body {
    ═══════════════════════════════════════════════════════ */
 
 .message {
+  position: relative; /* anchors the hover actions (copy / fork / rewind) */
   display: flex;
   flex-direction: row;
   align-items: flex-start;
@@ -3670,10 +3671,16 @@ body {
    themselves off `.message-content`, so a shrink-to-fit message made the same
    block render at wildly different widths: a thinking-only turn collapsed to
    the width of its "Thinking" label while the identical block under a
-   paragraph spanned the column. `width` mirrors the `max-width` cap so every
-   assistant message — and every block inside it — is one uniform width. */
+   paragraph spanned the column.
+ *
+ * `100%` — not the 85% the user bubble is capped at — is what makes one column:
+ * the tool cards and the composer card also span the full column, so text,
+ * thinking, tool calls and the input box share one left/right edge. At 85% the
+ * reply text stopped ~144px short of both, which read as the input box being
+ * misaligned with the conversation. */
 .message.assistant {
-  width: 85%;
+  width: 100%;
+  max-width: 100%;
 }
 
 .message.assistant .message-content {
@@ -5356,18 +5363,30 @@ body.hide-thinking .thinking-block {
 
 .message-copy-btn {
   opacity: 0;
-  align-self: flex-start;
-  margin-top: 4px;
-  background: none;
-  border: none;
+  /* Out of flow: as a flex child this (plus the fork action beside it) stole
+     ~58px from every message, so text and thinking stopped short of the tool
+     cards and the composer card. It now floats over the block's corner, where
+     it only exists on hover anyway. */
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: var(--bg-glass-strong);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
   color: var(--text-dim);
   cursor: pointer;
-  padding: 4px 6px;
+  padding: 3px 5px;
   font-size: calc(10px * var(--font-scale));
   font-family: inherit;
   transition: all 0.15s var(--ease);
   white-space: nowrap;
-  flex-shrink: 0;
+}
+
+/* The right-aligned user bubble keeps its actions on the outside (left) edge. */
+.message.user .message-copy-btn,
+.message.user .message-action-btn {
+  right: auto;
+  left: 4px;
 }
 
 .message:hover .message-copy-btn {
@@ -6773,17 +6792,29 @@ html.macos-overlay .settings-content {
 
 .message-action-btn {
   opacity: 0;
-  align-self: flex-start;
-  margin-top: 4px;
-  margin-left: 2px;
-  background: none;
-  border: none;
+  /* See .message-copy-btn: floating, not a flex child. */
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: var(--bg-glass-strong);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
   color: var(--text-dim);
   cursor: pointer;
-  padding: 4px 6px;
-  border-radius: var(--radius-sm);
+  padding: 3px 5px;
   transition: all 0.15s var(--ease);
-  flex-shrink: 0;
+}
+
+/* Two actions on the same message: fork sits beside rewind/copy. */
+.message-action-btn + .message-action-btn,
+.message-copy-btn + .message-action-btn {
+  right: 30px;
+}
+
+.message.user .message-action-btn + .message-action-btn,
+.message.user .message-copy-btn + .message-action-btn {
+  right: auto;
+  left: 34px;
 }
 
 .message:hover .message-action-btn,
@@ -6803,7 +6834,7 @@ html.macos-overlay .settings-content {
 /* Rewind sits first in the user message's action row (it is the more
    destructive of the two, so it stays left of fork). */
 .message-rewind-btn {
-  margin-left: 2px;
+  left: 4px;
 }
 
 /* ═══════════════════════════════════════════════════════
