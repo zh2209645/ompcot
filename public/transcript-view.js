@@ -14,6 +14,10 @@
  *   transcript-drawing events are dropped — they used to paint the parent's own
  *   cards (a running `wait`) into whichever subagent transcript the user was
  *   reading, the same card in every agent view;
+ * - a *read-only history* view (`detach`) is the same situation one step
+ *   further out: the user selected a session no process can host (another
+ *   workspace's, whose directory may be gone), the window paints its history,
+ *   and the foreground session's frames and snapshots must not repaint over it;
  * - `mirror_sync` snapshots must not repaint it either, which read as "view
  *   transcript switched me to the wrong session";
  * - a claim carries a token, so a response that resolves after a newer claim
@@ -56,7 +60,7 @@ export function isTranscriptEvent(type) {
 }
 
 export function createTranscriptView() {
-  let owner = null; // { kind: "live" | "agent", file: string | null }
+  let owner = null; // { kind: "live" | "agent" | "history", file: string | null }
   let token = 0;
 
   return {
@@ -81,13 +85,46 @@ export function createTranscriptView() {
       owner = null;
       token += 1;
     },
+    /**
+     * Keep the view, give up its *ownership*: the surface stays on the file it
+     * already drew, but the foreground session's live frames and snapshot
+     * repaints must leave it alone.
+     *
+     * For a selection whose session no process can host (the archived-session
+     * freeze: a foreign workspace that no longer exists), the window renders
+     * that session's history read-only and must say so before the read starts —
+     * otherwise the process's next snapshot repaints over it. Unlike
+     * `claimAgent` this does not bump the token: the surface is the same view,
+     * so a tail-first hydration already in flight keeps loading earlier
+     * entries when the reader scrolls up.
+     */
+    detach() {
+      if (owner?.kind === "live") owner = { kind: "history", file: owner.file };
+    },
+    /** The inverse of {@link detach}: this view is the live session after all. */
+    reattach() {
+      if (owner?.kind === "history") owner = { kind: "live", file: owner.file };
+    },
     /** True while a read-only agent transcript owns the transcript. */
     get active() {
       return owner?.kind === "agent";
     },
-    /** The agent file on screen, or null. */
+    /**
+     * True while the surface holds something other than the live session — a
+     * subagent peek or a read-only history view. Callers that must not paint
+     * the foreground session into the current view (snapshot repaints, the
+     * compaction line) ask this; `active` remains the "is this a peek?" test.
+     */
+    get detached() {
+      return Boolean(owner) && owner.kind !== "live";
+    },
+    /** Owner kind: "live" | "agent" | "history" | null. */
+    get kind() {
+      return owner?.kind ?? null;
+    },
+    /** The non-live file on screen, or null. */
     get file() {
-      return owner?.kind === "agent" ? owner.file : null;
+      return owner && owner.kind !== "live" ? owner.file : null;
     },
     /**
      * The newest claim's token.
@@ -106,7 +143,7 @@ export function createTranscriptView() {
     },
     /** True when the current owner wants this live event kept off screen. */
     suppresses(type) {
-      return this.active && TRANSCRIPT_EVENTS.has(type);
+      return this.detached && TRANSCRIPT_EVENTS.has(type);
     },
   };
 }

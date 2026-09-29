@@ -799,6 +799,17 @@ impl OmpManager {
         let static_dir = strip_verbatim_prefix(&self.static_dir.to_string_lossy());
         let cwd = strip_verbatim_prefix(cwd);
 
+        // A process cannot be started in a directory that no longer exists, and
+        // the OS error for that ("The directory name is invalid", os error 267
+        // on Windows) says nothing about *which* directory or why it is asked
+        // for. This case is real: sessions are resumed from their recorded cwd
+        // (`spawn_session_dedicated`), and a session recorded under a deleted
+        // temp workspace is one sidebar click away. Name it here so the window
+        // can report something actionable.
+        if !cwd.trim().is_empty() && !std::path::Path::new(&cwd).is_dir() {
+            return Err(format!("Session workspace directory does not exist: {cwd}"));
+        }
+
         // We treat a missing embedded-server extension as a hard error
         // rather than continuing to spawn omp without `--extension`. Without
         // the extension, omp runs as a plain RPC process with no

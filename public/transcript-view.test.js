@@ -107,6 +107,47 @@ describe("createTranscriptView", () => {
     expect(view.isCurrent(peek)).toBe(true);
   });
 
+  test("detach() keeps the view and its token but gives up ownership", () => {
+    // A selected session no process can host (another workspace's, whose
+    // directory is gone) is drawn read-only: the live session's frames and
+    // snapshots must leave it alone, and the tail-first hydration that is
+    // already loading earlier entries must keep working — so the token stays.
+    const view = createTranscriptView();
+    const token = view.claimLive(SESSION_FILE);
+    view.detach();
+    expect(view.isCurrent(token)).toBe(true);
+    expect(view.detached).toBe(true);
+    expect(view.kind).toBe("history");
+    expect(view.file).toBe(SESSION_FILE);
+    expect(view.suppresses("message_end")).toBe(true);
+    expect(view.suppresses("extension_ui_request")).toBe(false);
+    // Not a peek: the Agent-Hub-specific callers test `active`.
+    expect(view.active).toBe(false);
+
+    view.reattach();
+    expect(view.detached).toBe(false);
+    expect(view.suppresses("message_end")).toBe(false);
+  });
+
+  test("detach() is a no-op for a view that is not the live session", () => {
+    const view = createTranscriptView();
+    view.claimAgent(AGENT_FILE);
+    view.detach();
+    expect(view.kind).toBe("agent");
+    view.reattach();
+    expect(view.kind).toBe("agent");
+  });
+
+  test("a new claim clears a detached view", () => {
+    const view = createTranscriptView();
+    view.claimLive(SESSION_FILE);
+    view.detach();
+    view.claimLive(AGENT_FILE);
+    expect(view.detached).toBe(false);
+    expect(view.kind).toBe("live");
+    expect(view.suppresses("message_update")).toBe(false);
+  });
+
   test("end() invalidates an in-flight claim without an owner", () => {
     const view = createTranscriptView();
     const token = view.claimAgent(AGENT_FILE);

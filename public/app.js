@@ -63,7 +63,7 @@ import {
 } from "./session-resync.js";
 import { findPortForSession, getWorkspacePathForPort } from "./session-routing.js";
 import { SessionSidebar } from "./session-sidebar.js";
-import { SessionSwitchGate, sameWorkspacePath } from "./session-switch.js";
+import { planSessionHosting, SESSION_HOSTING, SessionSwitchGate } from "./session-switch.js";
 import { createConfigSubnav } from "./settings-config-subnav.js";
 import {
   clearSettingsSaveMessage,
@@ -676,8 +676,10 @@ function openSessionFromFile(sessionFile, kind = null) {
     return;
   }
   // Nothing to do while the live transcript is already on screen: repainting
-  // from a snapshot mid-run would detach the streaming element.
-  if (transcriptView.active) returnToLiveTranscript(sessionFile);
+  // from a snapshot mid-run would detach the streaming element. Any *other*
+  // read-only view (a subagent peek, a foreign session's history) is dropped
+  // instead — this button means "show me the live one".
+  if (transcriptView.detached) returnToLiveTranscript(sessionFile);
 }
 
 /** Drop the read-only peek and let the runtime repaint its own transcript. */
@@ -1552,8 +1554,9 @@ function handleCompactionStart(event = null) {
   setStatusIndicatorState("streaming");
   setStatusText(t("status.compacting"));
   // The header is not part of the transcript surface; the indicator line is,
-  // so a read-only peek must not receive it.
-  if (!transcriptView.active) renderCompactionIndicator();
+  // so a read-only view (a peek or a foreign session's history) must not
+  // receive it.
+  if (!transcriptView.detached) renderCompactionIndicator();
   startCompactionTicker();
 }
 
@@ -1599,7 +1602,7 @@ function handleCompactionEnd(event = null) {
   if (!unchanged && applied && tokensBefore > 0) {
     line += ` · ${formatTokenCount(tokensBefore)} → ${formatTokenCount(lastInputTokens)}`;
   }
-  if (indicator && !transcriptView.active) {
+  if (indicator && !transcriptView.detached) {
     // The ticking label is replaced by the outcome, in place.
     setCompactionLabel(indicator, line);
     indicator.classList.add(unchanged ? "compaction-skipped" : "compaction-done");
@@ -1610,7 +1613,7 @@ function handleCompactionEnd(event = null) {
   // screen — measured on a real pass: N entries in, N+1 out), so the only
   // difference a commit makes is this one item. Repainting instead cost seconds
   // on a large transcript and left the reader at a different scroll position.
-  if (!unchanged && !transcriptView.active) {
+  if (!unchanged && !transcriptView.detached) {
     const entry = event?.compactionEntry;
     if (entry && typeof entry === "object") {
       const drawn = messageRenderer.renderCompaction({
@@ -3812,7 +3815,13 @@ async function resetUiForNewSession() {
     liveInstances.find((i) => i?.port === foregroundPort)?.sessionFile ||
     null;
   cancelPendingPromptRefreshes();
-  // A new chat is a live session view: drop any read-only agent transcript.
+  // A new chat moves the process to a session this window has not asked for:
+  // any switch still waiting to be confirmed is moot, and leaving it armed
+  // swallowed every snapshot of the new session (the "clicked New Chat and the
+  // window stayed blank" half of the archived-session freeze).
+  sessionSwitchGate.cancel();
+  // A new chat is a live session view: drop any read-only agent transcript or
+  // foreign-session history view.
   transcriptView.end();
   state.reset();
   messageRenderer.clear();
@@ -4030,6 +4039,11 @@ async function confirmMirrorSwitch(sessionFile) {
   if (!confirmed) {
     logSessionRoute("switch:unconfirmed", { selectedSession: sessionFile });
     messageRenderer.renderError(t("session.switchUnconfirmed"));
+    // The gate is clear again, so the process's next snapshot applies — but an
+    // idle process sends none on its own, which would leave the screen on a
+    // transcript the runtime is not on. Ask once so the window converges on
+    // whatever session the process actually holds.
+    wsClient.send({ type: "mirror_sync_request" });
   } else if (!compactionHoldActive()) {
     setStatusText(authoritativeStatusText());
   }
@@ -4146,6 +4160,52 @@ async function handleSessionSelectImpl(session, project) {
       showTypingIndicator(false);
     }
     updateUI();
+
+    // How this session can be shown, decided *before* anything is sent. The
+    // rules live in session-switch.js (`planSessionHosting`) with the evidence
+    // behind them; in short: an in-place `switch_session` aborts whatever turn
+    // the process is running, and omp refuses a target recorded under another
+    // workspace — so a busy process, or a foreign session, may never be
+    // switched in place. The window's own `isStreaming` flag can be stale (a
+    // selection whose switch never landed resets it while the process keeps
+    // running), so the registry's verdict for this window's process is ORed in.
+    const sessionCwd = session.cwd || project?.path || "";
+    const ownInstance = liveInstances.find((instance) => instance.port === foregroundPort);
+    const processStreaming = Boolean(ownInstance?.isStreaming) || wasStreaming;
+    const planHosting = (spawnFailed) =>
+      planSessionHosting({
+        sessionFile: session.filePath,
+        sessionCwd,
+        workspacePath: getCurrentWorkspacePath(),
+        liveInstance: Boolean(targetLiveInstance),
+        processStreaming,
+        spawnAvailable: Boolean(transport.spawnSessionProcess),
+        spawnFailed,
+      });
+    const deferUntilIdle = () => {
+      // The run in this process has to end before an in-place switch is safe;
+      // until then this session's history stays on screen read-only.
+      logSessionRoute("select:deferred-until-idle", {
+        selectedSession: session.filePath,
+        processStreaming,
+      });
+      pendingSessionSwitchPath = session.filePath;
+      updateUI();
+      if (isMobile()) {
+        sidebarEl.classList.add("collapsed");
+        sidebarOverlay.classList.remove("visible");
+      }
+    };
+    const plan = planHosting(false);
+    // Unless this is a plain in-place switch (or a session some process already
+    // hosts), the surface about to show this session's history is *not* the live
+    // session's: the window's process keeps running a different one while a
+    // dedicated process spawns (or while the switch waits), and its snapshots
+    // must not repaint over what the user is reading. A successful spawn hands
+    // ownership back (`reattach`); a plan that ends read-only keeps it detached.
+    if (plan !== SESSION_HOSTING.IN_PLACE && plan !== SESSION_HOSTING.LIVE) {
+      transcriptView.detach();
+    }
     await renderSelectedSessionHistory(session, project, viewToken);
 
     if (targetLiveInstance) {
@@ -4153,6 +4213,7 @@ async function handleSessionSelectImpl(session, project) {
         selectedSession: session.filePath,
         targetPort: targetLiveInstance.port,
       });
+      transcriptView.reattach();
       mirrorActiveSessionFile = session.filePath;
       viewingActiveSession = true;
       updateMirrorInputState();
@@ -4164,32 +4225,29 @@ async function handleSessionSelectImpl(session, project) {
       return;
     }
 
-    // Only a process whose workspace matches the session's own cwd can switch
-    // to it in place — omp cancels `switch_session` across a cwd change (18.3.2
-    // answers `cancelled: true` and stays on the old session). A streaming run
-    // also needs its own process so the active agent is not interrupted. Both
-    // cases resume the session in a dedicated process (`omp --session <file>`),
-    // which then owns the foreground port.
-    const sessionCwd = session.cwd || project?.path || "";
-    const needsOwnProcess =
-      wasStreaming ||
-      (Boolean(sessionCwd) && !sameWorkspacePath(sessionCwd, getCurrentWorkspacePath()));
-
-    if (needsOwnProcess && transport.spawnSessionProcess) {
+    if (plan === SESSION_HOSTING.SPAWN) {
       let targetPort = null;
+      let spawnError = "";
       try {
         targetPort = await transport.spawnSessionProcess(
           session.filePath,
           sessionCwd || getCurrentWorkspacePath(),
         );
       } catch (e) {
-        console.error("[App] Failed to spawn session process:", e);
+        spawnError = e?.message || String(e);
+        console.error("[App] Failed to spawn session process:", spawnError);
+        logSessionRoute("select:spawn-failed", {
+          selectedSession: session.filePath,
+          cwd: sessionCwd,
+          error: spawnError,
+        });
       }
       if (targetPort != null) {
         logSessionRoute("select:spawned-dedicated", {
           selectedSession: session.filePath,
           targetPort,
         });
+        transcriptView.reattach();
         foregroundPort = targetPort;
         portSessionMap.set(targetPort, session.filePath);
         wsClient.setRoutingContext({
@@ -4205,20 +4263,24 @@ async function handleSessionSelectImpl(session, project) {
         }
         return;
       }
-      if (wasStreaming) {
-        // Fallback: defer the switch until the current agent run ends.
-        // This preserves the old safe behavior when spawn is unavailable or fails.
-        pendingSessionSwitchPath = session.filePath;
-        updateUI();
-        if (isMobile()) {
-          sidebarEl.classList.add("collapsed");
-          sidebarOverlay.classList.remove("visible");
-        }
+      const fallback = planHosting(true);
+      if (fallback === SESSION_HOSTING.HISTORY) {
+        showReadOnlyHistoryView(session, { sessionCwd, reason: spawnError });
         return;
       }
-      // A cross-workspace spawn failure falls through to the in-place switch so
-      // the confirmation reports the failure honestly instead of leaving the
-      // rendered history looking like a live session.
+      if (fallback === SESSION_HOSTING.DEFER) {
+        deferUntilIdle();
+        return;
+      }
+      // Not reachable from the plans that spawn (they fall back to `history` or
+      // `defer`), kept as the safety net: same workspace and an idle process is
+      // the one case where switching in place is correct.
+    } else if (plan === SESSION_HOSTING.HISTORY) {
+      showReadOnlyHistoryView(session, { sessionCwd });
+      return;
+    } else if (plan === SESSION_HOSTING.DEFER) {
+      deferUntilIdle();
+      return;
     }
 
     try {
@@ -4245,6 +4307,44 @@ async function handleSessionSelectImpl(session, project) {
     sidebarEl.classList.add("collapsed");
     sidebarOverlay.classList.remove("visible");
   }
+}
+
+/**
+ * Adopt a read-only view of a session this window's process cannot host.
+ *
+ * The case that reported as "the GUI froze and the agent was interrupted":
+ * the archived/favourites sidebar groups collect sessions from *every* project
+ * directory, so a session recorded under a workspace that no longer exists (a
+ * deleted temp workspace, a moved folder) is one click away. It cannot be
+ * resumed in this window's process (omp refuses a target recorded under another
+ * cwd) and it cannot get its own process either (`omp` cannot start with a
+ * `current_dir` that is gone), so the honest answer is the transcript, read-only
+ * — never a `switch_session` that would abort the running turn and then not
+ * happen at all.
+ *
+ * @param {{filePath: string}} session - the selected session
+ * @param {{sessionCwd?: string, reason?: string}} [options] - why it is not live
+ */
+function showReadOnlyHistoryView(session, { sessionCwd = "", reason = "" } = {}) {
+  logSessionRoute("select:readonly-history", {
+    selectedSession: session.filePath,
+    sessionCwd: sessionCwd || null,
+    reason: reason || null,
+    rendered: renderedTranscriptFile,
+  });
+  // The transcript is already on screen. Keep the view — its earlier-entries
+  // hydration must keep working — but detach it from the live session so the
+  // process's snapshots and frames leave it alone, and say why the composer is
+  // read-only instead of leaving that to the placeholder alone.
+  transcriptView.detach();
+  viewingActiveSession = false;
+  updateMirrorInputState();
+  showTransientStatus(
+    reason
+      ? t("session.liveOpenFailed", { error: reason })
+      : t("session.readonlyForeign", { cwd: sessionCwd || getCurrentWorkspacePath() || "?" }),
+    8000,
+  );
 }
 
 async function renderSelectedSessionHistory(session, project, viewToken = null) {
@@ -4477,6 +4577,19 @@ async function handleMirrorSync(data) {
   }
   sessionSwitchGate.settle(snapshotSessionFile);
 
+  // The session we were waiting to switch to has just answered with its own
+  // snapshot: the live view is back on screen, so a read-only history view of
+  // exactly this file (a foreign-workspace selection that a dedicated process
+  // did end up hosting, or a deferred switch that has now landed) hands
+  // ownership back to it.
+  if (
+    transcriptView.kind === "history" &&
+    snapshotSessionFile &&
+    snapshotSessionFile === transcriptView.file
+  ) {
+    transcriptView.reattach();
+  }
+
   console.log("[Mirror] Received state snapshot:", data.entries?.length, "entries");
   isMirrorMode = true;
 
@@ -4506,6 +4619,12 @@ async function handleMirrorSync(data) {
   state.setStreaming(isStreaming);
   showTypingIndicator(isStreaming);
   setForegroundStreaming(liveFile, isStreaming);
+  // A read-only history view (a session this process cannot host) owns the
+  // composer state: whatever this snapshot says about the session it describes,
+  // the window is not showing that session, so it must not read as "the live
+  // session is on screen, type here". The input area is what enforces it (its
+  // `mirror-readonly` class), applied right here.
+  if (transcriptView.kind === "history") viewingActiveSession = false;
   updateMirrorInputState();
   updateMirrorLiveIndicator();
   updateUI();
@@ -4545,14 +4664,16 @@ async function handleMirrorSync(data) {
     return;
   }
 
-  // A read-only agent transcript is on screen: this snapshot describes the
-  // foreground session, and repainting the transcript with it is exactly the
-  // "view transcript switched me to the wrong session" the Agent Hub used to
-  // show. Routing/model/streaming state above still applies — only the
+  // A read-only view is on screen — an agent transcript peek, or the history of
+  // a session this process cannot host (another workspace's). This snapshot
+  // describes the foreground session, and repainting the transcript with it is
+  // exactly the "view transcript switched me to the wrong session" the Agent Hub
+  // used to show. Routing/model/streaming state above still applies — only the
   // transcript repaint is skipped.
-  if (transcriptView.active) {
-    logSessionRoute("mirrorSync:keep-agent-peek", {
-      peeked: transcriptView.file,
+  if (transcriptView.detached) {
+    logSessionRoute("mirrorSync:keep-detached", {
+      view: transcriptView.kind,
+      viewed: transcriptView.file,
       snapshot: data.sessionFile || null,
     });
     updateCostDisplay();
@@ -4571,11 +4692,11 @@ async function handleMirrorSync(data) {
       entries: data.entries?.length || 0,
       totalEntries: data.totalEntries ?? null,
       rendered: renderedTranscriptFile,
-      peeking: transcriptView.active,
+      view: transcriptView.kind,
     });
     if (!sidebar.activeSessionFile && hasAnySessionsLoaded()) {
       renderWorkspaceWelcome();
-    } else if (!transcriptView.active && renderedTranscriptFile !== snapshotSessionFile) {
+    } else if (renderedTranscriptFile !== snapshotSessionFile) {
       await hydrateTranscriptFromRuntime(snapshotSessionFile);
     }
     updateCostDisplay();
@@ -4749,7 +4870,8 @@ async function renderSessionHistory(
       role: entry?.message?.role ?? null,
       ts: entry?.message?.timestamp ?? null,
     })),
-    peeking: transcriptView.active ? transcriptView.file : null,
+    view: transcriptView.kind,
+    viewing: transcriptView.file,
   });
   // Entry→renderer mapping lives in session-resync.js so the palette
   // "Resync transcript" action re-renders exactly like history loads.
@@ -6105,7 +6227,9 @@ const debugPanel = createDebugPanel({
     isStreaming: Boolean(state?.isStreaming),
     language: getLanguage?.() ?? null,
     userAgent: globalThis.navigator?.userAgent ?? null,
-    peekingAgentTranscript: transcriptView.active ? transcriptView.file : null,
+    transcriptView: transcriptView.kind
+      ? { kind: transcriptView.kind, file: transcriptView.file }
+      : null,
   }),
 });
 

@@ -28,9 +28,24 @@
  * happened (or was still happening) while the window had already given up.
  * These are a ceiling, not a delay: the gate returns the moment the matching
  * snapshot lands, and a newer selection supersedes the wait.
+ *
+ * The ceiling is *also* the length of the freeze it can cause, which is why it
+ * is 15 s and not the two minutes it used to be: while a switch is pending,
+ * every snapshot of the foreground session is dropped (that is the gate's job),
+ * so a switch that can never land — omp refuses a target recorded under another
+ * workspace, and a process that died mid-request answers nothing at all — left
+ * the window looking frozen for two full minutes, with every later selection
+ * queued behind it (selections are serialized) and replayed afterwards. A
+ * switch that *can* land answers this fast: a live process answers the
+ * `mirror_sync_request` in well under a second (measured 27–170 ms on sessions
+ * of 1866–6552 entries), and a pass that holds the switch up is waited out
+ * *before* it is sent (`waitForCompactionEnd` in app.js).
  */
-const DEFAULT_ATTEMPTS = 240;
+const DEFAULT_ATTEMPTS = 30;
 const DEFAULT_INTERVAL_MS = 500;
+
+/** Total time a pending switch may suppress the foreground session's snapshots. */
+export const SWITCH_CONFIRM_BUDGET_MS = DEFAULT_ATTEMPTS * DEFAULT_INTERVAL_MS;
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -119,6 +134,84 @@ export class SessionSwitchGate {
     this.cancel();
     return false;
   }
+}
+
+/**
+ * How a selected session can be shown. Decided before anything is sent, so the
+ * window never reaches for a host that cannot serve the session:
+ *
+ * - `live`     — a running omp process already has this session; attach to it.
+ * - `spawn`    — resume it in a dedicated process (`omp --session <file>`).
+ * - `in-place` — switch the window's own process; only safe when that process
+ *                is idle *and* the session was recorded under its workspace.
+ * - `defer`    — wait for the process's run to end, then switch in place.
+ * - `history`  — render the transcript read-only; no process can host it.
+ *
+ * Why the distinctions matter (verified against omp 18.4.2 and the debug
+ * bundles of the archived-session freeze):
+ *
+ * - `AgentSession.switchSession` calls `abort({goalReason:"internal"})` *before*
+ *   it loads the target, so an in-place switch kills whatever turn the process
+ *   is running. A switch omp then refuses still leaves the turn dead: in the
+ *   reported trace the process flipped `isStreaming` false right as the switch
+ *   frame was written (10.72 s) and broadcast no `message_end`/`agent_end`
+ *   for the rest of the capture. Hence: never in place while the process is
+ *   busy — spawn, or defer.
+ * - omp does not switch to a target whose recorded `cwd` differs from the
+ *   process's (verified live on 18.3.2 — `cancelled: true`, the session does
+ *   not change; in the reported trace the process kept its session after the
+ *   frame was written), so a foreign session can never be hosted in place. It
+ *   only appears in this window's sidebar because the archived/favourites
+ *   groups collect sessions from every project directory — including ones whose
+ *   workspace directory has since been deleted (temp workspaces), which is also
+ *   why the dedicated spawn fails there (`omp` cannot start with a dead
+ *   `current_dir`). The honest answer for that case is the read-only
+ *   transcript, not a switch that will not happen.
+ */
+export const SESSION_HOSTING = {
+  LIVE: "live",
+  SPAWN: "spawn",
+  IN_PLACE: "in-place",
+  DEFER: "defer",
+  HISTORY: "history",
+};
+
+/**
+ * Decide how to show `sessionFile`.
+ *
+ * @param {object} input
+ * @param {string|null} input.sessionFile - session being selected
+ * @param {string} [input.sessionCwd] - the session's recorded workspace
+ * @param {string} [input.workspacePath] - the window's foreground workspace
+ * @param {boolean} [input.liveInstance] - a live process already has it
+ * @param {boolean} [input.processStreaming] - the window's process is running
+ * @param {boolean} [input.spawnAvailable] - can this client spawn a process?
+ * @param {boolean} [input.spawnFailed] - a spawn was attempted and failed
+ * @returns {string} one of {@link SESSION_HOSTING}
+ */
+export function planSessionHosting({
+  sessionFile = null,
+  sessionCwd = "",
+  workspacePath = "",
+  liveInstance = false,
+  processStreaming = false,
+  spawnAvailable = true,
+  spawnFailed = false,
+} = {}) {
+  if (liveInstance) return SESSION_HOSTING.LIVE;
+  if (!sessionFile) return SESSION_HOSTING.HISTORY;
+  const foreign = Boolean(sessionCwd) && !sameWorkspacePath(sessionCwd, workspacePath);
+  if (foreign) {
+    // Cannot be hosted in this process, ever: its workspace is not ours.
+    if (spawnFailed || !spawnAvailable) return SESSION_HOSTING.HISTORY;
+    return SESSION_HOSTING.SPAWN;
+  }
+  if (processStreaming) {
+    // An in-place switch would abort the run; a dedicated process keeps it.
+    if (spawnFailed || !spawnAvailable) return SESSION_HOSTING.DEFER;
+    return SESSION_HOSTING.SPAWN;
+  }
+  return SESSION_HOSTING.IN_PLACE;
 }
 
 /**

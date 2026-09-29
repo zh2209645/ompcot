@@ -593,6 +593,10 @@ export const en = {
   "session.compactingWait":
     "This session is compacting — it will open as soon as the compaction finishes…",
   "session.switchUnconfirmed": "Session switch was not confirmed by the running OMP.",
+  "session.readonlyForeign":
+    "This session belongs to another workspace ({{cwd}}) and cannot be opened live here — showing history read-only.",
+  "session.liveOpenFailed":
+    "Showing history read-only — this session could not be opened live: {{error}}",
   "session.messageMatches": "Message matches",
   "session.matchCount": "{count} matches",
   "session.untitled": "Untitled",

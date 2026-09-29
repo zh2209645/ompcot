@@ -579,6 +579,9 @@ export const zhCN = {
   "session.loadFailedRuntime": "加载会话失败。OMP 运行时可能不可用。",
   "session.compactingWait": "该会话正在压缩 — 压缩完成后会自动打开…",
   "session.switchUnconfirmed": "运行中的 OMP 未确认会话切换。",
+  "session.readonlyForeign":
+    "该会话属于另一个工作区（{{cwd}}），无法在此实时打开 — 仅以只读方式显示历史记录。",
+  "session.liveOpenFailed": "仅以只读方式显示历史记录 — 无法实时打开该会话：{{error}}",
   "session.messageMatches": "消息匹配",
   "session.matchCount": "{count} 个匹配",
   "session.untitled": "未命名",
