@@ -232,9 +232,10 @@ const messageRenderer = new MessageRenderer(document.getElementById("messages"),
   follow: transcriptFollow,
 });
 const toolCardRenderer = new ToolCardRenderer(document.getElementById("messages"), {
-  // A re-render must draw a still-running call with its live status, not as
-  // "Done" (see ToolCardRenderer#statusLookup).
-  statusLookup: (toolCallId) => state.getToolExecution(toolCallId)?.status ?? null,
+  // A re-render must draw a still-running call with its live status, and a
+  // settled one with the output the live path already showed — the session
+  // file's result entry can land later (see ToolCardRenderer#liveLookup).
+  liveLookup: (toolCallId) => state.getToolExecution(toolCallId) ?? null,
   follow: transcriptFollow,
 });
 // Every WebSocket frame in both directions feeds the debug buffer (summarized:
@@ -1130,6 +1131,66 @@ wsClient.addEventListener("commandResponse", (e) => {
   messageRenderer.renderError(detail.error || "Message not delivered");
 });
 
+// The native RPC lane's two answers (the broker now relays them from omp's
+// stdout — see `relay_native_frame`): a *terminal status* for the prompts this
+// window writes to the process's stdin (slashes, rewind — paths the extension's
+// WS never sees), and the runtime's own settle verdict.
+//
+// Port identity first: the broker broadcasts every process's frames to every
+// window, and a background instance finishing its own prompt must not touch
+// this window's run.
+function isForegroundFrame(detail) {
+  const port = detail?.port ?? detail?.sourcePort;
+  if (typeof port !== "number") return true; // no identity: treat as ours
+  if (typeof foregroundPort !== "number") return true;
+  return port === foregroundPort;
+}
+
+wsClient.addEventListener("promptResult", (e) => {
+  const detail = e.detail || {};
+  if (!isForegroundFrame(detail)) return;
+  debugLog.log("run.prompt-result", {
+    id: detail.id ?? null,
+    status: detail.status ?? null,
+    agentInvoked: detail.agentInvoked ?? null,
+    sessionSettled: detail.sessionSettled ?? null,
+  });
+  // The compaction dispatch this window is watching for: the runtime's word on
+  // it is definitive, so the pending window ends here rather than on its timer.
+  if (detail.id && detail.id === pendingCompactionPromptId) {
+    pendingCompactionPromptId = null;
+    pendingCompaction.settle(detail.status === "error" ? null : "skipped");
+  }
+  if (detail.status === "error") {
+    // A command that failed before reaching the agent has no other reporter:
+    // its frames never existed, so without this the window showed nothing.
+    const message = detail.error?.message || detail.error || "Command failed";
+    showTransientStatus(String(message), 6000);
+  }
+  if (detail.sessionSettled === true) settleFromRuntime("prompt-result");
+});
+
+wsClient.addEventListener("sessionSettled", (e) => {
+  if (!isForegroundFrame(e.detail)) return;
+  settleFromRuntime("rpc-settled");
+});
+
+/**
+ * Settle the run on the runtime's own verdict.
+ *
+ * Both callers are authoritative in a way no frame the GUI derives on its own
+ * is: `session_settled` is the RPC mode's settle watcher (idle, nothing queued,
+ * no background work that could wake the session) and `prompt_result.
+ * sessionSettled` is the same predicate at the end of a prompt. It covers the
+ * one case the local heuristics cannot: a non-terminal `agent_end` whose wake
+ * never comes (omp 18.3.3's `awaitingAsyncWork`), which otherwise held
+ * "Waiting…" and the streaming composer until the 8 s silence fallback.
+ */
+function settleFromRuntime(source) {
+  if (!state.isStreaming) return;
+  settleFinishedRun({ liveFile: getCurrentLiveSessionFile(), source });
+}
+
 // Mirror mode: receive full state snapshot on connect
 wsClient.addEventListener("mirrorSync", (e) => {
   // The handler paints the transcript in time-sliced chunks and can outlive a
@@ -1265,6 +1326,20 @@ function handleRPCEvent(event) {
     case "extension_error":
       messageRenderer.renderError(`Extension error: ${event.error}`);
       break;
+    case "credential_disabled": {
+      // The account was auto-disabled (quota drained, token rejected) — the run
+      // continues on a fallback model or fails, with no other explanation on
+      // screen. The frame carries the account identity and the captured cause,
+      // so the bubble names both instead of only saying something went wrong.
+      const account = event.email || event.accountId || event.orgName || event.orgId || "";
+      const reason = event.disabledCause ? ` (${event.disabledCause})` : "";
+      messageRenderer.renderError(
+        `${t("status.credentialDisabled", { provider: event.provider || t("status.error") })}${
+          account ? ` — ${account}` : ""
+        }${reason}`,
+      );
+      break;
+    }
     case "session_name":
       // Auto-title: update sidebar with new session name
       if (event.name) {
@@ -1325,6 +1400,16 @@ const pendingCompaction = createPendingCompaction({
     handleCompactionEnd({ skipped: true });
   },
 });
+
+/**
+ * The RPC prompt id of the `/compact` this window dispatched, while its pending
+ * window is open.
+ *
+ * The runtime answers every prompt written to its stdin with `prompt_result`,
+ * correlated by that id (the broker relays it — see `relay_native_frame`), so
+ * the window can end on the command's own outcome instead of on its timer.
+ */
+let pendingCompactionPromptId = null;
 
 /**
  * Session the compaction in flight belongs to.
@@ -2936,8 +3021,13 @@ function sendSlashViaUpstream(message, { timeoutMs = 30000 } = {}) {
       // A `/compact` the runtime accepted but never acknowledged with a
       // compaction frame is the builtin's silent no-op (see
       // public/compaction-pending.js): watch for it, so "the command did
-      // nothing" reads as a skip instead of as nothing at all.
-      if (ok && isCompactionCommand(message)) pendingCompaction.arm();
+      // nothing" reads as a skip instead of as nothing at all. The prompt id is
+      // recorded so the command's own `prompt_result` can end the window the
+      // moment the runtime says the command finished.
+      if (ok && isCompactionCommand(message)) {
+        pendingCompactionPromptId = requestId;
+        pendingCompaction.arm();
+      }
       resolve(
         ok
           ? { ok: true, data: detail.data ?? null }

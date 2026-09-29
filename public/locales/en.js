@@ -437,6 +437,7 @@ export const en = {
   "status.rewinding": "Rewinding...",
   "status.rewound": "Rewound — edit and resend",
   "status.commandFailed": "Command failed: {error}",
+  "status.credentialDisabled": "{provider} account was disabled — sign in again to keep using it",
 
   // ── extension UI request dialogs ──
   "uiRequest.autoCancelIn": "Auto-cancels in {seconds}s",

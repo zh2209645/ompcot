@@ -33,9 +33,18 @@ export function createPendingCompaction({ onStart, onSkip, timeoutMs = 5000 }) {
         onSkip();
       }, timeoutMs);
     },
-    /** A real compaction took over (or reported an outcome): stop watching. */
-    settle() {
+    /**
+     * A real compaction took over (or reported an outcome): stop watching.
+     *
+     * `outcome: "skipped"` is the same decision the timer would have made, taken
+     * the moment the runtime says the command finished: a `/compact` whose
+     * `prompt_result` arrived while no compaction frame ever did is the
+     * builtin's silent no-op, and waiting out the rest of the window only delays
+     * the line the user is owed.
+     */
+    settle(outcome = null) {
       clear();
+      if (outcome === "skipped") onSkip();
     },
     /** True while a dispatched command is still unacknowledged. */
     get pending() {

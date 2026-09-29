@@ -428,6 +428,7 @@ export const zhCN = {
   "status.rewinding": "正在撤回...",
   "status.rewound": "已撤回 — 可编辑后重新发送",
   "status.commandFailed": "命令执行失败：{error}",
+  "status.credentialDisabled": "{provider} 账号已被停用 — 请重新登录后再继续使用",
 
   // ── 扩展 UI 请求对话框 ──
   "uiRequest.autoCancelIn": "{seconds} 秒后自动取消",

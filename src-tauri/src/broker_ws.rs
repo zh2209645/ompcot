@@ -691,6 +691,29 @@ impl BrokerWs {
         self.broadcast(&message);
     }
 
+    /// Relay a frame read from an omp process's *native RPC stdout* to the UI
+    /// clients, in the standard `broker_event` envelope.
+    ///
+    /// The stream is a different lane from the upstream WS (it answers the
+    /// frames this broker writes to the child's stdin), but the frames are the
+    /// same wire protocol and the frontend sets its routing context on
+    /// `sourcePort`, so the envelope is what makes them indistinguishable from
+    /// a forwarded extension frame — which is exactly the point: `prompt_result`
+    /// was already handled by the WS client (`websocket-client.js`) and had no
+    /// producer until this lane existed.
+    pub fn relay_native_frame(&self, port: u16, frame: Value) {
+        let message = json!({
+            "type": "broker_event",
+            "protocolVersion": PROTOCOL_VERSION,
+            "workspaceId": Value::Null,
+            "sessionId": Value::Null,
+            "sourcePort": port,
+            "payload": frame,
+        })
+        .to_string();
+        self.broadcast(&message);
+    }
+
     fn wrap_upstream_message(&self, port: u16, text: &str) -> Option<String> {
         let Ok(payload) = serde_json::from_str::<Value>(text) else {
             return None;
@@ -989,6 +1012,46 @@ mod tests {
             .as_str()
             .expect("message must be a string")
             .contains("47821"));
+    }
+
+    #[test]
+    fn native_rpc_frames_reach_clients_in_the_broker_envelope() {
+        // The frontend only unwraps `broker_event` payloads (and sets its
+        // per-port routing from `sourcePort`), so a native stdout frame has to
+        // ride the same envelope as a forwarded extension frame — that is what
+        // makes `prompt_result` / `session_settled` indistinguishable from the
+        // answers the WS path already handled.
+        let broker = BrokerWs {
+            port: 49001,
+            inner: Arc::new(BrokerInner::default()),
+        };
+        let (tx, mut rx) = mpsc::channel::<String>(CHANNEL_CAPACITY);
+        broker.inner.ui_clients.lock().unwrap().insert(9, tx);
+
+        broker.relay_native_frame(
+            47821,
+            json!({
+                "type": "prompt_result",
+                "id": "ompcot-cmd-1",
+                "agentInvoked": true,
+                "status": "completed",
+                "sessionSettled": true,
+            }),
+        );
+        broker.relay_native_frame(47821, json!({ "type": "session_settled" }));
+
+        let first: Value =
+            serde_json::from_str(&rx.try_recv().expect("prompt_result must be relayed")).unwrap();
+        assert_eq!(first["type"], "broker_event");
+        assert_eq!(first["sourcePort"], 47821);
+        assert_eq!(first["payload"]["type"], "prompt_result");
+        assert_eq!(first["payload"]["id"], "ompcot-cmd-1");
+        assert_eq!(first["payload"]["sessionSettled"], true);
+
+        let second: Value =
+            serde_json::from_str(&rx.try_recv().expect("session_settled must be relayed")).unwrap();
+        assert_eq!(second["payload"]["type"], "session_settled");
+        assert_eq!(second["sourcePort"], 47821);
     }
 
     #[test]

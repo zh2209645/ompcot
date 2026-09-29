@@ -210,4 +210,17 @@ describe("runtimeSettled", () => {
       }),
     ).toBe(false);
   });
+
+  it("counts a queued steer / follow-up as about to resume", () => {
+    // `isRpcSessionSettled` also requires `queuedMessageCount === 0`: the queue
+    // drains into a new turn, so publishing "settled" for it cleared the run
+    // mark in the gap before that turn's `agent_start`.
+    expect(runtimeSettled(true, null, true)).toBe(false);
+    expect(
+      runtimeSettled(true, { running: [], delivery: { queued: 0, pendingJobIds: [] } }, true),
+    ).toBe(false);
+    // A build whose ctx lacks `hasPendingMessages` (older than the surface, or
+    // a torn-down ctx the caller read defensively) reports undefined -> false.
+    expect(runtimeSettled(true, null, false)).toBe(true);
+  });
 });

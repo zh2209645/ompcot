@@ -487,8 +487,23 @@ export class WebSocketClient extends EventTarget {
         // (`prompt_upstream`): `{id, agentInvoked, status: completed|error|aborted,
         // sessionSettled}`. Slash commands and the rewind command report through
         // this frame — without the case it fell into the unknown-type warning on
-        // every native prompt.
+        // every native prompt. The port identifies the process that answered, so
+        // a frame from a background instance cannot settle the foreground run.
+        if (message.port == null && route?.sourcePort != null) {
+          message = { ...message, port: route.sourcePort };
+        }
         this.dispatchEvent(new CustomEvent("promptResult", { detail: message }));
+        break;
+      case "session_settled":
+        // The runtime's own "this session is quiet" verdict, emitted once per
+        // stretch of activity (omp 18.3.1+, RPC mode's settle watcher): the last
+        // run yielded and nothing queued or in flight can wake it. Distinct from
+        // a terminal `agent_end`, which only means one run yielded — this is the
+        // one signal that cannot be faked by a pause whose wake never comes.
+        if (message.port == null && route?.sourcePort != null) {
+          message = { ...message, port: route.sourcePort };
+        }
+        this.dispatchEvent(new CustomEvent("sessionSettled", { detail: message }));
         break;
       case "mirror_sync":
         // Do NOT call setRoutingContext here. The broker broadcasts every

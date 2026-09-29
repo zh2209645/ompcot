@@ -19,6 +19,10 @@
  *   alias) are external too: extensions only `import type` from them, but we
  *   still mark them external defensively in case any value-level imports are
  *   added later — the omp runtime provides those at load time.
+ * - `@oh-my-pi/pi-utils/postmortem.js` (rejection containment, imported via a
+ *   runtime-resolved specifier string) needs no external entry: esbuild cannot
+ *   resolve a computed specifier, so the bundle keeps the dynamic import and
+ *   the host resolves it at load time.
  * - Output is `.mjs` (ESM). omp's extension loader treats the module's
  *   `export default` as the factory function. Bundling as CJS hides the
  *   default behind `module.exports.default`, which jiti does not unwrap, so

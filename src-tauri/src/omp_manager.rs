@@ -28,6 +28,115 @@ pub struct OmpManager {
     config_dir: PathBuf,
 }
 
+/// Receives `(port, frame)` for every interesting native RPC stdout frame.
+pub type FrameSink = Arc<dyn Fn(u16, serde_json::Value) + Send + Sync>;
+
+/// Where the frames omp emits on its *native RPC stdout* go, per port.
+///
+/// The broker speaks the native protocol's write half only (frames on the
+/// child's stdin); its stdout used to be dropped outright, which threw away the
+/// two answers the GUI has no other source for: `prompt_result` (the terminal
+/// status of a prompt written to that stdin — every slash command and the
+/// rewind command) and `session_settled` (the runtime's own "this session is
+/// quiet" verdict, omp 18.3.1+). Installed once by `main.rs`, which owns the
+/// broker that fans these frames out to the windows — hence a process-global
+/// and not a per-manager field: every process this manager spawns, now and
+/// later, reads the same sink, and it is set before the first spawn.
+static FRAME_SINK: OnceLock<FrameSink> = OnceLock::new();
+
+/// Install the receiver for the interesting native RPC stdout frames.
+pub fn set_frame_sink(sink: FrameSink) {
+    if FRAME_SINK.set(sink).is_err() {
+        log::warn!("[ompcot] rpc frame sink already installed; keeping the first one");
+    }
+}
+
+/// Largest stdout line this reader will buffer.
+///
+/// The two frames this lane keeps are small (a status, an error message), while
+/// the same stream also carries frames with whole tool outputs in them — the
+/// reader must not hold megabytes per line to find the small ones. A longer
+/// line is dropped and the reader resynchronizes on the next newline.
+const RPC_FRAME_MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
+
+/// The frame types worth relaying from omp's native RPC stdout, or `None`.
+///
+/// Deliberately narrow: agent/message/tool events already reach the windows
+/// through the embedded server's WS with the identity (entry ids, tool call
+/// ids) the renderers key on, and forwarding the raw RPC copies of them would
+/// double every frame and reintroduce the duplicate-element bugs that identity
+/// work fixed. Only the answers that exist *nowhere else* cross this lane.
+pub fn interesting_rpc_frame(line: &str) -> Option<serde_json::Value> {
+    // The stream is dominated by streaming deltas (measured on 18.4.2: ~1230
+    // `message_update` lines for one short run). A substring check costs a scan
+    // of a line we were going to parse anyway and skips the JSON parse for
+    // everything else, which is what keeps this reader cheap enough to run on
+    // every spawned process.
+    if !line.contains("prompt_result") && !line.contains("session_settled") {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    match value.get("type").and_then(|t| t.as_str()) {
+        Some("prompt_result") | Some("session_settled") => Some(value),
+        _ => None,
+    }
+}
+
+/// Read one process's native RPC stdout and hand the interesting frames to
+/// `sink`, draining everything else.
+///
+/// Draining is not optional: the child writes its whole RPC stream here, and an
+/// unread pipe eventually blocks it mid-run.
+fn read_rpc_frames<R: std::io::BufRead>(port: u16, mut reader: R, sink: Option<FrameSink>) {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // process closed its stdout
+            Ok(_) => {}
+            Err(err) => {
+                log::warn!("[ompcot] rpc stdout read failed for port {}: {}", port, err);
+                break;
+            }
+        }
+        if line.len() > RPC_FRAME_MAX_LINE_BYTES {
+            log::debug!(
+                "[ompcot] rpc stdout frame on port {} exceeded {} bytes; skipped",
+                port,
+                RPC_FRAME_MAX_LINE_BYTES
+            );
+            continue;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(frame) = interesting_rpc_frame(trimmed) else {
+            continue;
+        };
+        if let Some(sink) = sink.as_ref() {
+            sink(port, frame);
+        }
+    }
+    log::debug!("[ompcot] rpc stdout reader for port {} finished", port);
+}
+
+/// Start the stdout reader above on its own thread.
+fn spawn_rpc_frame_reader(port: u16, stdout: std::process::ChildStdout) {
+    let sink = FRAME_SINK.get().cloned();
+    let reader = std::io::BufReader::new(stdout);
+    let spawn_result = std::thread::Builder::new()
+        .name(format!("omp-rpc-frames-{}", port))
+        .spawn(move || read_rpc_frames(port, reader, sink));
+    if let Err(err) = spawn_result {
+        log::warn!(
+            "[ompcot] failed to start the rpc stdout reader for port {}: {}",
+            port,
+            err
+        );
+    }
+}
+
 struct EmbeddedExtensionResolution {
     path: String,
     /// Tag describing which candidate matched, for diagnostic logging.
@@ -757,9 +866,11 @@ impl OmpManager {
             // cannot derive this reliably on its own.
             .env("OMPCOT_OMP_BIN", &pi_bin_str)
             .stdin(Stdio::piped())
-            // Drop stdout: omp emits RPC frames on it that we don't consume here, and
-            // letting it fill an unread pipe would eventually block the child.
-            .stdout(Stdio::null())
+            // Read stdout instead of dropping it: the native RPC lane's answers
+            // (`prompt_result`, `session_settled`) arrive here and nowhere else
+            // — see `spawn_rpc_frame_reader`, which drains the stream so the
+            // child can never block on a full pipe.
+            .stdout(Stdio::piped())
             // Inherit stderr so omp's startup/runtime errors are visible in the same
             // terminal running `bun run dev` — critical for diagnosing failures of
             // new_session / open_workspace that would otherwise be silent.
@@ -784,6 +895,11 @@ impl OmpManager {
             .stdin
             .take()
             .ok_or_else(|| "Failed to get pi stdin".to_string())?;
+        // Take stdout before the process is parked in the table: the reader owns
+        // it for the life of the child (and exits when the pipe closes).
+        if let Some(stdout) = child.stdout.take() {
+            spawn_rpc_frame_reader(port, stdout);
+        }
 
         let mut lock = self.processes.lock().unwrap();
         lock.insert(port, OmpProcess { child, stdin });
@@ -1015,6 +1131,83 @@ mod tests {
     use std::fs;
     use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn the_reader_relays_only_the_answers_and_drains_everything_else() {
+        // The reader owns the child's stdout for its whole life: it must drain
+        // every line (an unread pipe stalls the process mid-run) while handing
+        // the sink nothing but the two frames — once each, with the right port.
+        use std::io::Cursor;
+        let stream = concat!(
+            "{\"type\":\"ready\",\"protocolVersion\":1}\n",
+            "{\"type\":\"message_update\",\"message\":{\"role\":\"assistant\"}}\n",
+            "{\"type\":\"session_settled\"}\n",
+            "{\"type\":\"command_output\",\"text\":\"Compaction complete.\"}\n",
+            "{\"type\":\"prompt_result\",\"id\":\"p1\",\"status\":\"completed\",\"sessionSettled\":true}\n",
+            "not json\n",
+            "{\"type\":\"prompt_result\",\"id\":\"p2\",\"status\":\"error\"}\n",
+        );
+        let seen: Arc<Mutex<Vec<(u16, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        read_rpc_frames(
+            47821,
+            Cursor::new(stream.as_bytes()),
+            Some(Arc::new(move |port, frame| {
+                let type_name = frame["type"].as_str().unwrap_or("?");
+                let id = frame.get("id").and_then(|v| v.as_str()).unwrap_or("-");
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((port, format!("{type_name}:{id}")));
+            })),
+        );
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                (47821, "session_settled:-".to_string()),
+                (47821, "prompt_result:p1".to_string()),
+                (47821, "prompt_result:p2".to_string()),
+            ]
+        );
+
+        // Without a sink the reader still drains the stream (no panic, no
+        // early exit) — that is the state before `main.rs` installs one.
+        read_rpc_frames(47821, Cursor::new(stream.as_bytes()), None);
+    }
+
+    #[test]
+    fn only_the_two_answers_cross_the_native_rpc_lane() {
+        // The lane exists for the frames the extension WS cannot produce: the
+        // terminal status of a prompt written to the child's stdin and the
+        // runtime's settle verdict. Everything else on that stream (agent
+        // events, command output, ui requests) already reaches the windows with
+        // renderer identity through the embedded server, and forwarding it here
+        // would double every frame.
+        let prompt_result = r#"{"id":"rw1","type":"prompt_result","agentInvoked":false,"status":"completed","sessionSettled":true}"#;
+        let settled = r#"{"type":"session_settled"}"#;
+        assert!(interesting_rpc_frame(prompt_result).is_some());
+        assert!(interesting_rpc_frame(settled).is_some());
+        let kept = interesting_rpc_frame(prompt_result).unwrap();
+        assert_eq!(kept["status"], "completed");
+        assert_eq!(kept["sessionSettled"], true);
+
+        for noise in [
+            r#"{"type":"ready","protocolVersion":1}"#,
+            r#"{"type":"command_output","text":"Compaction complete."}"#,
+            r#"{"type":"extension_ui_request","method":"setWidget"}"#,
+            r#"{"type":"message_update","message":{"role":"assistant"}}"#,
+            // Passes the substring pre-filter but is not one of the two frames:
+            // the parse decides, never the mention.
+            r#"{"type":"turn_end","message":{"content":[{"type":"text","text":"the agent will emit prompt_result and session_settled"}]}}"#,
+            "not json at all",
+            "",
+            "[]",
+        ] {
+            assert!(interesting_rpc_frame(noise).is_none(), "leaked: {noise}");
+        }
+    }
 
     /// Unique temp dir under the system temp dir, mirroring the helper in
     /// main.rs tests. Callers clean up with `fs::remove_dir_all`.

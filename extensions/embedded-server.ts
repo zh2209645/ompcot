@@ -532,6 +532,13 @@ export function mergeInstanceEntry(
  * `snapshot` is `ctx.getAsyncJobSnapshot()`, the only leg of the host's
  * `hasPendingAsyncWork()` an extension can read; `null` (no job manager, or an
  * older build without the surface) means nothing visible can wake it.
+ * `pendingMessages` is `ctx.hasPendingMessages()` — the host's own
+ * `queuedMessageCount === 0` leg, which an extension *can* read and which the
+ * predicate above also requires: a steer or follow-up still sitting in the
+ * agent's queue is a run about to resume, so publishing `false` for it cleared
+ * the sidebar's mark in the gap between the drain's first frame and its
+ * `agent_start` (the queued message's own `message_start` is what the window
+ * sees first, so the two readers disagreed for that window).
  *
  * Exported for tests.
  */
@@ -544,8 +551,10 @@ export function runtimeSettled(
       }
     | null
     | undefined,
+  pendingMessages = false,
 ): boolean {
   if (!idle) return false;
+  if (pendingMessages) return false;
   if (!snapshot) return true;
   const running = Array.isArray(snapshot.running) ? snapshot.running.length : 0;
   const delivery = snapshot.delivery ?? null;
@@ -561,6 +570,287 @@ export function runStateHintForEvent(eventType: string, event: unknown): boolean
     (event as { willContinue?: unknown } | null | undefined)?.willContinue === true;
   return willContinue;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Contained background work (timers, unhandled rejections)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// omp dispatches *handlers* inside a try/catch, so a throw from one is an
+// extension error. Two kinds of work this server owns run outside that
+// isolation and are process-fatal when they fail:
+//
+//   - a raw `setInterval` / `setTimeout` callback runs on a fresh stack, its
+//     throw surfaces as a process-level `uncaughtException`, and omp's
+//     postmortem handler exits the process (`extensibility/extensions/
+//     managed-timers.ts` documents exactly this, issue #5664);
+//   - a rejected promise nobody awaits goes through the same handler as an
+//     unhandled rejection, and omp exits there too (the manual-compaction
+//     freeze in v0.8.18 was that path).
+//
+// Either one kills the whole workspace — the session, the agent queue, the WS
+// server, every window on the port — for a bug the GUI could have degraded
+// past. Two mitigations, both keyed on omp's own surfaces:
+
+/** Extension-context slice the contained-timer helpers need (omp ≥18.1). */
+export type TimerContextLike =
+  | {
+      setInterval?: (callback: () => void, ms?: number) => unknown;
+      setTimeout?: (callback: () => void, ms?: number) => unknown;
+    }
+  | null
+  | undefined;
+
+/**
+ * Wrap a timer callback so its failure is reported instead of fatal.
+ *
+ * The host's `ctx.setInterval` / `ctx.setTimeout` already contain a throw or a
+ * rejected promise (through `ManagedTimers`), but only when the surface is
+ * present — this wrapper makes the guarantee independent of it, and names the
+ * failure as coming from a timer rather than from an anonymous stack. An async
+ * callback is contained too: the rejection is marked so omp's own fatal handler
+ * downgrades it (see {@link markContainedFailure}) and reported here.
+ */
+export function containedTimerCallback(
+  kind: "interval" | "timeout",
+  callback: () => unknown,
+  onFailure: (kind: "interval" | "timeout", error: unknown) => void,
+): () => void {
+  return () => {
+    try {
+      const result = callback();
+      if (result && typeof (result as PromiseLike<unknown>).then === "function") {
+        void Promise.resolve(result).catch((err: unknown) => {
+          markContainedFailure(err);
+          onFailure(kind, err);
+        });
+      }
+    } catch (err: unknown) {
+      onFailure(kind, err);
+    }
+  };
+}
+
+/**
+ * Record a failure a contained timer swallowed.
+ *
+ * The process survives, but whatever that timer drives silently stops working
+ * — so the evidence goes to the debug buffer (the bundle a user exports for a
+ * rendering bug) as well as the console.
+ */
+export function reportContainedTimerFailure(kind: "interval" | "timeout", error: unknown): void {
+  recordDebug("timer.error", {
+    kind,
+    message: errMessage(error),
+    stack: error instanceof Error ? (error.stack || "").split("\n").slice(0, 3).join(" | ") : null,
+  });
+  console.error(`[Embedded] ${kind} callback failed (contained):`, errMessage(error));
+}
+
+/**
+ * `ctx.setInterval` when the live context exposes it, a raw interval otherwise.
+ *
+ * The managed handle is `unref`'d and cleared by the host on session teardown,
+ * which is why the process-scoped intervals are re-armed on every
+ * `session_start` / `session_switch` (see `rearmProcessTimers`). Both handle
+ * kinds are plain Node timers, so `clearInterval` / `clearTimeout` clear
+ * either.
+ */
+export function containedInterval(
+  ctx: TimerContextLike,
+  callback: () => unknown,
+  ms: number,
+  onFailure: (kind: "interval" | "timeout", error: unknown) => void,
+): NodeJS.Timeout {
+  const guarded = containedTimerCallback("interval", callback, onFailure);
+  if (ctx && typeof ctx.setInterval === "function") {
+    try {
+      return ctx.setInterval(guarded, ms) as NodeJS.Timeout;
+    } catch {
+      /* fall through to a raw interval */
+    }
+  }
+  const handle = setInterval(guarded, ms);
+  handle.unref?.();
+  return handle;
+}
+
+/** One-shot counterpart of {@link containedInterval}. */
+export function containedTimeout(
+  ctx: TimerContextLike,
+  callback: () => unknown,
+  ms: number,
+  onFailure: (kind: "interval" | "timeout", error: unknown) => void,
+): NodeJS.Timeout {
+  const guarded = containedTimerCallback("timeout", callback, onFailure);
+  if (ctx && typeof ctx.setTimeout === "function") {
+    try {
+      return ctx.setTimeout(guarded, ms) as NodeJS.Timeout;
+    } catch {
+      /* fall through to a raw timeout */
+    }
+  }
+  const handle = setTimeout(guarded, ms);
+  handle.unref?.();
+  return handle;
+}
+
+/**
+ * Whether a rejection belongs to *this* bundle.
+ *
+ * The stack of an error raised inside the embedded server names its file, so a
+ * rejection nothing awaited can be told apart from one omp's own internals
+ * raised. Only the former is claimed (see `installRejectionContainment`): a
+ * rejection we cannot prove is ours keeps travelling to omp's fatal path,
+ * because swallowing an unknown failure of the host's own machinery would hide
+ * a real bug rather than contain a GUI one.
+ */
+export function isOwnRejection(reason: unknown, marker: string): boolean {
+  if (typeof marker !== "string" || marker.length === 0) return false;
+  const stack = reason instanceof Error ? reason.stack : undefined;
+  if (typeof stack !== "string") return false;
+  return stack.includes(marker);
+}
+
+/**
+ * This bundle's file stem ("embedded-server"), the stack marker that identifies
+ * a rejection as raised inside this server (see {@link isOwnRejection}).
+ */
+const SELF_STACK_MARKER = (() => {
+  try {
+    const base = path.basename(new URL(import.meta.url).pathname || "");
+    return base.replace(/\.[^.]*$/, "") || "embedded-server";
+  } catch {
+    return "embedded-server";
+  }
+})();
+
+/**
+ * The well-known key omp's fatal handlers consult before tearing the process
+ * down, self-declared rather than imported.
+ *
+ * `@oh-my-pi/pi-utils/postmortem.ts` marks the key with `Symbol.for` **so the
+ * marker survives duplicate module instances across bundles/realms** — which is
+ * exactly this extension's situation: it lives outside omp's package tree, so
+ * importing the host's module gets a *second* instance whose process handlers
+ * and interceptor set the host's own handler never consults. Probed on 18.4.2:
+ * an extension that imported the module and registered an interceptor still had
+ * its process killed by the host's copy of the handler, while the marker set on
+ * the same rejection is honoured by both. The marker also needs no import at
+ * all — the symbol registry is global — so this works on every build that has
+ * the seam, and does nothing on one that does not.
+ */
+const EXPECTED_CLEANUP_MARKER = Symbol.for("omp.expectedCleanupError");
+
+/**
+ * Mark a failure as this server's contained cleanup artifact.
+ *
+ * The host's fatal handler then downgrades it to a log line ("Ignoring expected
+ * cleanup rejection") instead of exiting — the difference between a GUI bug and
+ * a dead workspace that looks frozen (transcript stops updating, prompts sit in
+ * the queue, no session switch is ever confirmed).
+ */
+export function markContainedFailure(reason: unknown): boolean {
+  if (reason === null || (typeof reason !== "object" && typeof reason !== "function")) {
+    return false;
+  }
+  try {
+    Reflect.set(reason, EXPECTED_CLEANUP_MARKER, true);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The `process` slice {@link installRejectionContainment} needs. */
+export type RejectionListenerHost = {
+  prependListener?: (event: "unhandledRejection", listener: (reason: unknown) => void) => unknown;
+  listenerCount?: (event: "unhandledRejection") => number;
+};
+
+/**
+ * Contain this extension's unhandled rejections before omp treats them as fatal.
+ *
+ * A rejected promise nobody awaited — an unawaited broadcast, a registry
+ * rewrite racing a delete, a session read after a switch — reaches the host's
+ * global handler, which exits the process (the manual-compaction freeze in
+ * v0.8.18 was that path). The listener installed here runs *first*
+ * (`prependListener`, so it precedes the handler the host registered at
+ * startup), marks the rejection as contained, and reports it; the host's own
+ * handler then sees the marker and keeps the process alive.
+ *
+ * Only rejections provably raised in this bundle are marked (see
+ * {@link isOwnRejection}): an unknown failure of the host's own machinery keeps
+ * its fatal path, because containing it would hide a real bug rather than a
+ * GUI one.
+ *
+ * Exported for tests.
+ */
+export function installRejectionContainment(options: {
+  /** Stack marker identifying this bundle (see {@link isOwnRejection}). */
+  marker: string;
+  /** Called for every rejection that was contained instead of fatal. */
+  onContained?: (reason: unknown) => void;
+  /** Listener host; defaults to `process`. */
+  host?: RejectionListenerHost;
+  /** Called when no listener could be installed. */
+  onUnavailable?: (error: unknown) => void;
+}): boolean {
+  const host: RejectionListenerHost = options.host ?? process;
+  if (typeof host.prependListener !== "function") {
+    options.onUnavailable?.(new Error("prependListener unavailable"));
+    return false;
+  }
+  // Only worth installing when somebody else is already listening: adding the
+  // first listener would *suppress* the runtime's own default reporting for
+  // every rejection in the process, including the ones we deliberately leave
+  // alone. In the host we run in, omp's postmortem handler is always there.
+  if (typeof host.listenerCount === "function" && host.listenerCount("unhandledRejection") === 0) {
+    options.onUnavailable?.(new Error("no host unhandledRejection handler"));
+    return false;
+  }
+  try {
+    host.prependListener("unhandledRejection", (reason: unknown) => {
+      if (!isOwnRejection(reason, options.marker)) return;
+      markContainedFailure(reason);
+      options.onContained?.(reason);
+    });
+    return true;
+  } catch (err: unknown) {
+    options.onUnavailable?.(err);
+    return false;
+  }
+}
+
+/**
+ * The omp events this server forwards verbatim to every connected window.
+ *
+ * Exported for tests: the list *is* the wire contract (the frontend's event
+ * switch consumes these types), and a type may only leave it by deleting the
+ * consumer in `public/app.js` first.
+ */
+export const FORWARDED_EVENT_TYPES = [
+  "agent_start",
+  "agent_end",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "auto_compaction_start",
+  "auto_compaction_end",
+  "auto_retry_start",
+  "auto_retry_end",
+  "session_branch",
+  // An account's credential was disabled (quota drained, token rejected). omp
+  // fixed these sign-outs going unannounced in 18.3.1; in the GUI they were
+  // still silent — the session keeps running on a fallback model, or fails with
+  // no explanation of why. The payload is small and JSON-safe
+  // (`{provider, disabledCause, credentialId?, email?, accountId?, orgId?}`).
+  "credential_disabled",
+] as const;
 
 /**
  * One row of the Agent Hub roster, as sent to the GUI (`list_agents`).
@@ -1110,6 +1400,25 @@ type EmbeddedServerGlobal = {
   clients: Set<UnifiedWS>;
   heartbeatTimer: NodeJS.Timeout | null;
   activityReconcileTimer: NodeJS.Timeout | null;
+  /**
+   * Re-arm the two process-scoped intervals against the ctx of the session
+   * that just started.
+   *
+   * `ctx.setInterval` handles belong to their session: the host clears them
+   * when that session is torn down (`clearManagedTimers` on session dispose),
+   * which is exactly what a reload-model `new_session` / `fork` does — while
+   * this process-scoped state keeps the *old* handle, so the "already armed"
+   * guard would leave the run-state audit (and the WS client reaper) stopped
+   * for the rest of the process's life. Published by `onListening`, where both
+   * arming functions live; `null` before the server ever listened.
+   */
+  rearmProcessTimers: (() => void) | null;
+  /**
+   * One-shot guard for the process-wide unhandled-rejection containment (see
+   * `installRejectionContainment`): the extension is reloaded on every session
+   * swap, and each reload must not stack another listener.
+   */
+  rejectionContainmentInstalled: boolean;
   localUrl: string;
   lanUrl: string;
   // Re-published by every extension instance on session_start so the
@@ -2257,30 +2566,43 @@ function runOmpCliCaptured(
     };
 
     if (typeof timeoutMs === "number" && timeoutMs > 0) {
-      setTimeout(() => {
-        timedOut = true;
-        // F8: take down the child AND its process tree. A bare SIGTERM +
-        // resolve-on-close could hang forever when the child (or one of its
-        // descendants, e.g. a browser helper spawned by an OAuth flow)
-        // ignores the signal or inherits a leaked pipe.
-        killChildTree(child, false);
-        // Escalate to a forced kill after the grace window.
-        escalateTimer = setTimeout(() => killChildTree(child, true), CLI_KILL_GRACE_MS);
-        // Hard bound: resolve within ~CLI_FINALIZE_BOUND_MS of the timeout
-        // no matter what the OS reports. After that we no longer care
-        // about the child: detach pipes and unref it so a straggler can't
-        // pin the event loop (the `close` listener still fires whenever it
-        // finally exits, and the settled guard makes that a no-op).
-        boundTimer = setTimeout(() => {
-          detachStreams();
-          try {
-            child.unref();
-          } catch {}
-          finish(null);
-        }, CLI_FINALIZE_BOUND_MS);
-        escalateTimer.unref?.();
-        boundTimer.unref?.();
-      }, timeoutMs);
+      containedTimeout(
+        null,
+        () => {
+          timedOut = true;
+          // F8: take down the child AND its process tree. A bare SIGTERM +
+          // resolve-on-close could hang forever when the child (or one of its
+          // descendants, e.g. a browser helper spawned by an OAuth flow)
+          // ignores the signal or inherits a leaked pipe.
+          killChildTree(child, false);
+          // Escalate to a forced kill after the grace window.
+          escalateTimer = containedTimeout(
+            null,
+            () => killChildTree(child, true),
+            CLI_KILL_GRACE_MS,
+            reportContainedTimerFailure,
+          );
+          // Hard bound: resolve within ~CLI_FINALIZE_BOUND_MS of the timeout
+          // no matter what the OS reports. After that we no longer care
+          // about the child: detach pipes and unref it so a straggler can't
+          // pin the event loop (the `close` listener still fires whenever it
+          // finally exits, and the settled guard makes that a no-op).
+          boundTimer = containedTimeout(
+            null,
+            () => {
+              detachStreams();
+              try {
+                child.unref();
+              } catch {}
+              finish(null);
+            },
+            CLI_FINALIZE_BOUND_MS,
+            reportContainedTimerFailure,
+          );
+        },
+        timeoutMs,
+        reportContainedTimerFailure,
+      );
     }
 
     child.stdout?.on("data", (chunk: Buffer) => append(chunk));
@@ -2385,6 +2707,8 @@ function getOrCreateGlobalState(): EmbeddedServerGlobal {
       clients: new Set<UnifiedWS>(),
       heartbeatTimer: null,
       activityReconcileTimer: null,
+      rearmProcessTimers: null,
+      rejectionContainmentInstalled: false,
       localUrl: "",
       lanUrl: "",
       handleCommand: null,
@@ -2463,6 +2787,39 @@ export default function (omp: ExtensionAPI) {
 
   // Store latest context reference for use in command handlers
   let latestCtx: ExtensionContext | null = null;
+
+  // The ctx whose managed-timer surface this instance may use. Read live (not
+  // captured): a session swap re-binds the extension to a new ctx, and a
+  // captured one would be torn down with its session.
+  function timerCtx(): TimerContextLike {
+    return globalState.getLatestCtx?.() ?? latestCtx;
+  }
+
+  // Process-scoped, idempotent across extension reloads: claim our own
+  // unhandled rejections (see `installRejectionContainment`) so a missed
+  // `.catch()` in this server's bookkeeping degrades to a logged error instead
+  // of taking the workspace down with it.
+  if (!globalState.rejectionContainmentInstalled) {
+    globalState.rejectionContainmentInstalled = installRejectionContainment({
+      marker: SELF_STACK_MARKER,
+      onContained: (reason: unknown) => {
+        recordDebug("rejection.contained", {
+          message: errMessage(reason),
+          stack:
+            reason instanceof Error
+              ? (reason.stack || "").split("\n").slice(0, 3).join(" | ")
+              : null,
+        });
+        console.error("[Embedded] Unhandled rejection contained:", errMessage(reason));
+      },
+      onUnavailable: (error: unknown) => {
+        // Not fatal, and not worth a debug-bundle slot beyond the load path:
+        // without the seam the process behaves exactly as it did before.
+        console.error("[Embedded] Unhandled-rejection containment unavailable:", errMessage(error));
+      },
+    });
+  }
+
   // The compaction this process believes is in flight (see
   // nextCompactionLifecycle): `auto_compaction_*` covers only the automatic
   // path, so the manual ones are tracked from `session.compacting` /
@@ -2594,21 +2951,32 @@ export default function (omp: ExtensionAPI) {
     }
   }
 
-  function ensureActivityReconcile() {
-    if (globalState.activityReconcileTimer) return;
-    const timer = setInterval(() => {
-      const ctx = globalState.getLatestCtx?.() ?? latestCtx;
-      if (!ctx) return;
-      const sessionFile = currentSessionIdFromCtx(ctx) || "";
-      const isStreaming = sampleStreaming(ctx);
-      // A sample that is still inside the idle-debounce window publishes
-      // nothing: the stored flag stays as the last trustworthy value said.
-      if (isStreaming === undefined) return;
-      if (readStoredActivityPair() === `${sessionFile}|${isStreaming}`) return;
-      instanceActivityPair = `${sessionFile}|${isStreaming}`;
-      patchInstanceEntry({ sessionFile, isStreaming });
-    }, ACTIVITY_RECONCILE_MS);
-    timer.unref?.();
+  function ensureActivityReconcile(force = false) {
+    if (globalState.activityReconcileTimer) {
+      if (!force) return;
+      // Whatever the previous session owned: a managed handle the host already
+      // cleared is harmless to clear again, and a raw one must not be left
+      // running beside its replacement.
+      clearInterval(globalState.activityReconcileTimer);
+      globalState.activityReconcileTimer = null;
+    }
+    const timer = containedInterval(
+      timerCtx(),
+      () => {
+        const ctx = globalState.getLatestCtx?.() ?? latestCtx;
+        if (!ctx) return;
+        const sessionFile = currentSessionIdFromCtx(ctx) || "";
+        const isStreaming = sampleStreaming(ctx);
+        // A sample that is still inside the idle-debounce window publishes
+        // nothing: the stored flag stays as the last trustworthy value said.
+        if (isStreaming === undefined) return;
+        if (readStoredActivityPair() === `${sessionFile}|${isStreaming}`) return;
+        instanceActivityPair = `${sessionFile}|${isStreaming}`;
+        patchInstanceEntry({ sessionFile, isStreaming });
+      },
+      ACTIVITY_RECONCILE_MS,
+      reportContainedTimerFailure,
+    );
     globalState.activityReconcileTimer = timer;
   }
 
@@ -2627,8 +2995,14 @@ export default function (omp: ExtensionAPI) {
     try {
       // The runtime's settled verdict, not just `isIdle()`: a session paused on
       // background work is *not* idle, but once that work is gone nothing can
-      // wake it and the run is over (see `runtimeSettled`).
-      idle = runtimeSettled(ctx.isIdle(), ctx.getAsyncJobSnapshot?.() ?? null);
+      // wake it and the run is over (see `runtimeSettled`). A queued steer /
+      // follow-up counts the same way — the host's own predicate treats it as
+      // "about to resume" (`get_state.isSettled`, `session_settled`).
+      idle = runtimeSettled(
+        ctx.isIdle(),
+        ctx.getAsyncJobSnapshot?.() ?? null,
+        ctx.hasPendingMessages?.() === true,
+      );
     } catch {
       return undefined; // torn-down ctx: the next instance re-publishes its bindings
     }
@@ -2727,7 +3101,15 @@ export default function (omp: ExtensionAPI) {
     if (direct) return direct;
     for (let attempt = 1; attempt < ENTRY_ID_RESOLVE_ATTEMPTS; attempt++) {
       const { promise, resolve } = Promise.withResolvers<void>();
-      setTimeout(resolve, ENTRY_ID_RESOLVE_DELAY_MS);
+      // Contained for uniformity with the other deferrals: the retry then runs
+      // `ctx.sessionManager` reads against a session that may be being swapped,
+      // and nothing here may reach the process-fatal path.
+      containedTimeout(
+        timerCtx(),
+        () => resolve(),
+        ENTRY_ID_RESOLVE_DELAY_MS,
+        reportContainedTimerFailure,
+      );
       await promise;
       const retried = resolveMessageEntryId(ctx, event);
       if (retried) return retried;
@@ -3218,24 +3600,7 @@ export default function (omp: ExtensionAPI) {
   // ═══════════════════════════════════════
   // Event forwarding — subscribe to all OMP events
   // ═══════════════════════════════════════
-  const eventTypes = [
-    "agent_start",
-    "agent_end",
-    "turn_start",
-    "turn_end",
-    "message_start",
-    "message_update",
-    "message_end",
-    "tool_execution_start",
-    "tool_execution_update",
-    "tool_execution_end",
-    "auto_compaction_start",
-    "auto_compaction_end",
-    "auto_retry_start",
-    "auto_retry_end",
-    "session_branch",
-  ] as const;
-
+  //
   // Cache the process-scoped ModelRegistry the first time we see any ctx.
   // See the EmbeddedServerGlobal.modelRegistry comment for why this is
   // process-scoped (and why gating auth handlers on latestCtx was wrong).
@@ -3352,7 +3717,11 @@ export default function (omp: ExtensionAPI) {
     return run;
   }
 
-  for (const eventType of eventTypes) {
+  // Every type in `FORWARDED_EVENT_TYPES` is broadcast verbatim as
+  // `{type:"event", event:{type, ...payload}}` and dispatched by
+  // `public/app.js`'s event switch; the constant is exported so a test guards
+  // the wire contract instead of the list guarding itself.
+  for (const eventType of FORWARDED_EVENT_TYPES) {
     omp.on(
       eventType as Parameters<typeof omp.on>[0],
       async (event: unknown, ctx: ExtensionContext) => {
@@ -8137,10 +8506,15 @@ export default function (omp: ExtensionAPI) {
           let pendingEmit: NodeJS.Timeout | null = null;
           const unsubscribe = registry.onChange(() => {
             if (pendingEmit) return;
-            pendingEmit = setTimeout(() => {
-              pendingEmit = null;
-              broadcast({ type: "event", event: { type: "agents_changed" } });
-            }, AGENTS_CHANGED_THROTTLE_MS);
+            pendingEmit = containedTimeout(
+              timerCtx(),
+              () => {
+                pendingEmit = null;
+                broadcast({ type: "event", event: { type: "agents_changed" } });
+              },
+              AGENTS_CHANGED_THROTTLE_MS,
+              reportContainedTimerFailure,
+            );
           });
           if (typeof unsubscribe === "function") {
             globalState.agentsChangeSubscribed = true;
@@ -8253,27 +8627,39 @@ export default function (omp: ExtensionAPI) {
     // (see onListening) and guard against double-start across extension
     // reloads — a process-global interval that outlives a failed listen is a
     // leak and reaps against a client set that can never fill.
-    function ensureHeartbeat() {
-      if (globalState.heartbeatTimer) return;
-      globalState.heartbeatTimer = setInterval(() => {
-        for (const client of globalState.clients) {
-          if (client.readyState !== WS_OPEN) {
-            globalState.clients.delete(client);
-            continue;
-          }
-          if (!client.isAlive) {
+    function ensureHeartbeat(force = false) {
+      if (globalState.heartbeatTimer) {
+        if (!force) return;
+        // A managed handle was already cleared by the host when its session was
+        // disposed; clearing again is a no-op, and a raw one must not survive
+        // its replacement (see `rearmProcessTimers`).
+        clearInterval(globalState.heartbeatTimer);
+        globalState.heartbeatTimer = null;
+      }
+      globalState.heartbeatTimer = containedInterval(
+        timerCtx(),
+        () => {
+          for (const client of globalState.clients) {
+            if (client.readyState !== WS_OPEN) {
+              globalState.clients.delete(client);
+              continue;
+            }
+            if (!client.isAlive) {
+              try {
+                client.terminate();
+              } catch {}
+              globalState.clients.delete(client);
+              continue;
+            }
+            client.isAlive = false;
             try {
-              client.terminate();
+              client.ping();
             } catch {}
-            globalState.clients.delete(client);
-            continue;
           }
-          client.isAlive = false;
-          try {
-            client.ping();
-          } catch {}
-        }
-      }, 20000);
+        },
+        20000,
+        reportContainedTimerFailure,
+      );
     }
 
     // ─── Path A: Bun runtime ─────────────────────────────────────────────
@@ -8491,6 +8877,13 @@ export default function (omp: ExtensionAPI) {
     function onListening(port: number) {
       ensureHeartbeat(); // audit A7: only after the listen actually succeeded
       ensureActivityReconcile(); // registry self-heal, process-scoped like the heartbeat
+      // Both intervals above are process-scoped, but a managed handle dies with
+      // the session that armed it — publish the re-arm so every later
+      // `session_start` / `session_switch` restarts them (see the field doc).
+      globalState.rearmProcessTimers = () => {
+        ensureHeartbeat(true);
+        ensureActivityReconcile(true);
+      };
       const localHost = isLoopbackHost(BIND_HOST) ? BIND_HOST : "127.0.0.1";
       globalState.localUrl = `http://${localHost}:${port}`;
       const lanUrls = buildLanUrls(port);
@@ -8720,6 +9113,12 @@ export default function (omp: ExtensionAPI) {
     // answering "No active session" (dead prompts, dead Agent Hub).
     if (isChildAgentSession(ctx)) return;
     startServer(ctx);
+    // The host clears `ctx`-managed timers when their session is disposed, so
+    // the intervals the *previous* session armed (run-state audit, WS client
+    // reaper) are gone by now while the process-scoped handles still name them
+    // — re-arm against this session's ctx. `null` before the first listen,
+    // where `onListening` arms them itself.
+    globalState.rearmProcessTimers?.();
 
     // Push a fresh state snapshot to every already-connected client.
     //
@@ -8764,6 +9163,11 @@ export default function (omp: ExtensionAPI) {
     // broadcast: after a reload-model swap (new_session/fork on builds that do
     // reload) a stale instance's ctx is the previous session.
     if (globalState.buildStateSnapshot !== buildStateSnapshot) return;
+    // Same re-arm as `session_start`: an in-place switch keeps this instance
+    // but disposes the session whose ctx armed the intervals (they are managed
+    // timers, cleared with it), so the audit would otherwise be dead for the
+    // rest of the process.
+    globalState.rearmProcessTimers?.();
     updateInstanceSession(ctx.sessionManager.getSessionFile() || "");
     syncInstanceActivity(ctx);
     if (globalState.clients.size === 0) return;

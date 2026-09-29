@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Audit date** | 2026-09-25 |
-| **Last status review** | 2026-09-28 (omp 18.3.4 → 18.3.5 delta reviewed on 18.3.5; first delta review used 18.3.4; A5 + B17 opened, B8 corrected; B11 + B12 fixed the same day, plus the Agent Hub main-row routing fix; 18.3.3/18.3.4 delta re-verified at source level — extension API identical across the window, live-steering interaction checked, no required GUI change) |
+| **Last status review** | 2026-09-29 (omp 18.4.0 → 18.4.2 delta reviewed at *source* level on the published tarballs + live-probed on 18.4.2; no breaking change reaches the GUI, two containment adaptations shipped — see the bottom review) |
 | **omp version audited** | 18.3.0 (local system install; source: `pi-coding-agent@18.3.0` `CHANGELOG.md`, changelog coverage 18.0.1 → 18.3.0) |
 | **Ompcot GUI version audited** | 0.5.1 @ commit `b123906` (feat(settings): split Configuration into categorized sub-pages) |
 | **omp upstream** | can1357/oh-my-pi |
@@ -38,6 +38,110 @@
 This document records which omp capabilities the GUI does **not** expose today, split by remediation cost, plus explicit non-gaps. Use it as the backlog source when planning GUI feature work.
 
 ---
+
+> **Status review 2026-09-29 (omp 18.3.0 → 18.4.2, GitHub release bodies): three more adaptations shipped.** A sweep of
+> every release body in the window (they are per-package and carry entries the coding-agent `CHANGELOG.md` does not —
+> fetch them from `https://api.github.com/repos/can1357/oh-my-pi/releases`), triaged against this document's consumption
+> surface. What the GUI gained:
+>
+> - **The native RPC lane (18.3.1).** "Reliable RPC prompt lifecycle reporting with `prompt_result`, structured provider
+>   errors, session-settled state, prompt identifiers, event filtering, and `--no-ui`" + `open_session`. The GUI's broker
+>   speaks the native protocol's *write* half only (frames on the child's stdin) and **dropped stdout**, so
+>   `prompt_result`/`session_settled` — the two answers to every prompt the GUI writes there (slash commands, rewind)
+>   — never arrived: `public/websocket-client.js` had a `prompt_result` case with **no producer**, and the run-state had
+>   no authoritative settle beyond the 8 s silence fallback. Live-probed on 18.4.2: `/context` answers synchronously
+>   (`response … data:{agentInvoked:false}`, no result frame), a real prompt answers
+>   `{"type":"prompt_result","id":"lane-run","agentInvoked":true,"status":"completed","sessionSettled":true}` followed
+>   by `{"type":"session_settled"}`. Shipped: `OmpManager` pipes omp's stdout, a per-process reader thread drains it and
+>   keeps only those two frame types (`interesting_rpc_frame`, substring pre-filter — one short run emitted ~1230
+>   `message_update` lines against 2 kept frames), and `BrokerWs::relay_native_frame` rebroadcasts them in the standard
+>   `broker_event` envelope with `sourcePort`, which is exactly what the frontend already unwraps. `app.js` settles the
+>   run on `session_settled`/`prompt_result.sessionSettled` (`run.end {source:"rpc-settled"|"prompt-result"}`, the first
+>   signal that covers the `awaitingAsyncWork` pause whose wake never comes) and reports a command that failed before
+>   reaching the agent — a frame set the GUI previously had no reporter for at all. The compaction pending window also
+>   ends on the command's own `prompt_result` now (`settle("skipped")`) instead of only on its 5 s timer.
+> - **Auto-disabled accounts (18.3.1).** "Fixed automatic account sign-outs going unannounced; sessions now report the
+>   affected account and login action through interactive, print, JSON, and RPC output." The extension event
+>   `credential_disabled` (`{provider, disabledCause, credentialId?, email?, accountId?, orgId?}`) was simply not
+>   subscribed: a quota-drained or rejected account changed the session's behaviour silently. Now forwarded
+>   (`FORWARDED_EVENT_TYPES`, exported and test-guarded) and rendered as an error bubble naming the provider, account
+>   and cause.
+> - **Tool-result ordering (18.4.2, `@oh-my-pi/pi-agent-core`)** — the history-card seed (see the review below; the
+>   release body's "Added tool_execution_end events that fire as each call settles" describes the *pairing* introduced
+>   with call-ordered result messages).
+>
+> Judged not-gaps in the same sweep: `open_session` / `set_event_filter` / `get_available_thinking_levels` (the
+> extension surface this server exposes covers the GUI's needs; event filtering would not shrink our frame volume),
+> `ctx.runEphemeralTurn` (B16, optional feature), paged `read` metadata (the card renders the model-facing text; B13
+> already tracks structured results), `cfg://` + layered settings (the GUI uses omp's own settings surfaces),
+> `providers.cacheWarming` + `cache_warming_decision` (18.3.5, never subscribed — the warmer's own decision stands),
+> per-agent compaction thresholds, MCP `instructions:false` (a `/mcp` option, config-catalog-fed), `omp skill list`
+> (B14), `omp usage`'s `-e/--extension` flags (the GUI shells out without them), the Anthropic wrap-up allowance and
+> slow mode (TUI status line; the RPC lane has no frame for it), 8.3 short-path handling (18.4.0 fixed it upstream for
+> status/labels; the GUI's own path comparisons normalize separators, case and `\?\`), and every TUI/collab/bench/native
+> item. `$NaN`-class usage corruption (18.4.0/18.4.1 fixes) does not apply: the GUI's totals guard every leg
+> (`usage?.input`, `|| 0`) and count a usage-less message as zero, which is exactly what 18.4.1 fixed in the host.
+
+> **Status review 2026-09-29 (omp 18.4.0 → 18.4.2, Ompcot v0.8.27): no breaking change reaches the GUI; two containment
+> adaptations shipped.** Method: the three published tarballs (`@oh-my-pi/pi-coding-agent` 18.4.0 / 18.4.1 / 18.4.2,
+> unpacked and diffed file by file) plus live probes on 18.4.2 (the local system install, `omp/18.4.2`).
+>
+> - **The extension-facing API did not move.** `src/modes/rpc/**` is byte-identical across 18.4.0 → 18.4.2 *and* across
+>   18.3.5 → 18.4.0, so every RPC frame the broker writes (`prompt`, `branch`, `switch_session`, `new_session`) and every
+>   one this server reads out of `ctx` behaves as it did. `src/extensibility/extensions/types.ts` changed by **one doc
+>   comment** (the idle `display:true` `sendMessage` rule); `shared-events.ts`, `agent-session-events.ts` and the
+>   extension event union are byte-identical. `runner.ts` / `wrapper.ts` grew tool-call *preflight* plumbing (rules
+>   evaluated without `tool_call` handlers) that this extension never registers into.
+> - **`session_stop` is not a settle seam for the GUI.** The event exists and fires on the host's settle pass, but the
+>   pass is gated on `extensionRunner.hasHandlers("session_stop")` and is skipped entirely for the `awaitingAsyncWork`
+>   pause — the one case where a run's end is uncertain. Registering a handler would put the GUI on the host's Stop-hook
+>   path (and its continuation protocol) for no signal the terminal `agent_end` does not already carry.
+> - **`interceptUnhandledRejections` cannot be reached from this extension.** Importing
+>   `@oh-my-pi/pi-utils/postmortem.js` resolves to a *second* module instance (the extension lives outside omp's package
+>   tree), whose interceptor set the host's own handler never consults — proven live on 18.4.2: an extension that
+>   registered an interceptor still had its process killed by the host's copy of the handler, and the import also
+>   installed a duplicate set of `SIGINT`/`uncaughtException`/… handlers. The **`Symbol.for("omp.expectedCleanupError")`
+>   marker** is the seam that does cross instances (the module's own comment says so), and it needs no import at all.
+> - **Adaptation 1 — contained background work** (`extensions/embedded-server.ts`): the two process-scoped intervals
+>   (run-state audit, WS client reaper) and the server's one-shot deferrals now go through omp's `ctx.setInterval` /
+>   `ctx.setTimeout` (guarded, `unref`'d, cleared by the host on session teardown) with a raw fallback, and every
+>   callback is wrapped so a throw or a rejected promise is reported instead of reaching omp's fatal postmortem path.
+>   Re-probed on 18.4.2, the counterfactual is a dead workspace: a raw timer throw in an extension exits the process
+>   (`[Uncaught Exception] … exit 1`) and so does an unhandled rejection; with the adaptation both are logged
+>   (`timer callback failed (contained)`, `Unhandled rejection contained`) and the process keeps serving.
+> - **Adaptation 2 — the process-scoped intervals are re-armed per session** (`rearmProcessTimers`): managed handles die
+>   with the session that armed them (a reload-model `new_session` / `fork` disposes it), while the handle in
+>   process-scoped state still names them — so the "already armed" guard left the audit stopped for the life of the
+>   process. Verified live: after a `new_session` swap, a sabotaged registry entry is repaired by the audit within its
+>   3 s tick (idle session, no events that could have written it).
+> - **`runtimeSettled` gained the host's queued-message leg** (`ctx.hasPendingMessages()`, the `queuedMessageCount === 0`
+>   term of `isRpcSessionSettled` behind the RPC mode's `session_settled` / `get_state.isSettled`). The predicate is what
+>   the instance registry publishes as `isStreaming`, so a queued steer/follow-up no longer reads as "settled" in the gap
+>   before its turn starts.
+> - **The v18.4.2 GitHub release page carries a `@oh-my-pi/pi-agent-core` section the coding-agent `CHANGELOG.md` does
+>   not** ("Added tool_execution_end events that fire as each call settles for live UI updates" / "Emitted tool result
+>   messages in the order of tool calls, preserving call order regardless of completion order"). Source-level verdict
+>   (pi-agent-core 18.4.1 vs 18.4.2, `agent-loop.ts` is the only functional file): the `tool_execution_end` emission is
+>   *unchanged* — a single site in `emitToolResult`, plus the synthetic start/end pair the abort path pushes — what
+>   changed is that a call's tool-result **message** is no longer pushed with its `tool_execution_end` but by
+>   `flushResultMessages()` in call order, so a later-finishing call's result entry waits behind every earlier call in
+>   the batch. **`tool_execution_end` is therefore the prompt per-call live signal and the session file is the lagging
+>   one** — which is exactly what the GUI already settles its cards on (the live path never reads tool-result messages),
+>   while the **history** path now needs the live signal to survive a repaint. Same window: the release's third
+>   agent-core item ("streaming tool call arguments … modified in-place") is the `cloneJsonTree` snapshot of streamed
+>   `toolCall` arguments, which makes the args the GUI renders stable mid-stream.
+> - **Adaptation 3 — a repainted card keeps the output the file has not persisted yet**
+>   (`public/tool-card.js` + `public/session-resync.js`): history cards take both pill *and body* from the live state
+>   map (`liveLookup`, was `statusLookup`) when the session file has no result entry for that call, so a resync / switch
+>   back / peek release **while a sibling tool is still running** no longer redraws a settled call's card with an empty
+>   body (measured window: the whole remaining duration of the batch's slowest call — seconds to minutes, where before
+>   18.4.2 the entry landed milliseconds behind the end frame). The file stays authoritative: an entry applied through
+>   `addHistoryResult` overwrites whatever the live map seeded.
+> - Judged not-gaps: the 18.4.x changelog is otherwise upstream-internal or agent-side (search `find` timeout, session
+>   storage inode locking, stream-stall continuation — that one arrives as `agent_end {willContinue:true}`, which the GUI
+>   already holds the run open for, tool preflight, provider/model cache work). B17 (`notice`) is still absent from the
+>   extension event union on 18.4.2 — parked upstream, unchanged.
+
 
 ## A. Quick wins — server surface already exists, frontend-only work
 

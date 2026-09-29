@@ -1131,6 +1131,16 @@ fn main() {
             let broker = Arc::new(BrokerWs::start().expect("failed to start broker websocket"));
             std::env::set_var("OMCOT_BROKER_PORT", broker.port().to_string());
             install_control_handler(&broker, manager.clone(), app.handle().clone());
+            // Hand the native RPC stdout lane to the broker (see
+            // `relay_native_frame`): `prompt_result` / `session_settled` are the
+            // only answers the GUI cannot get from the extension's WS, because
+            // they reply to frames this broker wrote to the child's stdin.
+            {
+                let frame_broker = broker.clone();
+                omp_manager::set_frame_sink(Arc::new(move |port, frame| {
+                    frame_broker.relay_native_frame(port, frame);
+                }));
+            }
 
             let home_cwd = dirs::home_dir()
                 .unwrap_or_default()

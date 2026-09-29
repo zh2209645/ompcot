@@ -288,6 +288,33 @@ describe("WebSocketClient broker routing", () => {
     expect(results[0].agentInvoked).toBe(false);
   });
 
+  test("prompt_result and session_settled carry the answering process's port", () => {
+    // The broker broadcasts every process's frames to every window, so the two
+    // native-lane frames must arrive with the port that produced them: without
+    // it a background instance's settle would stop the foreground run.
+    const client = new WebSocketClient("ws://127.0.0.1:49000/ui-ws");
+    const results = [];
+    const settled = [];
+    client.addEventListener("promptResult", (event) => results.push(event.detail));
+    client.addEventListener("sessionSettled", (event) => settled.push(event.detail));
+
+    client.handleMessage({
+      type: "broker_event",
+      sourcePort: 47822,
+      payload: { type: "prompt_result", id: "p1", status: "completed", sessionSettled: false },
+    });
+    client.handleMessage({
+      type: "broker_event",
+      sourcePort: 47822,
+      payload: { type: "session_settled" },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].port).toBe(47822);
+    expect(settled).toHaveLength(1);
+    expect(settled[0].port).toBe(47822);
+  });
+
   test("send returns the requestId so callers can correlate delivery failures", () => {
     const client = new WebSocketClient("ws://127.0.0.1:49000/ui-ws");
     client.ws = { readyState: WebSocket.OPEN, send: () => {} };
