@@ -32,7 +32,7 @@ Tauri IPC commands (invoked via `window.tauriNative` in `public/tauri-bridge.js`
 - Visualization: streaming chat, tool-call cards, thinking blocks, token/cost tracking per session
 - Self-contained desktop app; the only external requirement is `omp` on PATH
 
-### Feature surface (as of v0.8.27)
+### Feature surface (as of v0.8.28)
 
 - Chat: streaming, tool cards, thinking blocks, abort, queued messages with **Queue / Steer now / Interrupt** delivery (each queued item also has its own send-now), queued slash commands (composer `/` autocomplete backed by `list_commands`; slash prompts execute when omp is idle, auto-queue while streaming), file mentions (composer `@` autocomplete over `/api/files`, an "attach file or image" multi-select on the native host, and drag-from-the-file-pane — all inserting omp's own `@path` grammar, which the runtime auto-reads; images take the same route, there is no separate image-attach path: base64 `prompt.images` and the composer previews were removed rather than kept broken)
 - Compaction: manual `/compact` (omp's own builtin — `/compact soft|remote|snapcompact [focus]` — reachable from the composer because slash prompts go through the runtime's dispatch) plus the GUI's own entry points, the header's **Compact** button (rendered at ≥80% context) and the command palette's Compact action, which send the same `{type:"compact"}` command. The extension drives `ctx.compact`, reports `auto_compaction_start/end`, re-broadcasts the session snapshot once the summary is committed so the transcript gains its compaction item and the pill shows the *post*-compaction size, and reports a no-op or a summarizer failure as an inline "Compaction failed — …" line with the context left exactly as it was
@@ -157,4 +157,4 @@ linux-aarch64 loss — incident list in `docs/AUTO_UPDATER.md`).
 
 ## Tests
 
-Vitest tests live in `public/` as `*.test.js` (jsdom) and `extensions/*.test.ts`. The full `bun run test` also runs `scripts/check-tauri-permissions.js`. The suite is green at v0.8.27 (765 tests; the former `cost-infobar.test.js` red is gone: the chart/legend palettes are single-sourced from `cost-infobar.js` and the token assertion accepts the locale's compact spelling — `Intl` renders 3550 as `3.6K` in en-US and `3550` in zh-CN, so never pin such a spelling). Locale en/zh parity is test-enforced (`i18n.test.js`).
+Vitest tests live in `public/` as `*.test.js` (jsdom) and `extensions/*.test.ts`. The full `bun run test` also runs `scripts/check-tauri-permissions.js`. The suite is green at v0.8.28 (780 tests; the former `cost-infobar.test.js` red is gone: the chart/legend palettes are single-sourced from `cost-infobar.js` and the token assertion accepts the locale's compact spelling — `Intl` renders 3550 as `3.6K` in en-US and `3550` in zh-CN, so never pin such a spelling). Locale en/zh parity is test-enforced (`i18n.test.js`).

@@ -1,6 +1,6 @@
 # Ompcot Roadmap
 
-> **As of 2026-09-28 / v0.8.27.** Ideas and planned features. Nothing unfinished here is committed — just captured so it doesn't get lost. omp feature-gap work is tracked in detail in [`docs/omp-feature-gaps.md`](docs/omp-feature-gaps.md).
+> **As of 2026-09-29 / v0.8.28.** Ideas and planned features. Nothing unfinished here is committed — just captured so it doesn't get lost. omp feature-gap work is tracked in detail in [`docs/omp-feature-gaps.md`](docs/omp-feature-gaps.md).
 
 ---
 
@@ -42,7 +42,7 @@ Closes the A/B items from the [feature-gap audit](docs/omp-feature-gaps.md), plu
 - ✅ **Auto-updater** and **LAN QR** access
 - ✅ **README refresh** — feature overview in English and Chinese; screenshots still pending
 
-### Reliability & performance wave (v0.8.4 – v0.8.27)
+### omp 18.4 adaptation & reliability wave (v0.8.4 – v0.8.28)
 
 Reported-bug driven; each item was reproduced, measured, and verified against a live run:
 
@@ -66,6 +66,15 @@ Reported-bug driven; each item was reproduced, measured, and verified against a 
   `navigateTree`; the text returns to the composer) and re-sync the transcript from the running agent
 - ✅ **Diagnostics & polish** — Debug capture (bounded ring buffers for both the frontend and the process, with a
   one-click bundle export) and font settings (UI/mono families plus a global size scale)
+- ✅ **Contained background work (v0.8.28)** — the server's own timers and unhandled rejections can no longer take
+  the workspace process down (omp treats both as fatal); a failure is logged into the debug bundle instead, and the
+  process-scoped intervals re-arm after `new_session` / `fork`
+- ✅ **Native RPC lane (v0.8.28)** — the broker reads omp's stdout and relays `prompt_result` / `session_settled`, so
+  a slash command or the rewind prompt has a terminal status, a failed command says so, the run settles on the
+  runtime's own verdict (ahead of the 8 s silence fallback), and an auto-disabled account is announced with its cause
+- ✅ **Transcript actions (v0.8.28)** — copy / fork / rewind share one floating row per message (the old
+  `+`-combinator offsets stacked fork on top of copy on every message that showed a cost), the row can't swallow
+  clicks meant for a tool card, and a repainted card keeps the output the session file has not caught up with yet
 
 ---
 
