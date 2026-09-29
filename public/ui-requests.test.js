@@ -413,6 +413,33 @@ describe("message actions (fork / rewind)", () => {
 
   const lastSent = (ctx) => ctx.ws.sent[ctx.ws.sent.length - 1];
 
+  test("fork joins the copy button's row, whatever sits between them in the DOM", async () => {
+    // The regression this guards: the row's offsets used to come from
+    // `+`-combinator rules, and the `$cost` label the renderer appends between
+    // the copy button and the actions made them stop matching — copy and fork
+    // then drew at identical coordinates on every message that showed a cost.
+    // Both buttons must belong to one row so nothing positional depends on
+    // which sibling precedes which.
+    const el = assistantMessage("entry-1");
+    const copy = document.createElement("button");
+    copy.className = "message-copy-btn";
+    const usage = document.createElement("span");
+    usage.className = "message-usage";
+    usage.textContent = "$0.0042";
+    const row = document.createElement("div");
+    row.className = "message-actions";
+    row.append(copy);
+    el.append(usage, row);
+
+    const ctx = createActions();
+    const after = el.querySelector(":scope > .message-actions");
+    expect(after).toBe(row);
+    expect(after.querySelectorAll(":scope > .message-action-btn")).toHaveLength(1);
+    expect(after.contains(copy)).toBe(true);
+    expect(el.querySelector(":scope > .message-usage")).toBe(usage);
+    ctx.actions.destroy();
+  });
+
   test("attaches a fork button to finished assistant messages; click forks its entry", async () => {
     assistantMessage("entry-42");
     const ctx = createActions();

@@ -23,7 +23,7 @@ function toolStatusLabel(status) {
 }
 
 export class ToolCardRenderer {
-  constructor(container, { statusLookup = null, follow = null } = {}) {
+  constructor(container, { liveLookup = null, follow = null } = {}) {
     this.container = container;
     this.toolCards = new Map(); // toolCallId -> element
     // Results whose card has not been drawn yet (tail-first hydration paints
@@ -38,12 +38,21 @@ export class ToolCardRenderer {
     // renderer usable on its own. See scroll-follow.js for why the decision is
     // state-based rather than recomputed at call time.
     this.follow = follow ?? new ScrollFollow(container);
-    // Live status of a tool call, when the app knows one. A transcript
-    // re-render (snapshot mid-run) draws history cards for calls that are
-    // still executing; without this they were painted as "Done" and then
-    // flipped back to "Working…" by the next live frame — the status badge
-    // blinked, and kept blinking on every re-render.
-    this.statusLookup = typeof statusLookup === "function" ? statusLookup : null;
+    // What the live path knows about a tool call, when the app knows it.
+    //
+    // A transcript re-render (a snapshot mid-run, a resync, switching back to a
+    // running session) draws history cards for calls whose live state differs
+    // from the file. Without the live *status* the card was painted "Done" and
+    // then flipped back to "Working…" by the next live frame — the badge
+    // blinked on every re-render. Without the live *output* a call that had
+    // already settled came back with an empty body: omp 18.4.2 emits
+    // `tool_execution_end` as soon as each call settles but holds that call's
+    // tool-result *message* until every earlier call in the batch has one
+    // (result messages now land in call order), so the session file can lag the
+    // live signal by the whole remaining duration of a sibling tool. The file
+    // stays authoritative — a result entry applied by `addHistoryResult`
+    // overwrites whatever was seeded from here.
+    this.liveLookup = typeof liveLookup === "function" ? liveLookup : null;
   }
 
   createToolCard(toolExecution) {
@@ -282,7 +291,8 @@ export class ToolCardRenderer {
     });
     headerRight.appendChild(copyBtn);
 
-    const liveStatus = this.statusLookup?.(toolCallId) || "complete";
+    const live = this.liveLookup?.(toolCallId) ?? null;
+    const liveStatus = live?.status || "complete";
     const status = document.createElement("div");
     status.className = `tool-status ${liveStatus}`;
     status.textContent = toolStatusLabel(liveStatus);
@@ -342,6 +352,11 @@ export class ToolCardRenderer {
     if (pending) {
       this.pendingHistoryResults.delete(toolCallId);
       this.applyHistoryResult(card, pending.result, pending.isError);
+    } else if (live?.output) {
+      // The file has no result for this call yet (see `liveLookup`): show what
+      // the live view already had instead of an empty body. A result entry that
+      // lands later overwrites it through `addHistoryResult`.
+      outputEl.textContent = live.output;
     }
 
     return card;

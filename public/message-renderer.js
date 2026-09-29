@@ -37,6 +37,32 @@ export const TEXT_DUPLICATE_SCAN_MS = 2000;
 export const USER_FACING_NOTICE_TYPES = new Set(["compaction"]);
 
 /** Increment/decrement a duplicate counter, dropping it at zero. */
+/**
+ * The message's floating action row (copy / fork / rewind), created on demand.
+ *
+ * One positioned element per message, with the buttons flowed inside it by
+ * `style.css` (`.message-actions`) — the layout must not depend on which
+ * sibling precedes which. It did: the offsets were `+`-combinator rules, and
+ * the `$cost` label appended between the copy button and the actions made
+ * `.message-copy-btn + .message-action-btn { right: 30px }` stop matching, so
+ * copy and fork drew at identical coordinates on every message that showed a
+ * cost (372 of 376 assistant messages in the reported render dump), over the
+ * tool-card and thinking-block headers underneath them.
+ *
+ * Shared with `ui-requests.js`, which appends the fork and rewind buttons to
+ * the same row. The row reverses for the assistant message so the copy button
+ * (appended first) stays in the corner; the user bubble reads left-to-right
+ * from its inner edge.
+ */
+export function ensureMessageActions(messageElement) {
+  const existing = messageElement.querySelector(":scope > .message-actions");
+  if (existing) return existing;
+  const row = document.createElement("div");
+  row.className = "message-actions";
+  messageElement.appendChild(row);
+  return row;
+}
+
 function bumpCount(map, key, delta) {
   const next = (map.get(key) || 0) + delta;
   if (next <= 0) map.delete(key);
@@ -328,11 +354,12 @@ export class MessageRenderer {
               .join("\n")
           : "";
 
-    div.innerHTML = `
-      <div class="message-content">${renderUserMarkdown(message.content)}</div>
-      ${this._copyButtonHtml()}
-    `;
-    this._setupCopyBtn(div);
+    div.innerHTML = `<div class="message-content">${renderUserMarkdown(message.content)}</div>`;
+    // Through the row, never as a bare child of the message: the actions attach
+    // to that row, and a copy button that bypasses it is a second, differently
+    // positioned layer — the fork then landed on top of it (the user-message
+    // half of the reported overlap), and it took flex space from the bubble.
+    this._ensureCopyButton(div);
     this.container.appendChild(div);
     this.userCount += 1;
     if (!isHistory) this.scrollToBottom({ force: forceScroll, immediate: forceScroll });
@@ -464,9 +491,9 @@ export class MessageRenderer {
 
     if (isStreaming) {
       // An adopted element may still carry the previous view's "finished"
-      // affordance and lifecycle flag; the copy button is also the "this turn
-      // is done" marker, so both must go when the element goes back to live.
-      div.querySelector(".message-copy-btn")?.remove();
+      // lifecycle flag. The copy button *is* that marker and the template
+      // above already replaced the element's children (its row included), so
+      // only the flag has to go.
       delete div.dataset.finalized;
     } else {
       // A history render is complete content: it must never be picked up as
@@ -853,13 +880,18 @@ export class MessageRenderer {
     return `<button class="message-copy-btn" aria-label="${t("msg.copyMessage")}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>`;
   }
 
+  /** The message's floating action row (see `ensureMessageActions`). */
+  _ensureActions(messageElement) {
+    return ensureMessageActions(messageElement);
+  }
+
   /**
    * The copy button doubles as the "this message is finished" marker: unfinished
    * elements are exactly the ones without it (see findUnfinishedAssistantElement).
    */
   _ensureCopyButton(messageElement) {
     if (messageElement.querySelector(".message-copy-btn")) return;
-    messageElement.insertAdjacentHTML("beforeend", this._copyButtonHtml());
+    this._ensureActions(messageElement).insertAdjacentHTML("beforeend", this._copyButtonHtml());
     this._setupCopyBtn(messageElement);
   }
 

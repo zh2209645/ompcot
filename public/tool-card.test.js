@@ -153,11 +153,11 @@ describe("ToolCardRenderer follow behavior", () => {
   });
 });
 
-describe("ToolCardRenderer history cards use the live status", () => {
+describe("ToolCardRenderer history cards use the live state", () => {
   it("draws a still-running call as Working…, not Done", () => {
     const container = document.createElement("div");
     const renderer = new ToolCardRenderer(container, {
-      statusLookup: (toolCallId) => (toolCallId === "call_live" ? "streaming" : null),
+      liveLookup: (toolCallId) => (toolCallId === "call_live" ? { status: "streaming" } : null),
     });
 
     renderer.createHistoryCard({ toolCallId: "call_live", toolName: "eval", args: {} });
@@ -171,7 +171,35 @@ describe("ToolCardRenderer history cards use the live status", () => {
     expect(finished.querySelector(".tool-status").className).toBe("tool-status complete");
   });
 
-  it("falls back to Done without a status source", () => {
+  it("keeps the output the live view already showed when the file has no result yet", () => {
+    // omp 18.4.2 emits `tool_execution_end` as soon as a call settles but holds
+    // its tool-result message until every earlier call in the batch has one, so
+    // a repaint while a sibling tool still runs finds a settled call with no
+    // result entry in the session file. The card must not come back empty.
+    const container = document.createElement("div");
+    const renderer = new ToolCardRenderer(container, {
+      liveLookup: (toolCallId) =>
+        toolCallId === "call_seeded" ? { status: "complete", output: "11 files changed" } : null,
+    });
+
+    renderer.createHistoryCard({ toolCallId: "call_seeded", toolName: "bash", args: {} });
+    const seeded = container.querySelector(".tool-card[data-tool-call-id='call_seeded']");
+    expect(seeded.dataset.toolStatus).toBe("complete");
+    expect(seeded.querySelector(".tool-output").textContent).toBe("11 files changed");
+
+    // The file stays authoritative: its result entry replaces the seeded body.
+    renderer.addHistoryResult("call_seeded", { content: [{ type: "text", text: "done" }] }, false);
+    expect(seeded.querySelector(".tool-output").textContent).toBe("done");
+
+    // An out-of-order (held) file result still wins over the live seed.
+    renderer.addHistoryResult("call_held", { content: [{ type: "text", text: "file" }] }, false);
+    renderer.createHistoryCard({ toolCallId: "call_held", toolName: "bash", args: {} });
+    expect(
+      container.querySelector(".tool-card[data-tool-call-id='call_held'] .tool-output").textContent,
+    ).toBe("file");
+  });
+
+  it("falls back to Done without a live source", () => {
     const container = document.createElement("div");
     const renderer = new ToolCardRenderer(container);
 
@@ -258,7 +286,9 @@ describe("ToolCardRenderer status settling", () => {
     // What a peek/suppressed frame leaves behind: the live lookup never saw the
     // end frame, so the reloaded card is drawn "Working…" — and without the
     // result settling it, the pill pulsed forever.
-    const renderer = new ToolCardRenderer(container, { statusLookup: () => "streaming" });
+    const renderer = new ToolCardRenderer(container, {
+      liveLookup: () => ({ status: "streaming" }),
+    });
     renderer.createHistoryCard({ toolCallId: "call_9", toolName: "bash", args: { command: "x" } });
     const pill = container.querySelector(".tool-status");
     expect(pill.className).toContain("streaming");
@@ -271,7 +301,9 @@ describe("ToolCardRenderer status settling", () => {
   });
 
   it("keeps an errored history result labelled as an error", () => {
-    const renderer = new ToolCardRenderer(container, { statusLookup: () => "streaming" });
+    const renderer = new ToolCardRenderer(container, {
+      liveLookup: () => ({ status: "streaming" }),
+    });
     renderer.createHistoryCard({ toolCallId: "call_10", toolName: "bash", args: {} });
 
     renderer.addHistoryResult("call_10", { content: [{ type: "text", text: "boom" }] }, true);

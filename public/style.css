@@ -3779,6 +3779,12 @@ body {
   font-family: var(--font-mono);
   margin-top: 2px;
   opacity: 0.5;
+  /* The message's top-right corner is the hover actions' corner
+     (`.message-actions`: two 24px buttons and a 4px gap = 52px from the right
+     edge). Without this the label sat *under* them — it is the one thing on
+     that line that is always visible, so it keeps its own space instead of
+     being covered on hover: 52 + 4px of clearance. */
+  margin-right: 58px;
 }
 
 /* biome-ignore lint/style/noDescendingSpecificity: base styles defined after scoped overrides intentionally */
@@ -5371,18 +5377,51 @@ body.hide-thinking .thinking-block {
 }
 
 /* ═══════════════════════════════════════════════════════
-   Copy message button (hover)
+   Message actions (copy / fork / rewind) — one floating row
    ═══════════════════════════════════════════════════════ */
 
-.message-copy-btn {
-  opacity: 0;
-  /* Out of flow: as a flex child this (plus the fork action beside it) stole
-     ~58px from every message, so text and thinking stopped short of the tool
-     cards and the composer card. It now floats over the block's corner, where
-     it only exists on hover anyway. */
+/* The row is the only positioned element; the buttons flow inside it, so no
+   offset depends on which sibling happens to precede which. It used to: the
+   offsets were `+`-combinator rules (`.message-copy-btn + .message-action-btn
+   { right: 30px }`), and the `$cost` label this renderer appends between the
+   copy button and the actions made them stop matching — copy and fork drew on
+   top of each other (identical rects) on every message that showed a cost: 372
+   of 376 assistant messages in the reported render dump, over the tool-card and
+   thinking-block headers.
+
+   `row-reverse` is what keeps the copy button in the message corner: the
+   renderer appends it first, so reversing puts it rightmost with the actions
+   beside it. The right-aligned user bubble anchors the same row to its inner
+   (left) edge and reads left-to-right, where the copy comes first by design. */
+.message-actions {
   position: absolute;
   top: 2px;
   right: 2px;
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  /* Hidden buttons must not swallow clicks meant for the block underneath
+     (a tool card's own copy button shares this corner). */
+  pointer-events: none;
+  transition: opacity 0.15s var(--ease);
+}
+
+.message.user .message-actions {
+  right: auto;
+  left: 4px;
+  flex-direction: row;
+}
+
+.message:hover .message-actions,
+.message-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.message-copy-btn,
+.message-action-btn {
   background: var(--bg-glass-strong);
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
@@ -5395,22 +5434,17 @@ body.hide-thinking .thinking-block {
   white-space: nowrap;
 }
 
-/* The right-aligned user bubble keeps its actions on the outside (left) edge. */
-.message.user .message-copy-btn,
-.message.user .message-action-btn {
-  right: auto;
-  left: 4px;
-}
-
-.message:hover .message-copy-btn {
-  opacity: 1;
-}
-
 .message-copy-btn:hover {
   color: var(--text-primary);
 }
 
-.message-copy-btn:active {
+.message-action-btn:hover {
+  color: var(--accent-text);
+  background: var(--bg-glass-hover);
+}
+
+.message-copy-btn:active,
+.message-action-btn:active {
   transform: scale(0.9);
 }
 
@@ -6811,55 +6845,12 @@ html.macos-overlay .settings-content {
 }
 
 /* ═══════════════════════════════════════════════════════
-   Fork from message (ui-requests.js) — copy-button pattern
+   Fork / rewind buttons (ui-requests.js)
    ═══════════════════════════════════════════════════════ */
 
-.message-action-btn {
-  opacity: 0;
-  /* See .message-copy-btn: floating, not a flex child. */
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  background: var(--bg-glass-strong);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  cursor: pointer;
-  padding: 3px 5px;
-  transition: all 0.15s var(--ease);
-}
-
-/* Two actions on the same message: fork sits beside rewind/copy. */
-.message-action-btn + .message-action-btn,
-.message-copy-btn + .message-action-btn {
-  right: 30px;
-}
-
-.message.user .message-action-btn + .message-action-btn,
-.message.user .message-copy-btn + .message-action-btn {
-  right: auto;
-  left: 34px;
-}
-
-.message:hover .message-action-btn,
-.message-action-btn:focus-visible {
-  opacity: 1;
-}
-
-.message-action-btn:hover {
-  color: var(--accent-text);
-  background: var(--bg-glass-hover);
-}
-
-.message-action-btn:active {
-  transform: scale(0.9);
-}
-
-/* Rewind sits first in the user message's action row (it is the more
-   destructive of the two, so it stays left of fork). */
-.message-rewind-btn {
-  left: 4px;
-}
+/* The buttons themselves share the copy button's row styles above; only the
+   rewind icon's meaning differs. Both are revealed by the row, so nothing here
+   positions them individually. */
 
 /* ═══════════════════════════════════════════════════════
    Account usage (Settings → Usage, above the cost dashboard)

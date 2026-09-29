@@ -112,6 +112,15 @@ describe("MessageRenderer streaming markdown preview", () => {
     expect(thinking.querySelector(".thinking-content").classList.contains("expanded")).toBe(false);
     // A stopped message is complete as far as the UI is concerned.
     expect(el.querySelector(".message-copy-btn")).not.toBeNull();
+    // ...and it lives in the message's action row (see ensureMessageActions):
+    // one positioned element per message is what keeps the copy button and the
+    // fork action from being laid out on top of each other.
+    const row = el.querySelector(":scope > .message-actions");
+    expect(row).not.toBeNull();
+    expect(row.querySelectorAll(":scope > .message-copy-btn")).toHaveLength(1);
+    // The `$cost` label stays outside the row — it is content metadata, not an
+    // action, and inside the row it would consume a flex slot.
+    expect(row.querySelector(".message-usage")).toBeNull();
   });
 
   it("ignores late deltas after the run was stopped", () => {

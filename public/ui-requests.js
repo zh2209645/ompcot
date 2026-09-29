@@ -44,6 +44,7 @@
 
 import { DialogHandler } from "./dialogs.js";
 import { onLanguageChanged, t } from "./i18n.js";
+import { ensureMessageActions } from "./message-renderer.js";
 import { wsRpc } from "./ws-rpc.js";
 
 /** Methods the manager knows how to render; anything else warns and drops. */
@@ -485,7 +486,7 @@ export function createMessageActions({
       // Streaming placeholders carry no id yet — wait until finalize.
       if (el.querySelector(".message-content.streaming")) continue;
       if (el.querySelector(".message-action-btn")) continue;
-      el.appendChild(
+      ensureMessageActions(el).appendChild(
         actionButton({
           className: "message-fork-btn",
           icon: FORK_ICON_SVG,
@@ -503,7 +504,9 @@ export function createMessageActions({
       if (!id) continue;
       lastKnownEntryId = id;
       if (canRewind() && rewindViaBroker) {
-        el.appendChild(
+        // The row reads left-to-right for the user bubble, so rewind (appended
+        // before fork) stays on the outside, left of it.
+        ensureMessageActions(el).appendChild(
           actionButton({
             className: "message-rewind-btn",
             icon: REWIND_ICON_SVG,
@@ -512,7 +515,7 @@ export function createMessageActions({
           }),
         );
       }
-      el.appendChild(
+      ensureMessageActions(el).appendChild(
         actionButton({
           className: "message-fork-btn",
           icon: FORK_ICON_SVG,

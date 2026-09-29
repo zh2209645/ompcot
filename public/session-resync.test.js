@@ -4,6 +4,7 @@ import {
   renderTranscriptFromEntriesChunked,
   resyncTranscript,
 } from "./session-resync.js";
+import { ToolCardRenderer } from "./tool-card.js";
 
 function makeRenderers() {
   return {
@@ -60,6 +61,33 @@ const fixture = [
 afterEach(() => {
   vi.useRealTimers();
   document.body.innerHTML = "";
+});
+
+describe("history repaints keep the live signal a lagging session file lacks", () => {
+  test("a card whose result entry has not landed keeps its live output", () => {
+    // omp 18.4.2 (pi-agent-core ≥18.4.2): `tool_execution_end` fires as soon as
+    // each call settles, but that call's tool-result *message* is held until
+    // every earlier call in the batch has one (result messages land in call
+    // order). A repaint while a sibling tool still runs — a resync, a switch
+    // back to the running session, a peek released — therefore walks a settled
+    // call with no result entry yet: without the live lookup the card came back
+    // with a "Done" pill and an empty body.
+    const container = document.createElement("div");
+    const live = new Map([["tc-1", { status: "complete", output: "file-a\nfile-b" }]]);
+    const toolCardRenderer = new ToolCardRenderer(container, {
+      liveLookup: (toolCallId) => live.get(toolCallId) ?? null,
+    });
+    const renderers = { messageRenderer: makeRenderers().messageRenderer, toolCardRenderer };
+    const withoutResult = fixture.filter((entry) => entry.message?.role !== "toolResult");
+
+    const counts = renderTranscriptFromEntries(withoutResult, renderers);
+
+    expect(counts.toolCards).toBe(1);
+    expect(counts.toolResults).toBe(0);
+    const card = container.querySelector(".tool-card[data-tool-call-id='tc-1']");
+    expect(card.dataset.toolStatus).toBe("complete");
+    expect(card.querySelector(".tool-output").textContent).toBe("file-a\nfile-b");
+  });
 });
 
 describe("renderTranscriptFromEntries", () => {

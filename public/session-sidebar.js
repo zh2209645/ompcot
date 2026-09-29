@@ -505,50 +505,14 @@ export class SessionSidebar {
   }
 
   // ═══════════════════════════════════════
-  // Context Menu
+  // Floating menus (the sidebar's import dropdown)
   // ═══════════════════════════════════════
-
-  showContextMenu(e, session, _project, _itemEl) {
-    e.preventDefault();
-    this.closeContextMenu();
-
-    const menu = document.createElement("div");
-    menu.className = "session-context-menu";
-
-    const isArchived = this.isArchived(session.filePath);
-    const items = [
-      {
-        icon: isArchived ? "📤" : "🗄️",
-        label: isArchived ? t("session.unarchive") : t("session.archive"),
-        action: () => this.toggleArchived(session.filePath),
-      },
-    ];
-
-    for (const item of items) {
-      const row = document.createElement("div");
-      row.className = "context-menu-item";
-      row.innerHTML = `<span class="context-menu-icon">${item.icon}</span>${item.label}`;
-      row.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        this.closeContextMenu();
-        item.action();
-      });
-      menu.appendChild(row);
-    }
-
-    // Position
-    document.body.appendChild(menu);
-    const rect = menu.getBoundingClientRect();
-    let x = e.clientX;
-    let y = e.clientY;
-    if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
-    if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
-    menu.style.left = `${x}px`;
-    menu.style.top = `${y}px`;
-
-    this.contextMenu = menu;
-  }
-
+  //
+  // `this.contextMenu` holds the one open menu (cursor- or anchor-anchored,
+  // clamped to the viewport) so the document handlers below can close it. The
+  // session *context* menu that used to live here was removed: nothing ever
+  // opened it (`showContextMenu` had no callers) and its single action — archive
+  // — is the hover button on every row.
   closeContextMenu() {
     if (this.contextMenu) {
       this.contextMenu.remove();
@@ -590,10 +554,10 @@ export class SessionSidebar {
     }
 
     document.body.appendChild(menu);
-    // Drop below the anchor button, clamped to the viewport (same discipline
-    // as showContextMenu). Reusing this.contextMenu means the existing
-    // document click handler closes it for free; the anchor is remembered so
-    // that handler can exempt the opening click (F1).
+    // Drop below the anchor button, clamped to the viewport. Reusing
+    // this.contextMenu means the existing document click handler closes it for
+    // free; the anchor is remembered so that handler can exempt the opening
+    // click (F1).
     const rect = menu.getBoundingClientRect();
     let x = anchorEl.getBoundingClientRect().left;
     let y = anchorEl.getBoundingClientRect().bottom + 4;
