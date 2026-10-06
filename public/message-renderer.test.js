@@ -775,6 +775,27 @@ describe("MessageRenderer session notices", () => {
     expect(container.querySelectorAll("[data-notice-id]")).toHaveLength(1);
   });
 
+  it("renders a slash command's report as a labelled, id-keyed block", () => {
+    // omp 18.5.0 keeps command reports out of the transcript entirely, so the
+    // `command_output` frame is the GUI's only record of `/context` and
+    // friends. Labelled like a notice and clamped like one.
+    const el = renderer.renderCommandOutput("Context window: 1000000 tokens", { id: "cmdout-1" });
+
+    expect(el).not.toBeNull();
+    expect(el.dataset.noticeId).toBe("cmdout-1");
+    expect(el.querySelector(".notice-label").textContent).toBeTruthy();
+    expect(el.querySelector(".notice-body").textContent).toBe("Context window: 1000000 tokens");
+  });
+
+  it("skips empty command reports and repeats of the same frame", () => {
+    expect(renderer.renderCommandOutput("   ", { id: "cmdout-2" })).toBeNull();
+    const first = renderer.renderCommandOutput("No background jobs running.", { id: "cmdout-3" });
+    const second = renderer.renderCommandOutput("No background jobs running.", { id: "cmdout-3" });
+    expect(first).not.toBeNull();
+    expect(second).toBeNull();
+    expect(container.querySelectorAll("[data-notice-id]")).toHaveLength(1);
+  });
+
   it("shows only the notices written for the reader", () => {
     // The reported bundles, in order: 22 `lsp-late-diagnostic` blocks in one
     // turn (each a paragraph of biome output), then 15 `async-result` payloads

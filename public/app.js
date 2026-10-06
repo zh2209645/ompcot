@@ -11,6 +11,7 @@ import { setupSettingsEditors } from "./app-settings-editors.js";
 import { setupSettingsToggles } from "./app-settings-toggles.js";
 import { createAppUpdater } from "./app-updater.js";
 import { setupVoiceInput } from "./app-voice-input.js";
+import { createCommandOutputView } from "./command-output.js";
 import { createPendingCompaction } from "./compaction-pending.js";
 import {
   createComposerCommands,
@@ -56,6 +57,7 @@ import {
 } from "./pkg-registry.js";
 import { ScrollFollow } from "./scroll-follow.js";
 import { reconcileSessionActivity } from "./session-activity.js";
+import { createSessionBranchWaiters } from "./session-branch.js";
 import {
   renderTranscriptFromEntries,
   renderTranscriptFromEntriesChunked,
@@ -1177,6 +1179,26 @@ wsClient.addEventListener("sessionSettled", (e) => {
   settleFromRuntime("rpc-settled");
 });
 
+// Slash-command reports (`command_output` on the native lane). Since omp
+// 18.5.0 they never enter the session transcript, so this is the only place
+// they can appear; the view strips their ANSI styling and draws them as
+// id-keyed notice blocks.
+const commandOutputView = createCommandOutputView({
+  messageRenderer,
+  isSuppressed: () =>
+    // A peeked transcript owns `#messages`, and an active compaction draws
+    // its own outcome line from the pass's frames — its raw command_output
+    // text ("Compaction complete. Tokens: …") would double-report the result.
+    Boolean(transcriptView.active) ||
+    Boolean(compactionActive?.pending) ||
+    pendingCompaction.pending,
+});
+wsClient.addEventListener("commandOutput", (e) => {
+  const detail = e.detail || {};
+  if (!isForegroundFrame(detail)) return;
+  commandOutputView.handle(detail);
+});
+
 /**
  * Settle the run on the runtime's own verdict.
  *
@@ -1320,7 +1342,7 @@ function handleRPCEvent(event) {
       handleCompactionEnd(event);
       break;
     case "session_branch":
-      handleSessionBranch(event);
+      sessionBranchWaiters.handle(event);
       break;
     case "extension_ui_request":
       handleExtensionUIRequest(event);
@@ -2933,37 +2955,19 @@ function startForkAvailabilityObserver() {
   forkAvailabilityObserver.observe(messagesContainer, { childList: true, subtree: true });
 }
 
-// omp ≥18.3.1 performs forks through its native RPC `branch` (the extension
-// event context never carries ctx.branch), so the desktop broker forwards the
-// frame over the omp stdin pipe — fire-and-forget, since omp's RPC responses
-// land on a stdout the broker drops. Completion is confirmed by the forwarded
-// `session_branch` extension event instead; these waiters bridge the two.
-const sessionBranchWaiters = new Set();
+// omp performs forks through a native RPC frame (the extension event context
+// never carries ctx.branch), so the desktop broker forwards it over the omp
+// stdin pipe — fire-and-forget, since the reply goes to a stdout the broker
+// relays only narrowly. Completion is confirmed by the forwarded
+// `session_branch` extension event instead, matched on its `reason:"fork"` so
+// a `/btw` promotion or rewind cannot confirm a fork that never happened.
+const sessionBranchWaiters = createSessionBranchWaiters();
 
 /**
- * Resolve once a `session_branch` event arrives (true) or `timeoutMs` passes
- * (false). Fork actions use this to turn the fire-and-forget broker control
- * into an awaited outcome.
- */
-function waitForSessionBranchEvent(timeoutMs) {
-  return new Promise((resolve) => {
-    const waiter = { resolve };
-    sessionBranchWaiters.add(waiter);
-    setTimeout(() => {
-      if (sessionBranchWaiters.delete(waiter)) resolve(false);
-    }, timeoutMs);
-  });
-}
-
-function handleSessionBranch() {
-  for (const waiter of sessionBranchWaiters) waiter.resolve(true);
-  sessionBranchWaiters.clear();
-}
-
-/**
- * Fork via the broker's native `branch` RPC (omp ≥18.3.1). Resolves when the
+ * Fork via the broker's native RPC `fork` (omp ≥18.4.11; older builds get the
+ * pre-split `branch` frame — see `fork_session_core`). Resolves when the
  * `session_branch` event confirms the new session; times out honestly if the
- * embedded omp can't branch (frame silently rejected — its reply goes to the
+ * embedded omp can't fork (frame silently rejected — its reply goes to the
  * dropped stdout).
  */
 async function forkViaBroker(entryId) {
@@ -2983,7 +2987,7 @@ async function forkViaBroker(entryId) {
     messageRenderer.renderError(String(error ?? t("fork.failed")));
     return false;
   }
-  const landed = await waitForSessionBranchEvent(10000);
+  const landed = await sessionBranchWaiters.waitFor("fork", 10000);
   if (!landed) {
     messageRenderer.renderError(t("fork.failed"));
     return false;

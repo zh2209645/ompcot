@@ -315,6 +315,24 @@ describe("WebSocketClient broker routing", () => {
     expect(settled[0].port).toBe(47822);
   });
 
+  test("command_output dispatches as commandOutput with the answering port", () => {
+    // Slash-command reports ride the native lane (omp 18.5.0 keeps them out
+    // of the transcript), so the same port identity rules apply.
+    const client = new WebSocketClient("ws://127.0.0.1:49000/ui-ws");
+    const reports = [];
+    client.addEventListener("commandOutput", (event) => reports.push(event.detail));
+
+    client.handleMessage({
+      type: "broker_event",
+      sourcePort: 47822,
+      payload: { type: "command_output", text: "Context window: 1000000 tokens" },
+    });
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0].text).toBe("Context window: 1000000 tokens");
+    expect(reports[0].port).toBe(47822);
+  });
+
   test("send returns the requestId so callers can correlate delivery failures", () => {
     const client = new WebSocketClient("ws://127.0.0.1:49000/ui-ws");
     client.ws = { readyState: WebSocket.OPEN, send: () => {} };

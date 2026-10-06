@@ -509,6 +509,7 @@ export const zhCN = {
   // ── session notices (displayable `custom_message` entries) ──
   "notice.label": "通知",
   "notice.typeTitle": "来自 {type} 的通知",
+  "notice.commandOutput": "命令输出",
 
   // ── chat messages / markdown chrome ──
   "msg.copy": "复制",

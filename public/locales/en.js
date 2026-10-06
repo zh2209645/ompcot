@@ -520,6 +520,7 @@ export const en = {
   // ── session notices (displayable `custom_message` entries) ──
   "notice.label": "Notice",
   "notice.typeTitle": "Notice from {type}",
+  "notice.commandOutput": "Command output",
 
   // ── chat messages / markdown chrome ──
   "msg.copy": "Copy",

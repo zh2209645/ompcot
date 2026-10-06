@@ -65,19 +65,35 @@ const RPC_FRAME_MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
 /// through the embedded server's WS with the identity (entry ids, tool call
 /// ids) the renderers key on, and forwarding the raw RPC copies of them would
 /// double every frame and reintroduce the duplicate-element bugs that identity
-/// work fixed. Only the answers that exist *nowhere else* cross this lane.
+/// work fixed. Only the answers that exist *nowhere else* cross this lane:
+/// `prompt_result` (terminal status of a prompt written to this stdin),
+/// `session_settled` (the runtime's quiet verdict), `response` (the synchronous
+/// reply to any stdin frame — the slash path's acceptance/rejection, without
+/// which `sendSlashViaUpstream` waited on a `commandResponse` that had no
+/// producer) and `command_output` (slash-command reports; since omp 18.5.0
+/// they are no longer added to the transcript, so this lane is the GUI's only
+/// way to show `/context`, `/jobs`, `/mcp list`, … output at all).
 pub fn interesting_rpc_frame(line: &str) -> Option<serde_json::Value> {
     // The stream is dominated by streaming deltas (measured on 18.4.2: ~1230
     // `message_update` lines for one short run). A substring check costs a scan
     // of a line we were going to parse anyway and skips the JSON parse for
     // everything else, which is what keeps this reader cheap enough to run on
-    // every spawned process.
-    if !line.contains("prompt_result") && !line.contains("session_settled") {
+    // every spawned process. `"response"` is matched with its quotes: the bare
+    // word is too common in message prose, and escaped quotes inside JSON
+    // strings (`\"response\"`) cannot false-positive the match.
+    if !line.contains("prompt_result")
+        && !line.contains("session_settled")
+        && !line.contains("command_output")
+        && !line.contains("\"response\"")
+    {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     match value.get("type").and_then(|t| t.as_str()) {
-        Some("prompt_result") | Some("session_settled") => Some(value),
+        Some("prompt_result")
+        | Some("session_settled")
+        | Some("response")
+        | Some("command_output") => Some(value),
         _ => None,
     }
 }
@@ -406,6 +422,41 @@ fn run_omp_version(bin: &Path) -> String {
         .unwrap()
         .insert(bin.to_path_buf(), version.clone());
     version
+}
+
+/// Parse the `X.Y.Z` triple out of a `omp --version` output line
+/// (`"omp/18.6.1"`), for feature gates that hinge on a release.
+fn parse_omp_version(version: &str) -> Option<(u32, u32, u32)> {
+    let start = version.find(|c: char| c.is_ascii_digit())?;
+    let rest = &version[start..];
+    let mut parts = rest.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    // The patch segment may carry a suffix (`18.4.11-beta`): take the digits.
+    let patch: u32 = parts
+        .next()?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some((major, minor, patch))
+}
+
+/// Whether the omp build answers the RPC `fork` command (18.4.11+).
+///
+/// The frame names split in 18.4.11 and the pre-split `branch` is the wrong
+/// one to send on either side: on ≥18.4.11 `branch` is the esc-esc rewind
+/// (it drops the target entry and everything after it — a "fork from here"
+/// click would *destroy* the tail it meant to copy), while `fork` on an older
+/// build is silently ignored. So the frame is chosen by version, and an
+/// unverifiable version defaults to `fork`: the worst case there is a fork
+/// that times out honestly ("fork failed"), never a destructive transition.
+pub fn supports_rpc_fork(version: &str) -> bool {
+    match parse_omp_version(version) {
+        Some((major, minor, patch)) => (major, minor, patch) >= (18, 4, 11),
+        None => true,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1147,13 +1198,15 @@ mod tests {
     fn the_reader_relays_only_the_answers_and_drains_everything_else() {
         // The reader owns the child's stdout for its whole life: it must drain
         // every line (an unread pipe stalls the process mid-run) while handing
-        // the sink nothing but the two frames — once each, with the right port.
+        // the sink nothing but the answered frames — once each, with the right
+        // port.
         use std::io::Cursor;
         let stream = concat!(
             "{\"type\":\"ready\",\"protocolVersion\":1}\n",
             "{\"type\":\"message_update\",\"message\":{\"role\":\"assistant\"}}\n",
             "{\"type\":\"session_settled\"}\n",
             "{\"type\":\"command_output\",\"text\":\"Compaction complete.\"}\n",
+            "{\"id\":\"p1\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"agentInvoked\":false}}\n",
             "{\"type\":\"prompt_result\",\"id\":\"p1\",\"status\":\"completed\",\"sessionSettled\":true}\n",
             "not json\n",
             "{\"type\":\"prompt_result\",\"id\":\"p2\",\"status\":\"error\"}\n",
@@ -1178,6 +1231,8 @@ mod tests {
             seen,
             vec![
                 (47821, "session_settled:-".to_string()),
+                (47821, "command_output:-".to_string()),
+                (47821, "response:p1".to_string()),
                 (47821, "prompt_result:p1".to_string()),
                 (47821, "prompt_result:p2".to_string()),
             ]
@@ -1189,35 +1244,64 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_answers_cross_the_native_rpc_lane() {
+    fn only_the_answers_that_exist_nowhere_else_cross_the_native_rpc_lane() {
         // The lane exists for the frames the extension WS cannot produce: the
-        // terminal status of a prompt written to the child's stdin and the
-        // runtime's settle verdict. Everything else on that stream (agent
-        // events, command output, ui requests) already reaches the windows with
-        // renderer identity through the embedded server, and forwarding it here
-        // would double every frame.
+        // terminal status of a prompt written to the child's stdin, the
+        // runtime's settle verdict, the synchronous `response` to a stdin
+        // frame (the slash path's acceptance), and `command_output` reports
+        // (omp 18.5.0+ keeps them out of the transcript entirely). Everything
+        // else on that stream (agent events, ui requests) already reaches the
+        // windows with renderer identity through the embedded server, and
+        // forwarding it here would double every frame.
         let prompt_result = r#"{"id":"rw1","type":"prompt_result","agentInvoked":false,"status":"completed","sessionSettled":true}"#;
         let settled = r#"{"type":"session_settled"}"#;
+        let response = r#"{"id":"ompcot-cmd-1","type":"response","command":"prompt","success":true,"data":{"agentInvoked":false}}"#;
+        let command_output = r#"{"type":"command_output","text":"Context window: 1000000 tokens"}"#;
         assert!(interesting_rpc_frame(prompt_result).is_some());
         assert!(interesting_rpc_frame(settled).is_some());
+        assert!(interesting_rpc_frame(response).is_some());
+        assert!(interesting_rpc_frame(command_output).is_some());
         let kept = interesting_rpc_frame(prompt_result).unwrap();
         assert_eq!(kept["status"], "completed");
         assert_eq!(kept["sessionSettled"], true);
 
         for noise in [
             r#"{"type":"ready","protocolVersion":1}"#,
-            r#"{"type":"command_output","text":"Compaction complete."}"#,
             r#"{"type":"extension_ui_request","method":"setWidget"}"#,
             r#"{"type":"message_update","message":{"role":"assistant"}}"#,
-            // Passes the substring pre-filter but is not one of the two frames:
-            // the parse decides, never the mention.
+            // Passes the substring pre-filter but is not one of the relayed
+            // frames: the parse decides, never the mention.
             r#"{"type":"turn_end","message":{"content":[{"type":"text","text":"the agent will emit prompt_result and session_settled"}]}}"#,
+            // Prose containing the word "response" must not trip the quoted
+            // match — only the bare type value does.
+            r#"{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"the response was lost, said \"response\" loudly"}]}}"#,
             "not json at all",
             "",
             "[]",
         ] {
             assert!(interesting_rpc_frame(noise).is_none(), "leaked: {noise}");
         }
+    }
+
+    #[test]
+    fn the_fork_frame_follows_the_running_omp_version() {
+        // ≥18.4.11 answers `fork` (keep up to entryId, new session file);
+        // `branch` there is the destructive rewind. Older builds only know
+        // `branch` with the old fork meaning. An unparseable version must
+        // default to the non-destructive frame.
+        assert!(supports_rpc_fork("omp/18.6.1"));
+        assert!(supports_rpc_fork("omp/18.4.11"));
+        assert!(supports_rpc_fork("omp/18.4.12-beta.3"));
+        assert!(supports_rpc_fork("omp/19.0.0"));
+        assert!(!supports_rpc_fork("omp/18.4.10"));
+        assert!(!supports_rpc_fork("omp/18.3.1"));
+        assert!(!supports_rpc_fork("omp/17.9.9"));
+        assert!(supports_rpc_fork("unknown (omp not found on PATH)"));
+        assert!(supports_rpc_fork(""));
+
+        assert_eq!(parse_omp_version("omp/18.6.1"), Some((18, 6, 1)));
+        assert_eq!(parse_omp_version("omp/18.4.12-beta.3"), Some((18, 4, 12)));
+        assert_eq!(parse_omp_version("no version here"), None);
     }
 
     /// Unique temp dir under the system temp dir, mirroring the helper in

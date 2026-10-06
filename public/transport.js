@@ -80,9 +80,10 @@ export class WsTransport {
   }
 
   // Fork the CURRENT session of this window's omp process from a transcript
-  // entry. omp's native RPC `branch` (18.3.1+) performs it; completion is
-  // confirmed by the `session_branch` extension event, not the control reply
-  // (the broker forwards the frame fire-and-forget, like switch_session).
+  // entry. omp's native RPC `fork` (18.4.11+; older builds get the pre-split
+  // `branch` frame) performs it; completion is confirmed by the
+  // `session_branch` extension event, not the control reply (the broker
+  // forwards the frame fire-and-forget, like switch_session).
   forkSession(entryId) {
     return this._control("fork_session", {
       entryId,

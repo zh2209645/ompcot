@@ -920,6 +920,27 @@ export class MessageRenderer {
    */
   renderNotice({ id = null, customType = "", content = null, label = null } = {}) {
     if (!USER_FACING_NOTICE_TYPES.has(String(customType || ""))) return null;
+    return this._appendNoticeBlock({ id, customType, content, label });
+  }
+
+  /**
+   * Append a slash command's report (`command_output` frame). Since omp
+   * 18.5.0 command reports never enter the session transcript at all, so this
+   * block — id-keyed and clamped like a notice — is the GUI's only record on
+   * screen (a report is not a session entry, so a repaint that redraws from
+   * the file wipes it, like every other transient).
+   */
+  renderCommandOutput(text, { id = null } = {}) {
+    return this._appendNoticeBlock({
+      id,
+      customType: "",
+      content: text,
+      label: t("notice.commandOutput"),
+    });
+  }
+
+  /** Build and append one notice block (shared by the paths above). */
+  _appendNoticeBlock({ id = null, customType = "", content = null, label = null } = {}) {
     const text = noticeText(content);
     if (!text) return null;
     if (typeof id === "string" && id && this.findNoticeElement(id)) return null;

@@ -505,6 +505,17 @@ export class WebSocketClient extends EventTarget {
         }
         this.dispatchEvent(new CustomEvent("sessionSettled", { detail: message }));
         break;
+      case "command_output":
+        // A slash command's report text on the native RPC lane. Since omp
+        // 18.5.0 reports like `/context` and `/jobs` never enter the
+        // transcript at all, so this frame is the GUI's only way to show
+        // them. Port identity like the frames above: a background instance's
+        // report must not draw into this window.
+        if (message.port == null && route?.sourcePort != null) {
+          message = { ...message, port: route.sourcePort };
+        }
+        this.dispatchEvent(new CustomEvent("commandOutput", { detail: message }));
+        break;
       case "mirror_sync":
         // Do NOT call setRoutingContext here. The broker broadcasts every
         // upstream's `mirror_sync` to all UI clients, so a snapshot emitted by

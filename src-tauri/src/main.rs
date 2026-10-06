@@ -51,17 +51,28 @@ fn switch_session_core(
     result
 }
 
-/// Fork (branch) the current session of the omp instance on `port` from a
-/// transcript entry, using omp's native RPC `branch` command (available since
-/// omp 18.3.1). Like `switch_session_core` this is fire-and-forget on purpose:
-/// omp's RPC responses go to a stdout we deliberately drop, so the WebView
-/// confirms completion via the `session_branch` extension event instead. The
-/// branched session file is unknown here — the embedded server's instance
-/// registry picks it up when the session reloads.
+/// Fork the current session of the omp instance on `port` at a transcript
+/// entry: the process moves to a new session file holding the history up to
+/// and including `entryId`.
+///
+/// On omp ≥18.4.11 this is the RPC `fork` command. Older builds only have
+/// `branch`, which meant this same fork before 18.4.11 split the two — on new
+/// builds `branch` is the esc-esc rewind (it DROPS the entry and everything
+/// after it), so the frame is chosen by the running version
+/// (`supports_rpc_fork`). Like `switch_session_core` this is fire-and-forget:
+/// completion is confirmed by the `session_branch` extension event (reason
+/// `"fork"`) instead of the reply. The forked session file is unknown here —
+/// the embedded server's instance registry picks it up when the session
+/// reloads.
 fn fork_session_core(port: u16, entry_id: &str, manager: &OmpManager) -> Result<(), String> {
+    let frame_type = if omp_manager::supports_rpc_fork(&manager.omp_version()) {
+        "fork"
+    } else {
+        "branch"
+    };
     manager.send_rpc(
         port,
-        serde_json::json!({ "type": "branch", "entryId": entry_id }),
+        serde_json::json!({ "type": frame_type, "entryId": entry_id }),
     )
 }
 
