@@ -88,8 +88,14 @@ if [ -z "$appimagetool_bin" ]; then
 fi
 if [ -z "$appimagetool_bin" ]; then
   appimagetool_bin="$work/appimagetool"
+  # Match the runner's architecture: an x86_64 appimagetool cannot execute
+  # on the arm64 runners (Exec format error).
+  case "$(uname -m)" in
+    aarch64 | arm64) at_arch=aarch64 ;;
+    *) at_arch=x86_64 ;;
+  esac
   curl -sL -o "$appimagetool_bin" \
-    https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+    "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${at_arch}.AppImage"
   chmod +x "$appimagetool_bin"
 fi
 
