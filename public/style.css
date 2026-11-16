@@ -1280,6 +1280,122 @@ body {
   padding: 4px 0;
 }
 
+/* TODO list toggle + popover (public/todo-panel.js). The badge counts open
+   (pending + in-progress) tasks and hides when there are none. */
+.todo-toggle {
+  position: relative;
+}
+
+.todo-count {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: calc(14px * var(--font-scale));
+  height: calc(14px * var(--font-scale));
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg-solid);
+  font-size: calc(9px * var(--font-scale));
+  line-height: calc(14px * var(--font-scale));
+  text-align: center;
+  pointer-events: none;
+}
+
+.todo-count.hidden {
+  display: none;
+}
+
+.todo-panel {
+  width: 340px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.todo-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.todo-progress {
+  font-size: calc(11px * var(--font-scale));
+  color: var(--text-dim);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.todo-phase {
+  margin-bottom: 10px;
+}
+
+.todo-phase-name {
+  font-size: calc(11px * var(--font-scale));
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.todo-task {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: calc(12px * var(--font-scale));
+  line-height: 1.45;
+}
+
+.todo-task-glyph {
+  flex: none;
+  width: calc(12px * var(--font-scale));
+  text-align: center;
+  font-size: calc(10px * var(--font-scale));
+}
+
+.todo-task-content {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.todo-task-details {
+  flex-basis: 100%;
+  padding-left: calc(18px * var(--font-scale));
+  font-size: calc(11px * var(--font-scale));
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.todo-task-in_progress .todo-task-glyph {
+  color: var(--accent);
+}
+
+.todo-task-in_progress .todo-task-content {
+  color: var(--accent);
+}
+
+.todo-task-completed .todo-task-glyph {
+  color: var(--success);
+}
+
+.todo-task-completed .todo-task-content {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+
+.todo-task-abandoned .todo-task-glyph {
+  color: var(--text-dim);
+}
+
+.todo-task-abandoned .todo-task-content {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+
 .token-usage.visible {
   display: block;
 }
@@ -5113,6 +5229,32 @@ body.hide-thinking .thinking-block {
 
 .dialog-option:active {
   transform: scale(0.98);
+}
+
+/* Marker rows (ask checkbox/radio fallback): marker + label on one line,
+   the host's checked state visible, the description under it. */
+.dialog-option-markable {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dialog-option-marker {
+  margin-right: 8px;
+  opacity: 0.85;
+  font-size: calc(12px * var(--font-scale));
+}
+
+.dialog-option-label {
+  flex: 1;
+}
+
+.dialog-option-description {
+  flex-basis: 100%;
+  margin-top: 4px;
+  font-size: calc(11px * var(--font-scale));
+  color: var(--text-secondary);
+  line-height: 1.45;
 }
 
 .dialog-actions {

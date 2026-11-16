@@ -7,6 +7,12 @@
 //    primitives from dialogs.js for the visuals and adds what the frozen
 //    server contract needs on top:
 //
+//      - select marker state (omp ≥18.20.0): `selectionMarker`,
+//        `checkedIndices`, `markableCount` and `initialIndex` render the ask
+//        tool's checkbox fallback honestly (host-owned checked set, toggles
+//        separated from the action labels that end the round); `input`'s
+//        `secret` hint masks what is typed
+//
 //      - one dialog at a time; extra requests queue FIFO and replay in order
 //      - replies go out as `ui_response` / `ui_cancel` over ws-rpc:
 //        select → {value: string|undefined}, confirm → {value: boolean},
@@ -217,7 +223,12 @@ class UIRequestDialogHandler extends DialogHandler {
     for (const option of dialog.querySelectorAll(".dialog-option")) {
       option.tabIndex = 0;
       option.setAttribute("role", "button");
-      option.setAttribute("aria-label", option.textContent || "");
+      // Marker rows already carry a precise label (the option text without
+      // the marker glyph or description); plain rows fall back to their text.
+      option.setAttribute(
+        "aria-label",
+        option.getAttribute("aria-label") || option.textContent || "",
+      );
       option.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -236,7 +247,10 @@ class UIRequestDialogHandler extends DialogHandler {
     // (abort stream / close panels) can act on it.
     document.addEventListener("keydown", this.onKeyDown, true);
 
-    const first = dialog.querySelector(".dialog-option") || dialog.querySelector("button");
+    const first =
+      dialog.querySelector(".dialog-option[data-initial-option]") ||
+      dialog.querySelector(".dialog-option") ||
+      dialog.querySelector("button");
     if (first) setTimeout(() => first.focus(), 50);
   }
 

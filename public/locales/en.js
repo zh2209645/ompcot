@@ -482,6 +482,17 @@ export const en = {
   "ctx.used": "{pct}% used",
   "ctx.empty": "No usage recorded for this session yet",
 
+  // ── todo list panel ──
+  "todo.title": "Tasks",
+  "todo.empty": "No todos yet",
+  "todo.toggleAria": "Toggle task list",
+  "todo.progress": "{done}/{total}",
+  "todo.progressAria": "{done} of {total} done",
+  "todo.status.pending": "Pending",
+  "todo.status.inProgress": "In progress",
+  "todo.status.completed": "Completed",
+  "todo.status.abandoned": "Abandoned",
+
   // ── updater ──
   "update.available": "Update available",
   "update.openInSettings": "Open updates in settings",

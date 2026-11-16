@@ -473,6 +473,17 @@ export const zhCN = {
   "ctx.used": "已用 {pct}%",
   "ctx.empty": "本会话暂无用量记录",
 
+  // ── 待办列表面板 ──
+  "todo.title": "任务",
+  "todo.empty": "暂无待办",
+  "todo.toggleAria": "显示/隐藏任务列表",
+  "todo.progress": "{done}/{total}",
+  "todo.progressAria": "已完成 {done}/{total}",
+  "todo.status.pending": "待处理",
+  "todo.status.inProgress": "进行中",
+  "todo.status.completed": "已完成",
+  "todo.status.abandoned": "已放弃",
+
   // ── updater ──
   "update.available": "有可用更新",
   "update.openInSettings": "在设置中打开更新",

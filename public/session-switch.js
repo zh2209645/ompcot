@@ -68,6 +68,7 @@ export class SessionSwitchGate {
     this.sleep = sleep;
     this.expected = null;
     this.settledWith = null;
+    this.failure = null;
   }
 
   /** Session file a pending switch is expected to land on, or null. */
@@ -79,6 +80,9 @@ export class SessionSwitchGate {
   expect(sessionFile) {
     this.expected = sessionFile || null;
     this.settledWith = null;
+    // A cause left over from an earlier switch must never be reported for
+    // this one.
+    this.failure = null;
   }
 
   /** True when `snapshotSessionFile` may repaint the transcript. */
@@ -99,6 +103,27 @@ export class SessionSwitchGate {
   cancel() {
     this.expected = null;
     this.settledWith = null;
+  }
+
+  /**
+   * A definitive refusal from the runtime itself (the `switch_session`
+   * response the broker relays on the native stdout lane). omp ≥18.6.3 fails
+   * a switch whose target's saved model cannot be restored (`Could not
+   * restore model <provider/id>`) and cancels one its hooks or the cwd check
+   * refuses — both answer instead of ever confirming, so the wait must stop
+   * now and report the cause. Deliberately *not* cleared by `cancel()`: the
+   * caller reads it after the wait returns (only `expect()` starts clean).
+   */
+  noteFailure(error) {
+    this.failure = typeof error === "string" && error ? error : true;
+    this.cancel();
+  }
+
+  /** Consume the recorded failure cause (string, `true` for a bare refusal, or null). */
+  takeFailure() {
+    const failure = this.failure;
+    this.failure = null;
+    return failure;
   }
 
   /**

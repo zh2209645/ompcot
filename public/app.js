@@ -78,6 +78,7 @@ import { agentEndContinues, isTypingUserText, StateManager } from "./state.js";
 import { loadImportedThemes, removeImportedTheme, setupThemeImport } from "./theme-import.js";
 import { applyTheme, getCurrentTheme, registerImportedThemes, themes } from "./themes.js";
 import { setupThinkingLevelMenu } from "./thinking-level-menu.js";
+import { createTodoPanel } from "./todo-panel.js";
 import { ToolCardRenderer } from "./tool-card.js";
 import { cancelHydration, hydrateTranscriptTailFirst } from "./transcript-hydration.js";
 import { resolveTranscriptOpenAction } from "./transcript-open.js";
@@ -1104,6 +1105,24 @@ wsClient.addEventListener("commandUndeliverable", (e) => {
 // instead of surfacing an error (F16).
 wsClient.addEventListener("commandResponse", (e) => {
   const detail = e.detail || {};
+  // A `switch_session` answered on the native stdout lane (the broker relays
+  // it): a refusal is definitive — omp ≥18.6.3 fails a switch whose target's
+  // saved model cannot be restored (`Could not restore model <provider/id>`)
+  // and answers `cancelled: true` for one its hooks or the cwd check refuse.
+  // End the gate's snapshot wait now and carry the cause instead of burning
+  // the 15 s confirm budget on a switch that can never land. Scoped to the
+  // foreground process: the broker's envelope may carry another port's reply.
+  if (detail.command === "switch_session") {
+    const sourcePort = detail.__broker?.sourcePort;
+    if (!sourcePort || sourcePort === foregroundPort) {
+      if (detail.success === false) {
+        sessionSwitchGate.noteFailure(detail.error || t("session.switchUnconfirmed"));
+      } else if (detail.data?.cancelled === true) {
+        sessionSwitchGate.noteFailure(t("session.switchUnconfirmed"));
+      }
+    }
+    return;
+  }
   const requestId = detail.requestId ?? detail.id;
   if (!requestId) return;
   const pending = inFlightPrompts.get(requestId);
@@ -1291,6 +1310,9 @@ function handleRPCEvent(event) {
       break;
     case "agent_end":
       handleAgentEnd(event);
+      // Settle is where `/todo` ops and TUI-HUD edits have all landed; the
+      // panel converges on them here even when no `todo` call was seen.
+      todoPanel.scheduleRefresh();
       if (pendingNewSessionRefresh) {
         refreshSidebarForNewSession(event).catch(() => {});
       }
@@ -1328,12 +1350,16 @@ function handleRPCEvent(event) {
       break;
     case "tool_execution_start":
       handleToolExecutionStart(event);
+      // Every state-changing `todo` op commits a fresh snapshot through its
+      // own call — the panel refetches when one is seen.
+      if (event.toolName === "todo") todoPanel.scheduleRefresh();
       break;
     case "tool_execution_update":
       handleToolExecutionUpdate(event);
       break;
     case "tool_execution_end":
       handleToolExecutionEnd(event);
+      if (event.toolName === "todo") todoPanel.scheduleRefresh();
       break;
     case "auto_compaction_start":
       handleCompactionStart(event);
@@ -1343,6 +1369,23 @@ function handleRPCEvent(event) {
       break;
     case "session_branch":
       sessionBranchWaiters.handle(event);
+      break;
+    case "session_clear":
+      // `/clear` reset this session's context without changing its session id
+      // (omp 18.20.1). The snapshot-pairing rule keeps a repaint for the
+      // session the DOM already shows, so the cleared branch is painted here:
+      // drop the transcript and its totals, then ask for a fresh snapshot so
+      // the window converges on whatever the branch holds now.
+      if (!transcriptView.active) {
+        state.reset();
+        messageRenderer.clear();
+        toolCardRenderer.clear();
+        resetTranscriptTotals();
+      }
+      wsClient.send({ type: "mirror_sync_request" });
+      // The todo list belongs to the context `/clear` just reset.
+      todoPanel.clear();
+      todoPanel.scheduleRefresh();
       break;
     case "extension_ui_request":
       handleExtensionUIRequest(event);
@@ -3830,6 +3873,8 @@ async function resetUiForNewSession() {
   state.reset();
   messageRenderer.clear();
   toolCardRenderer.clear();
+  // A new chat's task list does not exist yet; the next paint refetches.
+  todoPanel.clear();
   renderWorkspaceWelcome();
   sidebar.clearActive();
   mirrorActiveSessionFile = null;
@@ -4041,8 +4086,16 @@ async function confirmMirrorSwitch(sessionFile) {
     sendRequest: () => wsClient.send({ type: "mirror_sync_request" }),
   });
   if (!confirmed) {
-    logSessionRoute("switch:unconfirmed", { selectedSession: sessionFile });
-    messageRenderer.renderError(t("session.switchUnconfirmed"));
+    // A refusal the runtime answered on the stdout lane carries its cause
+    // (e.g. `Could not restore model <provider/id>`) — report that instead of
+    // the generic "unconfirmed" whenever the gate recorded one.
+    const failure = sessionSwitchGate.takeFailure();
+    const cause = typeof failure === "string" && failure ? failure : null;
+    logSessionRoute("switch:unconfirmed", {
+      selectedSession: sessionFile,
+      ...(cause ? { cause } : {}),
+    });
+    messageRenderer.renderError(cause || t("session.switchUnconfirmed"));
     // The gate is clear again, so the process's next snapshot applies — but an
     // idle process sends none on its own, which would leave the screen on a
     // transcript the runtime is not on. Ask once so the window converges on
@@ -4883,6 +4936,9 @@ async function renderSessionHistory(
   // an aborted or partial paint is never mistaken for "nothing rendered here"
   // by the truncated-snapshot rule in `handleMirrorSync`.
   if (sessionFile) renderedTranscriptFile = sessionFile;
+  // The todo panel reports the list of the session this paint draws (peeked
+  // and historical views included) — refetch against the new identity.
+  todoPanel.scheduleRefresh();
 
   const list = entriesWithMessageIds(entries);
   // Both paints are followed by the same recompute: totals belong to the
@@ -6354,6 +6410,16 @@ setupContextViz({
   contextVizTotal: document.getElementById("context-viz-total"),
   getUsage: () => lastUsage,
   getContextWindowSize: () => contextWindowSize,
+});
+
+// The todo panel reports the list of the session the transcript shows: the
+// file a peek/history view claimed wins over the live paint's identity, and
+// both absent means "the process's live session".
+const todoPanel = createTodoPanel({
+  wsClient,
+  toggleEl: document.getElementById("todo-toggle"),
+  panelEl: document.getElementById("todo-panel"),
+  getSessionFile: () => transcriptView.file || renderedTranscriptFile || null,
 });
 
 setupVoiceInput({

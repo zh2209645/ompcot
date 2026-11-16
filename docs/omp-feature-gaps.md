@@ -150,6 +150,121 @@ This document records which omp capabilities the GUI does **not** expose today, 
 > - **New surfaces, deliberately not wired (available to adopt later):** RPC `remove_queued_message` + `queue_update`/`get_state.queuedMessages` (18.4.4) and queued-message promotion (18.4.6) — the GUI keeps its own composer queue; `set_event_filter messageUpdates:"delta"` (18.4.5) — an opt-in stream-size cut for a stream the broker drains anyway; `cache_warming_start/end` + `set_cache_warming` (18.4.5); `cancel_subagent`/`steer_subagent` (18.4.9) — Agent Hub is read-only by design; `predict_word` word-completion (18.4.9); the aggregated ask-dialog mode (18.4.9, opt-in); goal management (`goal.*` RPCs, `--goal`, `get_state.goal`, 18.4.11) and per-call task `model` selectors (18.5.0); GPT live-voice RPC sessions (18.5.1); subagent completion estimates (18.4.11 wire, shown in TUI wait/task views).
 > - **Session-file moves (18.4.9)** — "SDK notifications when a session moves to a new persistence file" exist for SDK hosts only; no extension event carries the move. The GUI converges through the instance registry rewrite + `mirror_sync`/`session_branch` re-broadcasts (the `session_branch` envelope's `sessionId` is already the new file). Residual gap, noted not fixed.
 
+> **Status review 2026-11-16 (omp 18.6.1 → 18.20.3, GitHub release bodies; every release triaged).** 56 release
+> bodies in the window (18.6.3–18.20.3) fetched from the releases API and triaged per package section against this
+> document's consumption surface; the breaking/API hits re-verified at source level against the published
+> `@oh-my-pi/pi-coding-agent` / `pi-agent-core` **18.20.3** tarballs (`extensibility/extensions/types.d.ts`,
+> `modes/rpc/wire/rpc-wire.generated.d.ts`, `modes/rpc/rpc-types.d.ts`) and the bundled `dist/cli.js`. Three
+> adaptations shipped:
+>
+> - **The dialog surface drifted (18.7.0 → 18.20.0): the ask checkbox fallback rendered as a blind single-choice list.**
+>   The `ask` tool's RPC fallback (hosts without `ui.formDialog`, 18.18.3) drives multi-select through *repeated*
+>   `select` calls carrying `selectionMarker`/`checkedIndices`/`markableCount` (+ `initialIndex`, `optionDetails`) —
+>   each click answers one label and the host re-issues the round with its new checked set until an action label past
+>   `markableCount` ends it (18.20.0 made those fields explicit on the wire) — and `ctx.ui.input` gained `secret: true`
+>   (18.13.2). The UI bridge dropped every `dialogOptions` display hint and the frontend rendered each round as a
+>   plain list: the checked set invisible, toggles indistinguishable from the actions. Shipped: the bridge forwards
+>   the hints (`selectDisplayHints`) and `secret`; `dialogs.js` renders marker rows from the host's `checkedIndices`
+>   (clicking still answers the label — the runtime's loop owns the state) and masks secret inputs; `initialIndex`
+>   drives the initial focus. `ui.approve()`'s answer-protocol change (18.11.3: `"once"|"session"|"deny"`; grants +
+>   `{grant, always}` 18.12.3) does **not** reach this code path: the RPC UI context exposes neither `approve` nor
+>   `askDialog` (source-verified in 18.20.3's bundle — `askDialog` is a getter gated by `askDialogEnabled`, off
+>   unless the client sends `set_ask_dialog`, which the GUI never does), so both callers fall back to `select` through
+>   the bridge, which answers labels as before.
+> - **`session_clear` (18.20.1)** — `/clear` resets a session's context without changing its id, and nothing repainted
+>   (the snapshot-pairing rule deliberately keeps a repaint for the session the DOM already shows). Now forwarded in
+>   `FORWARDED_EVENT_TYPES` and handled: the transcript and its totals are dropped and a fresh snapshot is requested.
+> - **A refused switch answered — the GUI burned its whole 15 s confirm budget on switches that could never land.**
+>   Since 18.6.3 `switch_session`/`open_session` fail closed: a target whose saved model cannot be restored throws
+>   `Could not restore model <provider/id>` (and `cancelled: true` for a hook/cwd refusal) with the in-flight turn
+>   already aborted. That answer rides the broker's `response` relay (which had no consumer for switch frames); the
+>   gate now fails fast and reports the cause instead of the generic "unconfirmed" (`SessionSwitchGate.noteFailure`).
+> - **Verified correct, no change:** `agent_end` now carries `awaitingAsyncWork` alongside `willContinue` (18.11.0) —
+>   the GUI's existing split already treats both pause kinds as non-terminal, and the debug fields already recorded
+>   the flag; `session_settled`/`isSettled` gained exactly the semantics the GUI's `runtimeSettled` predates (stuck
+>   busy fix 18.9.0, settled after hidden reminders 18.13.3); tool-result *messages* are still flushed in call order
+>   (the 18.4.2 `flushResultMessages` shape survives in pi-agent-core 18.20.3), so `liveLookup`/`addHistoryResult`
+>   stay sound; the run-settle churn across the window (interrupt-then-steer drops the final `agent_end`, 18.8.7;
+>   working state held through mid-turn compaction, 18.8.5; Esc-with-background-jobs stays waiting, 18.12.4/18.13.0)
+>   all corrects *toward* the model the GUI encodes — it keys on terminal/settled, never on counting `agent_end`.
+>
+> **Per-release digest (every body triaged; one line each):** 18.6.3 fail-closed model restore, `abort_and_restore_queue`,
+> `/btw` RPC frames, slow-mode/`usageLimit` state, `SessionInitEntry.systemPrompt` blocks · 18.7.0 multi-select ask over
+> RPC, `get_logout_accounts`/`logout`, interrupted-turn persistence · 18.8.0 titles gain cards/icons · 18.8.1
+> `omp usage accounts` · 18.8.2 per-call `task` model overrides removed, 413-triggered compaction · 18.8.3 transient
+> OAuth refresh no longer kills sessions · 18.8.4 usage-cache scoping, bare-id provider ranking · 18.8.5 run-state
+> held through mid-turn compaction, `compaction.modelThresholds` · 18.8.6 extension asides unblocked, worktrees ·
+> 18.8.7 interrupt-to-steer suppresses the final `agent_end`, titles start at reply start · 18.8.8 compaction-limit
+> semantics (`f<tokens>`), `/jobs kill`, `omp anonymize` · 18.8.9 fork pairs unresolved tool calls as unknown-outcome ·
+> 18.9.0 queue-update fixes, `omp usage reset`, async-job metadata, RPC MCP-tool-list fix · 18.9.1–18.9.2 provider/judge
+> fixes · 18.10.0 `omp session pack/unpack`, `omp auth export/import`, Windows IPC transport, `RpcClient.stop()` fix ·
+> 18.10.1 Tern pickers · 18.10.2 late `tool_execution_update` after run end (`onDetachedToolUpdate`), `async.state:"cancelled"` ·
+> 18.10.3 `elidedOutputTokens`, `omp --restore`, trimmed tool-result metadata · 18.10.4 plan-review extension surfaces ·
+> 18.11.0 `agent_end.awaitingAsyncWork`, build metadata per entry, async-result dedupe, `CompactionPreparation` fields ·
+> 18.11.1 steering priority, session-write durability · 18.11.2 `agent_start.resumedToolCallIds`, todo piggybacking ·
+> **18.11.3 `ui.approve()` answers become `"once"|"session"|"deny"`**, premature-idle fix · 18.12.0 `ThinkingContent.narration`,
+> steer-during-interrupt settle fix · 18.12.1 advisor auto-continue default · 18.12.2 cache-timed idle compaction ·
+> 18.12.3 approval `grants`, tool-result persistence across `/compact`//`new` · 18.12.4 off-branch leaf metadata,
+> `set_todos`, MCP progress in tool updates · 18.12.5 cache pricing · 18.12.6 deferred extension startup,
+> `/mcp reauth` over RPC · 18.13.0 `details.errorKind`, `--warn-cost`/`--max-cost`, usage `policy` objects · 18.13.1
+> `Agent.isPaused`, `tools.restrictedFolders`, ask `noteOption` · **18.13.2 RPC `navigate_tree`/`abort_branch_summary`/`set_label`,
+> `mode_changed`, `ctx.ui.input {secret}`**, `open_session` linked-copy resolution · **18.13.3 `manual_compaction_start`/`_end`
+> session events (RPC stdout lane only)**, `session_settled` after hidden reminders, live-session rename refusal,
+> `omp config list --scope` · 18.14.0 strict model selectors, `out://` interim replies (RPC off by default), `live_connect`,
+> HTML exports need network · 18.14.1 `get_session_lease`, queueable `/compact`, effortMap clamping · 18.14.2 queued
+> message closes a pending ask dialog, `PI_TOOL_CALL_ID` · 18.15.0 job purposes/captions, credential-fallback walk,
+> `credential_disabled` narrowed to real requests · 18.16.0 native tokenizer (earlier auto-compaction), `--export` OOM
+> fix, `agent.db` corruption fix, history.db fast listings, read truncation-notice text changes · 18.17.0 bash
+> elision fields, `(no output, exit code 0)`, `Agent.queuedMessageGate`, settings-precedence change · 18.18.0 shell
+> traces in saved sessions, session auto-titling · 18.18.1 `bash excludeFromContext` + `ready` capability field,
+> 429-as-overflow reclassification · 18.18.2 extension event ordering guarantee, session-op serialization,
+> scoped-model refresh after RPC login/logout, `omp gc --strip` · **18.18.3 `ask` tool reworked to HTML forms**
+> (`{html}` args, `AskToolDetails{answers,timedOut}`), Windows `/export` fix · 18.18.4 auto-compaction loop warns once,
+> compaction summaries non-empty on thinking models · 18.18.5 catalog-only · 18.18.6 entry-id re-indexing,
+> `JobSnapshot.settledAtMs` · 18.18.7 `session_before_shutdown`, `session_before_*` prompts no longer 30s-timeout,
+> LiteLLM budgets, `login-warning` providers, `autoRedeem*` key renames · 18.18.8 recovered runs stay running,
+> `--session`+`--restore` fix · 18.18.9 `/session delete` detaches first, blocked-state reporting, in-message
+> effect ordering (`earlierEffectsSettled`) · 18.19.0 `task.steps`, `task.file`/`blocked` todo removed, ask
+> submits current values on timeout, Windows session-save stalls fixed · **18.20.0 select marker fields on the RPC
+> wire, todo `blocked` removed from wire types, secrets overhaul (bad regex rule now *stops startup*)**, Gemini `xhigh` ·
+> **18.20.1 `session_clear` event**, `/fork` aborts the active response, Antigravity paused + `auth.unpausedProviders` ·
+> 18.20.2 `antigravity-cli` provider · 18.20.3 `seance` removed, `task.steps` progress preserved, pending approval
+> closed on abort, compound-bash approval segments.
+>
+> **Judged not-gaps (no action):** session-entry drift is additive or text-shape only (build metadata 18.11.0,
+> `elidedOutputTokens` 18.10.3, `errorKind` 18.13.0, entry ids re-indexed 18.18.6, bash traces in tool updates and
+> entries 18.17.0+, `SessionInitEntry.systemPrompt` blocks 18.6.3) — the renderers key on ids/timestamps and treat
+> result text as opaque; `omp usage --json` growth (`policy`, LiteLLM budgets, 24h staleness 18.11.0) fits the generic
+> renderer; `omp --export`'s `Exported to: ` prefix is unchanged (the path is now absolute — the GUI's parse keeps
+> working, and 18.16.0/18.18.3 fix OOM and Windows output); todo `blocked` removal (18.19.0/18.20.0) is moot (no GUI
+> todo surface; `mid-run-todo-nudge` stays hidden); `session_before_shutdown` (18.18.7), `mode_changed` (18.13.2) and
+> `plan_review_*` (18.10.4) are not forwarded (no GUI consumer; forwarding would only warn); the SDK/library
+> BREAKINGs (`TypeSafeJudge`→`NativeJudge` 18.9.2, `pi-ai/stream` exports 18.8.0, `WorkingRowSpec`, pi-tui batches)
+> never reach the RPC surface.
+>
+> **New surfaces, deliberately not wired (available to adopt later):** RPC `navigate_tree`/`set_label`/`abort_branch_summary`
+> (18.13.2) — notably `navigate_tree` makes a **native RPC rewind** real, so the `ompcot-rewind` extension-command
+> detour ("the RPC protocol has only the read-only `get_tree`") is now replaceable; `abort_and_restore_queue` (18.6.3,
+> Esc-equivalent that hands queued input back); `set_slow_mode` + `get_state.slowModeSupported/slowModeEnabled/usageLimit`
+> (18.6.3) — a rate-limit badge; `get_session_lease` (18.14.1) — a stronger `planSessionHosting` ownership check;
+> `bash excludeFromContext` (18.18.1); `logout`/`get_logout_accounts` (18.7.0); `live_connect` voice (18.14.0);
+> `omp --restore` crash recovery (18.10.3); `omp usage reset`/`accounts` (18.8.x/18.9.0); `omp session pack/unpack/lease`,
+> `omp auth export/import` (18.10.0/18.14.1); `omp anonymize` (18.8.8); `mode_changed`/`ctx.sessionModes` (18.13.2);
+> `manual_compaction_start`/`_end` (18.13.3) — emitted on the RPC stdout event lane (not the extension union), so
+> adopting them means `set_event_filter` + broker relay; the compaction UI's inferred lifecycle works without them.
+>
+> **Watch items:** deferred extension startup (18.12.6) is an *interactive*-startup path — RPC launches still load
+> every extension (the bundled server boots on 18.20.x) but keep an eye on it; tool approvals reach RPC hosts as
+> `select` fallbacks and are answerable, but `tool_approval_requested/resolved` events + `ui.approve` grants (18.11.3,
+> 18.12.3) are what a real approval UI (B4's argument diffing) would build on; `omp login` now confirms
+> `login-warning` providers (18.18.7) and Antigravity is paused outright (18.20.1) — the GUI's subprocess login for
+> such providers stalls on a question it cannot answer (5-min cap) and fails honestly with the terminal fallback;
+> 18.20.0's secrets overhaul keeps old `$$…$$` placeholders literal in old sessions and a non-compiling regex rule
+> **stops startup** (a dead workspace at spawn — `/api/health` covers it); HTML exports (18.14.0) load
+> integrity-pinned shared assets over the network, so the open-export path needs connectivity for full styling;
+> `/fork` now aborts an active response (18.20.1) — the fork waiter's `session_branch` confirmation is unaffected,
+> but a fork clicked mid-turn kills the turn (previously it waited).
+
 
 ## A. Quick wins — server surface already exists, frontend-only work
 

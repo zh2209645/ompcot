@@ -470,7 +470,15 @@ export class WebSocketClient extends EventTarget {
           this.sentCommands.delete(replyId);
           if (message.command != null && message.command !== sentType) return;
         }
-        this.dispatchEvent(new CustomEvent("commandResponse", { detail: message }));
+        // Keep the broker's routing metadata on the detail (like `rpcEvent`
+        // does): a relayed omp `response` frame — e.g. a refused
+        // `switch_session` — may belong to another process's port, and the
+        // consumer scopes on it.
+        this.dispatchEvent(
+          new CustomEvent("commandResponse", {
+            detail: route ? { ...message, __broker: route } : message,
+          }),
+        );
         break;
       }
       case "session_switch":

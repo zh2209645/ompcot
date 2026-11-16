@@ -96,6 +96,48 @@ describe("SessionSwitchGate", () => {
     expect(gate.accepts(SESSION_A)).toBe(true);
   });
 
+  test("a runtime refusal ends the wait early and carries its cause", async () => {
+    // The broker relays omp's `response` to the fire-and-forget
+    // `switch_session`: omp ≥18.6.3 refuses a switch whose target's saved
+    // model cannot be restored (`Could not restore model <provider/id>`) — a
+    // definitive answer, so the wait must stop and report why.
+    const { gate, calls } = makeGate();
+    gate.expect(SESSION_B);
+    const confirmed = await gate.waitForConfirmation(SESSION_B, {
+      sendRequest: async () => {
+        calls.send++;
+        gate.noteFailure("Could not restore model openai/gpt-5");
+      },
+    });
+    expect(confirmed).toBe(false);
+    expect(calls.send).toBe(1);
+    expect(gate.takeFailure()).toBe("Could not restore model openai/gpt-5");
+    // takeFailure consumes the cause — one refusal is reported once.
+    expect(gate.takeFailure()).toBeNull();
+    // The refusal released the gate: later snapshots apply again.
+    expect(gate.accepts(SESSION_A)).toBe(true);
+  });
+
+  test("a refusal's cause survives cancel() but never leaks into the next switch", () => {
+    const { gate } = makeGate();
+    gate.expect(SESSION_B);
+    gate.noteFailure("Could not restore model openai/gpt-5");
+    // cancel() is also the timeout path and the New Chat reset — it must not
+    // swallow the cause before the caller reported it.
+    gate.cancel();
+    expect(gate.takeFailure()).toBe("Could not restore model openai/gpt-5");
+    gate.noteFailure("stale cause");
+    gate.expect(SESSION_B);
+    expect(gate.takeFailure()).toBeNull();
+  });
+
+  test("a bare refusal records a non-empty cause", () => {
+    const { gate } = makeGate();
+    gate.expect(SESSION_B);
+    gate.noteFailure("");
+    expect(gate.takeFailure()).toBe(true);
+  });
+
   test("a superseded selection ends the previous wait without confirmation", async () => {
     const { gate } = makeGate();
     gate.expect(SESSION_B);

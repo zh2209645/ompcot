@@ -220,6 +220,9 @@ describe("forwarded event contract", () => {
       "tool_execution_end",
       "session_branch",
       "credential_disabled",
+      // `/clear`'s context reset (omp 18.20.1) — the frontend repaints the
+      // cleared branch off this frame.
+      "session_clear",
     ]) {
       expect(FORWARDED_EVENT_TYPES).toContain(type);
     }

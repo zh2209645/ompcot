@@ -848,8 +848,13 @@ export const FORWARDED_EVENT_TYPES = [
   // fixed these sign-outs going unannounced in 18.3.1; in the GUI they were
   // still silent — the session keeps running on a fallback model, or fails with
   // no explanation of why. The payload is small and JSON-safe
-  // (`{provider, disabledCause, credentialId?, email?, accountId?, orgId?}`).
+  // `{provider, disabledCause, credentialId?, email?, accountId?, orgId?}`).
   "credential_disabled",
+  // `/clear` reset the session's context without changing its session id (omp
+  // 18.20.1). The frontend repaints the cleared branch and drops the totals —
+  // the snapshot-pairing rule would otherwise *keep* the stale transcript for
+  // the session the DOM already shows.
+  "session_clear",
 ] as const;
 
 /**
@@ -956,6 +961,120 @@ export function newDisplayableNotices(
     });
   }
   return notices;
+}
+
+/** One todo task as the GUI renders it (the wire `TodoItem`, minus legacy fields). */
+export type TodoTaskSnapshot = {
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "abandoned";
+  details?: string;
+  notes?: string[];
+};
+
+/** One named todo phase (the wire `TodoPhase`). */
+export type TodoPhaseSnapshot = {
+  name: string;
+  tasks: TodoTaskSnapshot[];
+};
+
+const TODO_SNAPSHOT_STATUSES = ["pending", "in_progress", "completed", "abandoned"];
+
+function sanitizeTodoTask(value: unknown): TodoTaskSnapshot | null {
+  if (!value || typeof value !== "object") return null;
+  const task = value as { content?: unknown; status?: unknown; details?: unknown; notes?: unknown };
+  if (typeof task.content !== "string") return null;
+  // Statuses outside the wire enum map to `pending` — what omp 18.19.0 did
+  // with the removed `blocked` state when it restored old sessions.
+  const status = TODO_SNAPSHOT_STATUSES.includes(task.status as string)
+    ? (task.status as TodoTaskSnapshot["status"])
+    : "pending";
+  const clean: TodoTaskSnapshot = { content: task.content, status };
+  if (typeof task.details === "string") clean.details = task.details;
+  if (Array.isArray(task.notes)) {
+    clean.notes = task.notes.filter((note): note is string => typeof note === "string");
+  }
+  return clean;
+}
+
+function sanitizeTodoPhases(value: unknown): TodoPhaseSnapshot[] | null {
+  if (!Array.isArray(value)) return null;
+  const phases: TodoPhaseSnapshot[] = [];
+  for (const phase of value) {
+    if (!phase || typeof phase !== "object") return null;
+    const record = phase as { name?: unknown; tasks?: unknown };
+    if (typeof record.name !== "string" || !Array.isArray(record.tasks)) return null;
+    const tasks: TodoTaskSnapshot[] = [];
+    for (const task of record.tasks) {
+      const clean = sanitizeTodoTask(task);
+      if (!clean) return null;
+      tasks.push(clean);
+    }
+    phases.push({ name: record.name, tasks });
+  }
+  // An empty array is a real snapshot ("no todos"); null means "not a todo
+  // snapshot at all" and keeps the scan walking to earlier entries.
+  return phases;
+}
+
+/**
+ * The session's current todo list (wire `TodoPhase[]`), or null when the
+ * entries carry no todo snapshot at all.
+ *
+ * Where snapshots live (verified against omp 18.20.0 session files): the
+ * `todo` tool's own result message — `type:"message"`,
+ * `message.role:"toolResult"`, `message.toolName:"todo"`,
+ * `message.details.phases` — one snapshot per state-changing op
+ * (`init`/`start`/`done`/`rm`/`drop`/`append`), and `user_todo_edit` custom
+ * entries (`data.phases`) when the list is edited through the TUI's todo HUD.
+ * The newest of the two wins; entries come branch-ordered from `getEntries()`.
+ *
+ * This mirrors the host's `getLatestTodoPhasesFromEntries` (`tools/todo`) for
+ * the "which snapshot is current" question — the host helper's extra
+ * fingerprint bookkeeping drives the TUI HUD's visibility, not currency — and
+ * it is shape-checked field by field because `task` tool details also carry
+ * `phases`/`tasks` keys in a different shape (subagent steps), which a loose
+ * read would render as todos. Exported for tests.
+ */
+export function latestTodoPhasesFromEntries(entries: unknown): TodoPhaseSnapshot[] | null {
+  if (!Array.isArray(entries)) return null;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as {
+      type?: unknown;
+      customType?: unknown;
+      data?: unknown;
+      message?: unknown;
+    };
+    const message =
+      record.message && typeof record.message === "object"
+        ? (record.message as { role?: unknown; toolName?: unknown; details?: unknown })
+        : null;
+    if (
+      record.type === "message" &&
+      message?.role === "toolResult" &&
+      message.toolName === "todo"
+    ) {
+      const details =
+        message.details && typeof message.details === "object"
+          ? (message.details as { phases?: unknown })
+          : null;
+      const phases = sanitizeTodoPhases(details?.phases);
+      if (phases) return phases;
+    }
+    if (
+      (record.type === "custom" || record.type === "custom_message") &&
+      record.customType === "user_todo_edit"
+    ) {
+      const data =
+        record.data && typeof record.data === "object"
+          ? (record.data as { phases?: unknown })
+          : null;
+      const phases = sanitizeTodoPhases(data?.phases);
+      if (phases) return phases;
+    }
+  }
+  return null;
 }
 
 /** Callback options `ExtensionContext.compact` accepts in place of focus text. */
@@ -3315,6 +3434,19 @@ export default function (omp: ExtensionAPI) {
     timeout?: unknown;
     onTimeout?: () => void;
     signal?: AbortSignal;
+    // Display hints callers pass alongside the dialog itself. The ask tool's
+    // RPC fallback drives a checkbox flow through repeated `select` calls
+    // (omp ≥18.20.0: `selectionMarker` / `checkedIndices` / `markableCount`
+    // keep the host's toggle state visible), and `ctx.ui.input` gained
+    // `secret: true` masking in 18.13.2. Before these were forwarded the
+    // frames lost the state and the GUI rendered every ask checkbox round as
+    // a plain single-choice list.
+    initialIndex?: unknown;
+    selectionMarker?: unknown;
+    checkedIndices?: unknown;
+    markableCount?: unknown;
+    helpText?: unknown;
+    secret?: unknown;
   };
 
   function uiSelectOptionLabel(option: unknown): string {
@@ -3395,6 +3527,33 @@ export default function (omp: ExtensionAPI) {
     });
   }
 
+  /** Forward one dialog-option display hint only when its shape is right. */
+  function selectDisplayHints(
+    dialogOptions: UiDialogOptionsLike | undefined,
+  ): Record<string, unknown> {
+    const hints: Record<string, unknown> = {};
+    const d = dialogOptions;
+    if (typeof d?.initialIndex === "number" && Number.isInteger(d.initialIndex)) {
+      hints.initialIndex = d.initialIndex;
+    }
+    if (d?.selectionMarker === "checkbox" || d?.selectionMarker === "radio") {
+      hints.selectionMarker = d.selectionMarker;
+    }
+    if (Array.isArray(d?.checkedIndices)) {
+      const indices = d.checkedIndices.filter(
+        (n: unknown) => typeof n === "number" && Number.isInteger(n) && n >= 0,
+      );
+      if (indices.length > 0) hints.checkedIndices = indices;
+    }
+    if (typeof d?.markableCount === "number" && Number.isInteger(d.markableCount)) {
+      hints.markableCount = d.markableCount;
+    }
+    if (typeof d?.helpText === "string" && d.helpText) {
+      hints.helpText = d.helpText;
+    }
+    return hints;
+  }
+
   function installUiBridge(ctx: ExtensionContext) {
     const ui = (ctx as { ui?: unknown }).ui;
     if (!ui || typeof ui !== "object") return;
@@ -3439,6 +3598,7 @@ export default function (omp: ExtensionAPI) {
             title: String(title ?? ""),
             options: labels,
             ...(optionDetails ? { optionDetails } : {}),
+            ...selectDisplayHints(dialogOptions),
           },
           options: dialogOptions,
         };
@@ -3459,6 +3619,10 @@ export default function (omp: ExtensionAPI) {
         frame: {
           title: String(title ?? ""),
           ...(typeof placeholder === "string" && placeholder ? { placeholder } : {}),
+          // `ctx.ui.input(..., { secret: true })` (omp 18.13.2): the host must
+          // mask what is typed. Forwarded as a boolean hint; the frontend
+          // renders the field as a password input.
+          ...(dialogOptions?.secret === true ? { secret: true } : {}),
         },
         options: dialogOptions,
       }),
@@ -4472,6 +4636,34 @@ export default function (omp: ExtensionAPI) {
           }
           const entries = ctx.sessionManager.getEntries();
           sendTo(ws, success("get_messages", { entries }));
+          break;
+        }
+
+        // Current todo list of a session (wire `TodoPhase[]`). With a
+        // `sessionPath` the answer is that file's snapshot — the GUI asks for
+        // the file the transcript shows, so peeked and historical sessions
+        // report their own lists; without one it is the live session's
+        // entries. Both scan through `latestTodoPhasesFromEntries`; a session
+        // that never carried todos answers an empty list.
+        case "get_todos": {
+          try {
+            const sessionPath = typeof command.sessionPath === "string" ? command.sessionPath : "";
+            const liveFile = ctx?.sessionManager.getSessionFile() || "";
+            let entries: unknown;
+            if (sessionPath && path.resolve(sessionPath) !== path.resolve(liveFile)) {
+              const transcript = await readAgentTranscript(sessionPath);
+              entries = transcript.entries;
+            } else if (ctx) {
+              entries = ctx.sessionManager.getEntries();
+            } else {
+              sendTo(ws, error("get_todos", "No context available"));
+              break;
+            }
+            const phases = latestTodoPhasesFromEntries(entries) ?? [];
+            sendTo(ws, success("get_todos", { phases }));
+          } catch (e: unknown) {
+            sendTo(ws, error("get_todos", errMessage(e)));
+          }
           break;
         }
 

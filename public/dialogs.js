@@ -15,7 +15,17 @@ export class DialogHandler {
   showSelect(request) {
     this.clearCurrentDialog();
 
-    const { id, title, options, timeout } = request;
+    const {
+      id,
+      title,
+      options,
+      timeout,
+      optionDetails,
+      selectionMarker,
+      checkedIndices,
+      markableCount,
+      initialIndex,
+    } = request;
 
     const dialog = document.createElement("div");
     dialog.className = "dialog";
@@ -28,13 +38,62 @@ export class DialogHandler {
     `;
 
     const optionsContainer = dialog.querySelector("#dialog-options");
+    const list = Array.isArray(options) ? options : [];
 
-    (options || []).forEach((option) => {
+    // Marker state (omp ≥18.20.0): the ask tool's RPC fallback drives a
+    // checkbox flow through repeated `select` calls — clicking a toggleable
+    // option answers its label and the host re-issues the dialog with the
+    // new checked set, until an action label (everything past
+    // `markableCount`) ends the round. The dialog must therefore show the
+    // host's current checked set and separate toggles from actions; a plain
+    // select (no marker) renders exactly as before.
+    const marker =
+      selectionMarker === "checkbox" || selectionMarker === "radio" ? selectionMarker : null;
+    const markableEnd = marker
+      ? Math.max(
+          0,
+          Math.min(Number.isInteger(markableCount) ? markableCount : list.length, list.length),
+        )
+      : 0;
+    const checked = new Set(
+      (Array.isArray(checkedIndices) ? checkedIndices : []).filter(
+        (n) => Number.isInteger(n) && n >= 0 && n < list.length,
+      ),
+    );
+
+    list.forEach((option, index) => {
       const optionDiv = document.createElement("div");
       optionDiv.className = "dialog-option";
-      optionDiv.textContent = option;
+      if (Number.isInteger(initialIndex) && index === initialIndex) {
+        optionDiv.dataset.initialOption = "1";
+      }
+      const label = String(option ?? "");
+      if (marker && index < markableEnd) {
+        optionDiv.classList.add("dialog-option-markable");
+        const markerEl = document.createElement("span");
+        markerEl.className = "dialog-option-marker";
+        markerEl.setAttribute("aria-hidden", "true");
+        markerEl.textContent =
+          marker === "checkbox" ? (checked.has(index) ? "☑" : "☐") : checked.has(index) ? "●" : "○";
+        optionDiv.appendChild(markerEl);
+        const labelEl = document.createElement("span");
+        labelEl.className = "dialog-option-label";
+        labelEl.textContent = label;
+        optionDiv.appendChild(labelEl);
+        optionDiv.setAttribute("aria-label", label);
+        optionDiv.setAttribute("aria-pressed", checked.has(index) ? "true" : "false");
+      } else {
+        optionDiv.textContent = label;
+      }
+      const detail = Array.isArray(optionDetails) ? optionDetails[index]?.description : undefined;
+      if (detail) {
+        const descriptionEl = document.createElement("div");
+        descriptionEl.className = "dialog-option-description";
+        descriptionEl.textContent = String(detail);
+        optionDiv.appendChild(descriptionEl);
+      }
       optionDiv.onclick = () => {
-        this.respond(id, { value: option });
+        this.respond(id, { value: label });
       };
       optionsContainer.appendChild(optionDiv);
     });
@@ -95,7 +154,10 @@ export class DialogHandler {
     `;
 
     const input = document.createElement("input");
-    input.type = "text";
+    // `secret: true` (omp 18.13.2's `ctx.ui.input` hint, forwarded by the
+    // extension bridge): the dialog is asking for a token/password, so what
+    // is typed must not be readable on screen.
+    input.type = request.secret === true ? "password" : "text";
     input.className = "dialog-input";
     input.id = "dialog-input";
     input.placeholder =

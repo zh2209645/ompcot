@@ -65,6 +65,63 @@ describe("extension UI request dialogs", () => {
     expect(dialog(ctx)).toBeNull();
   });
 
+  test("select marker state: checked toggles render host state, actions stay plain", async () => {
+    // omp ≥18.20.0: the ask tool's checkbox fallback issues one `select` per
+    // toggle — the frame carries the host's checked set (`checkedIndices`)
+    // and how many leading options are toggleable (`markableCount`); the
+    // trailing labels are the actions that end the round. Clicking a toggle
+    // still answers its label and the host re-issues with the new state.
+    const ctx = createManager();
+    ctx.manager.handle({
+      id: "u1",
+      method: "select",
+      title: "Pick",
+      options: ["A", "B", "Confirm", "Other"],
+      selectionMarker: "checkbox",
+      checkedIndices: [1],
+      markableCount: 2,
+    });
+
+    const rows = [...ctx.container.querySelectorAll(".dialog-option")];
+    expect(rows).toHaveLength(4);
+    expect(rows[0].querySelector(".dialog-option-marker").textContent).toBe("☐");
+    expect(rows[1].querySelector(".dialog-option-marker").textContent).toBe("☑");
+    expect(rows[0].getAttribute("aria-pressed")).toBe("false");
+    expect(rows[1].getAttribute("aria-pressed")).toBe("true");
+    expect(rows[1].getAttribute("aria-label")).toBe("B");
+    // Action rows (past markableCount) are plain labels — no marker, and the
+    // marker-free rows keep their simple textContent rendering.
+    expect(rows[2].querySelector(".dialog-option-marker")).toBeNull();
+    expect(rows[2].textContent).toBe("Confirm");
+
+    rows[0].click();
+    await tick();
+    expect(lastSent(ctx)).toEqual({ type: "ui_response", id: "u1", value: "A" });
+  });
+
+  test("select marker rows render option descriptions and honor initialIndex", async () => {
+    const ctx = createManager();
+    ctx.manager.handle({
+      id: "u1",
+      method: "select",
+      title: "Pick",
+      options: ["A", "B"],
+      selectionMarker: "radio",
+      checkedIndices: [],
+      markableCount: 2,
+      initialIndex: 1,
+      optionDetails: [{ description: "first" }, { description: "second" }],
+    });
+
+    const rows = [...ctx.container.querySelectorAll(".dialog-option")];
+    expect(rows[0].querySelector(".dialog-option-marker").textContent).toBe("○");
+    expect(rows[0].querySelector(".dialog-option-description").textContent).toBe("first");
+    expect(rows[1].dataset.initialOption).toBe("1");
+    expect(rows[0].dataset.initialOption).toBeUndefined();
+    // The precise label wins over the row's combined textContent.
+    expect(rows[1].getAttribute("aria-label")).toBe("B");
+  });
+
   test("select options are keyboard-activatable", async () => {
     const ctx = createManager();
     ctx.manager.handle({ id: "u1", method: "select", options: ["A"] });
@@ -107,6 +164,24 @@ describe("extension UI request dialogs", () => {
     ctx.container.querySelector("#dialog-submit").click();
     await tick();
     expect(lastSent(ctx)).toEqual({ type: "ui_cancel", id: "i2" });
+  });
+
+  test("input: a secret request renders a password field", () => {
+    // `ctx.ui.input(..., { secret: true })` (omp 18.13.2) — what is typed
+    // must not be readable on screen.
+    const ctx = createManager();
+    ctx.manager.handle({
+      id: "u1",
+      method: "input",
+      title: "Token",
+      placeholder: "sk-…",
+      secret: true,
+    });
+    expect(ctx.container.querySelector(".dialog-input").type).toBe("password");
+
+    const plain = createManager();
+    plain.manager.handle({ id: "u2", method: "input", title: "Name", placeholder: "x" });
+    expect(plain.container.querySelector(".dialog-input").type).toBe("text");
   });
 
   test("cancel button and Esc send ui_cancel", async () => {
