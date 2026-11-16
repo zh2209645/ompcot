@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "ompcot"
-version = "0.8.33"
+version = "0.8.34"
 dependencies = [
  "dirs 5.0.1",
  "fix-path-env",
