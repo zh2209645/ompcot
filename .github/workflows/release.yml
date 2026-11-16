@@ -45,9 +45,11 @@ jobs:
             updater_platform: darwin-aarch64
           # macOS Intel (x64) build. The macos-13 Intel runner was retired by
           # GitHub, so we cross-compile x86_64 from an Apple Silicon runner
-          # (macos-14 was retired 2026-11-02 the same way; macos-15 is the
-          # current arm64 image).
-          - os: macos-15
+          # (macos-14 was retired 2026-11-02 the same way, and the pinned
+          # macos-15 image started dying 2026-11-16 — jobs sat 15 min with
+          # zero steps and were cancelled while macos-latest stayed healthy,
+          # so both macOS legs build on macos-latest now).
+          - os: macos-latest
             rust_target: x86_64-apple-darwin
             updater_platform: darwin-x86_64
           # Linux bundling (deb/rpm/AppImage) is currently more stable on
