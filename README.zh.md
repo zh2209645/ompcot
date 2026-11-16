@@ -22,6 +22,8 @@ brew install omp   # macOS；其他平台见上游仓库
 
 安装方式与详情：[can1357/oh-my-pi](https://github.com/can1357/oh-my-pi)。如需指定特定二进制，可设置 `OMP_BIN` 环境变量。
 
+Linux 说明：AppImage 使用系统的 WebKit/GTK（`webkit2gtk-4.1`、gtk3、gstreamer）而非内置打包 —— 内置版本在 Mesa 26 系统上会白屏。`.deb`/`.rpm` 通过包元数据声明相同依赖。
+
 ### macOS 未签名提示
 
 Ompcot 目前发布的 macOS 版本未经 Apple 开发者 ID 签名/公证，系统可能弹出：

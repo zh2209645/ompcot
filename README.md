@@ -22,6 +22,8 @@ brew install omp   # macOS; see upstream for other platforms
 
 Install options and details: [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi). To point Ompcot at a specific binary, set the `OMP_BIN` environment variable.
 
+Linux note: the AppImage runs against your system's WebKit/GTK (`webkit2gtk-4.1`, gtk3, gstreamer) instead of bundling them — the bundled variant renders a blank window on Mesa 26 systems. The `.deb`/`.rpm` declare the same dependencies via their package metadata.
+
 ### macOS unsigned release notice
 
 Ompcot currently ships macOS builds without Apple Developer ID signing/notarization. Expected Gatekeeper behavior:

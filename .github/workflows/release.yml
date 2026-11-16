@@ -201,6 +201,40 @@ jobs:
           includeUpdaterJson: false
           updaterJsonPreferNsis: true
 
+      # linuxdeploy bundles the CI image's libwebkit2gtk-4.1 (Ubuntu 22.04)
+      # and friends into the AppImage. That bundled WebKit dies during EGL
+      # init on modern distros — "Could not create default EGL display:
+      # EGL_BAD_PARAMETER. Aborting..." — leaving a blank window (reproduced
+      # on CachyOS + KDE Wayland + Mesa 26; WebKit bug 297921 class). Repack
+      # the AppImage thin — system WebKit/GTK, matching what the deb/rpm
+      # declare as dependencies — then re-sign and replace tauri-action's
+      # uploads. The updater artifact is the raw .AppImage + .sig pair, so
+      # the replaced pair keeps the manifest valid; the fragment step below
+      # picks the re-signed .sig from the bundle dir. No client can fetch
+      # the asset mid-replacement: nothing references it until latest.json
+      # is published at the very end of the run.
+      - name: Slim AppImage (system WebKit) and re-sign
+        if: runner.os == 'Linux'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          appimages=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          if [ "${#appimages[@]}" -eq 0 ]; then
+            echo "::error::no AppImage under src-tauri/target/release/bundle/appimage"
+            exit 1
+          fi
+          for appimage in "${appimages[@]}"; do
+            bash scripts/slim-appimage.sh "$appimage" "$appimage"
+            rm -f "$appimage.sig"
+            bunx tauri signer sign "$appimage"
+            gh release upload "$GITHUB_REF_NAME" "$appimage" "$appimage.sig" --clobber
+          done
+
       # Uploads this job's platform entries as a *uniquely named* fragment
       # asset (latest.<platform>.json). Unique names cannot collide across
       # the 6 concurrent matrix jobs, so there is no shared-asset race here;
