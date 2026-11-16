@@ -67,6 +67,7 @@ import { findPortForSession, getWorkspacePathForPort } from "./session-routing.j
 import { SessionSidebar } from "./session-sidebar.js";
 import { planSessionHosting, SESSION_HOSTING, SessionSwitchGate } from "./session-switch.js";
 import { createConfigSubnav } from "./settings-config-subnav.js";
+import { initSettingsDropdowns } from "./settings-dropdown.js";
 import {
   clearSettingsSaveMessage,
   setSettingsSaveButtonSaving,
@@ -6374,6 +6375,10 @@ setupFontSettings({
   valueEl: document.getElementById("font-size-value"),
   resetEl: document.getElementById("font-size-reset"),
 });
+
+// Settings-page selects get themed dropdown menus (webkit2gtk's native
+// popup cannot be themed); call after the selects exist in the DOM.
+initSettingsDropdowns();
 
 // setLanguage() has already refreshed the data-i18n markup; re-render the
 // JS-owned dynamic labels that static attributes cannot reach. Everything

@@ -2364,13 +2364,25 @@ body {
 }
 
 .pkg-browse-sort {
-  padding: 6px 10px;
+  min-height: 26px;
+  padding: 4px 26px 4px 10px;
   font-size: calc(11px * var(--font-scale));
+  color: var(--text-primary);
   background: var(--bg-glass);
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   cursor: pointer;
   outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.pkg-browse-sort option {
+  color: var(--text-primary);
+  background: var(--bg-solid);
 }
 
 .pkg-browse-sort:hover {
@@ -2770,15 +2782,72 @@ body {
 /* Interface language dropdown (Settings → General → Language). Mirrors the
    pkg-browse-sort control so it reads as a native settings form control. */
 .settings-select {
-  height: 26px;
-  padding: 5px 10px;
+  min-height: 26px;
+  padding: 3px 26px 3px 10px;
   font-size: calc(12px * var(--font-scale));
   color: var(--text-primary);
   background: var(--bg-glass);
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   cursor: pointer;
   outline: none;
+  /* webkit2gtk paints native select labels invisibly here (bg-glass or
+     not), so the control is drawn by the CSS text pipeline instead. */
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+/* The open popup is also painted natively in webkit2gtk; give its rows an
+   explicit palette so the option text is legible in every theme. */
+.settings-select option {
+  color: var(--text-primary);
+  background: var(--bg-solid);
+}
+
+/* The open popup is also painted natively in webkit2gtk and cannot be
+   themed there (option CSS, ::picker(select) and color-scheme are all
+   ignored), so settings-dropdown.js draws the open menu as this DOM list. */
+.settings-dropdown-menu {
+  position: fixed;
+  z-index: 2000;
+  min-width: 180px;
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg-solid);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-md);
+  padding: 4px;
+  box-shadow: var(--shadow-lg);
+}
+
+.settings-dropdown-option {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  font-size: calc(12px * var(--font-scale));
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-dropdown-option:hover,
+.settings-dropdown-option.cursor {
+  background: var(--bg-glass-hover);
+}
+
+.settings-dropdown-option.active {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+
+.settings-dropdown-option.disabled {
+  color: var(--text-dim);
+  cursor: default;
 }
 
 .settings-select:hover {
