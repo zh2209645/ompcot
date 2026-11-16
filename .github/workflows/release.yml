@@ -48,8 +48,8 @@ jobs:
           - os: macos-14
             rust_target: x86_64-apple-darwin
             updater_platform: darwin-x86_64
-          # Linux deb/rpm bundling is currently more stable on 22.04 than
-          # 24.04 for GTK/WebKit bundles in CI.
+          # Linux bundling (deb/rpm/AppImage) is currently more stable on
+          # 22.04 than 24.04 for GTK/WebKit bundles in CI.
           - os: ubuntu-22.04
             updater_platform: linux-x86_64
           - os: ubuntu-24.04-arm
@@ -127,7 +127,7 @@ jobs:
       - name: Build pi extensions bundle
         run: bun run build:extensions
 
-      - name: Build Tauri app (Linux deb + rpm) and publish assets
+      - name: Build Tauri app (Linux deb + rpm + AppImage) and publish assets
         if: runner.os == 'Linux'
         uses: tauri-apps/tauri-action@v0
         env:
@@ -150,7 +150,7 @@ jobs:
             Download the installer for your platform from the assets below.
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          args: --bundles deb,rpm
+          args: --bundles deb,rpm,appimage
           # v0.7.2 incident follow-up: tauri-action's updater-JSON publisher
           # (includeUpdaterJson, which defaults to TRUE in v0) downloads the
           # existing latest.json, merges its own platforms in, DELETEs the
@@ -239,10 +239,18 @@ jobs:
           # the bundler writes no .sig next to it, so the recursive *.sig
           # discovery below naturally targets the .app.tar.gz + .sig pair),
           # deb beats rpm for the plain linux-<arch> key.
+          #
+          # AppImage deliberately ranks *below* deb for that plain key:
+          # tauri-plugin-updater probes `{os}-{arch}-{installer}` before
+          # `{os}-{arch}` (updater.rs `target fallbacks`), so an AppImage
+          # install reads `linux-<arch>-appimage` and never the plain key,
+          # while every existing deb/rpm install keeps its fallback — which
+          # must stay a .deb, not an .AppImage.tar.gz.
           sig_priority() {
             case "$1" in
               *.exe.sig | *.app.tar.gz.sig) echo 3 ;;
               *.deb.sig) echo 2 ;;
+              *.AppImage.tar.gz.sig | *.AppImage.sig) echo 1 ;;
               *) echo 1 ;;
             esac
           }
@@ -250,6 +258,7 @@ jobs:
           bundle_of() {
             case "$1" in
               *.app.tar.gz.sig) echo "app" ;;
+              *.AppImage.tar.gz.sig | *.AppImage.sig) echo "appimage" ;;
               *.exe.sig) echo "nsis" ;;
               *.msi.sig) echo "msi" ;;
               *.deb.sig) echo "deb" ;;

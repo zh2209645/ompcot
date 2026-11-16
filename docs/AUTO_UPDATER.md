@@ -6,7 +6,7 @@ How Ompcot updates reach installed clients, how releases are cut, and the runboo
 
 - Tauri v2 updater plugin; endpoint: `https://github.com/zh2209645/ompcot/releases/latest/download/latest.json`
 - Artifacts are minisign-signed; the signing key lives in the `TAURI_SIGNING_PRIVATE_KEY` (+ password) CI secrets — see the one-time setup in the repo's release workflow
-- Platform keys in `latest.json`: `darwin-aarch64`(+`-app`), `darwin-x86_64`(+`-app`), `linux-x86_64`(`-deb`/`-rpm`), `linux-aarch64`(`-deb`/`-rpm`), `windows-x86_64`(`-nsis`/`-msi`), `windows-aarch64`(`-nsis`/`-msi`) — 16 entries total
+- Platform keys in `latest.json`: `darwin-aarch64`(+`-app`), `darwin-x86_64`(+`-app`), `linux-x86_64`(`-deb`/`-rpm`/`-appimage`), `linux-aarch64`(`-deb`/`-rpm`/`-appimage`), `windows-x86_64`(`-nsis`/`-msi`), `windows-aarch64`(`-nsis`/`-msi`) — 20 entries total. The plain `linux-<arch>` key serves **deb** (existing installs' fallback); AppImage installs never read it — tauri-plugin-updater probes `{os}-{arch}-{installer}` before `{os}-{arch}`, so they resolve `linux-<arch>-appimage` directly. The variant keys are generated per updater artifact (`bundle_of` in the workflow's fragment step)
 
 ## Release procedure
 
@@ -41,7 +41,7 @@ The manifest job is race-free by construction:
 When latest.json is missing/broken on the Latest release (symptom: clients' update checks fail or 404):
 
 1. Confirm assets: `gh api repos/zh2209645/ompcot/releases/tags/vX.Y.Z --jq '[.assets[].name]'` — updater pairs are `<artifact>` + `<artifact>.sig`
-2. Build the manifest locally: download all `.sig` files (`gh release download vX.Y.Z -R zh2209645/ompcot -p "*.sig" -D <tmp>`); each platform entry = `{signature: <base64 of the .sig file text>, url: https://github.com/zh2209645/ompcot/releases/download/vX.Y.Z/<artifact>}`. Role of each key follows the 16-entry table above (nsis = `*-setup.exe`, msi = `*.msi`; macOS = `Ompcot_aarch64|x64.app.tar.gz`)
+2. Build the manifest locally: download all `.sig` files (`gh release download vX.Y.Z -R zh2209645/ompcot -p "*.sig" -D <tmp>`); each platform entry = `{signature: <base64 of the .sig file text>, url: https://github.com/zh2209645/ompcot/releases/download/vX.Y.Z/<artifact>}`. Role of each key follows the 20-entry table above (nsis = `*-setup.exe`, msi = `*.msi`; macOS = `Ompcot_aarch64|x64.app.tar.gz`; AppImage = `Ompcot_<ver>_<arch>.AppImage.tar.gz` — the updater artifact, not the raw `.AppImage`, which gets no `.sig`)
 3. Upload **with the file named exactly `latest.json` on disk** (the `#rename` upload syntax only sets a label and creates a stray asset): `cp fixed.json latest.json && gh release upload vX.Y.Z -R zh2209645/ompcot latest.json --clobber`
 4. Delete leftover `latest.<platform>.json` fragments: fetch each asset id via the API and `gh api -X DELETE repos/.../releases/assets/<id>`
 5. Verify with a cache-buster against BOTH the direct asset URL and `releases/latest/download/latest.json`; expect a few minutes of CDN lag on the latter
